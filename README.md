@@ -41,6 +41,7 @@ The server accepts the following environment variables:
 | `FS_PUBLIC_URL` | `https://files.moulik.dev` | Base URL placed in API responses |
 | `FS_MAX_UPLOAD_BYTES` | `10737418240` | Server upload limit (10 GiB) |
 | `FS_MIN_FREE_BYTES` | `1073741824` | Free space reserved before accepting an upload (1 GiB) |
+| `FS_PORT` | `37641` | Loopback-only host port for local diagnostics |
 
 The token is sent as `Authorization: Bearer <token>`. Do not put it in URLs,
 commit it, or include it in logs.
@@ -64,9 +65,10 @@ docker compose down
 ```
 
 `docker compose down` preserves both bind-mounted runtime directories. The app
-publishes no host port; it joins Nginx Proxy Manager's external
-`nginx-proxy_default` network under the alias `file-hosting-server`, where NPM
-can reach it on port 3000.
+publishes container port 3000 only as loopback port 37641, leaving host port
+3000 free. It also joins Nginx Proxy Manager's external `nginx-proxy_default`
+network under the alias `file-hosting-server`, where NPM reaches the container
+directly on port 3000.
 
 ## Local development and tests
 

@@ -19,6 +19,8 @@ services:
       - ./runtime/sqlite:/data/sqlite
     expose:
       - "3000"
+    ports:
+      - "127.0.0.1:${FS_PORT:-37641}:3000"
     networks:
       npm:
         aliases:
