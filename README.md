@@ -119,6 +119,12 @@ executed. Other unsupported preview types are presented as downloads.
 
 ## CLI
 
+Install the CLI globally:
+
+```sh
+npm install --global @moulikbudhiraja/fs-cli
+```
+
 The primary forms are:
 
 ```text

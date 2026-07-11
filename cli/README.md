@@ -3,7 +3,15 @@
 `fs` is the human- and agent-friendly command-line client for the file hosting
 service. It requires Node.js 22 or newer.
 
-## Install for development
+## Install
+
+Install globally from npm:
+
+```sh
+npm install --global @moulikbudhiraja/fs-cli
+```
+
+Or link a development checkout:
 
 ```sh
 npm install

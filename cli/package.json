@@ -1,11 +1,26 @@
 {
-  "name": "@moulik/fs-cli",
+  "name": "@moulikbudhiraja/fs-cli",
   "version": "0.1.0",
-  "private": true,
   "description": "CLI for files.moulik.dev",
+  "author": "Moulik Budhiraja",
+  "keywords": [
+    "file-hosting",
+    "cli",
+    "upload",
+    "agents"
+  ],
+  "homepage": "https://github.com/Moulik-Budhiraja/File-Hosting#readme",
+  "bugs": {
+    "url": "https://github.com/Moulik-Budhiraja/File-Hosting/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Moulik-Budhiraja/File-Hosting.git",
+    "directory": "cli"
+  },
   "type": "module",
   "bin": {
-    "fs": "./dist/index.js"
+    "fs": "dist/index.js"
   },
   "files": [
     "dist"
@@ -15,8 +30,12 @@
   },
   "scripts": {
     "build": "tsc -p tsconfig.json",
+    "prepublishOnly": "npm run typecheck && npm test && npm run build",
     "test": "tsx --test test/*.test.ts",
     "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "publishConfig": {
+    "access": "public"
   },
   "dependencies": {
     "glob": "^13.0.6",
