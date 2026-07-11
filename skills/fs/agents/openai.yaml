@@ -1,0 +1,4 @@
+interface:
+  display_name: "fs File Hosting"
+  short_description: "Upload and manage files with the fs CLI"
+  default_prompt: "Use $fs to upload, find, download, or manage files with the fs CLI."

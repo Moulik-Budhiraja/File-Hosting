@@ -1,0 +1,30 @@
+{
+  "name": "@moulik/fs-cli",
+  "version": "0.1.0",
+  "private": true,
+  "description": "CLI for files.moulik.dev",
+  "type": "module",
+  "bin": {
+    "fs": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "tsx --test test/*.test.ts",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "glob": "^13.0.6",
+    "tar": "^7.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.30",
+    "tsx": "^4.20.3",
+    "typescript": "^5.8.3"
+  }
+}

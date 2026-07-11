@@ -1,0 +1,46 @@
+{
+  "name": "server",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "next build",
+    "check": "npm run lint && npm run typecheck && npm test",
+    "dev": "next dev --turbo",
+    "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,md,json}\" --cache",
+    "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,md,json}\" --cache",
+    "lint": "eslint .",
+    "lint:fix": "eslint . --fix",
+    "preview": "next build && next start",
+    "start": "node .next/standalone/server.js",
+    "test": "tsx --test src/server/files/*.test.ts",
+    "test:watch": "tsx --test --watch src/server/files/*.test.ts",
+    "typecheck": "tsc --noEmit"
+  },
+  "dependencies": {
+    "@libsql/client": "^0.14.0",
+    "mime-types": "^3.0.1",
+    "next": "^15.2.3",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0"
+  },
+  "devDependencies": {
+    "@eslint/eslintrc": "^3.3.1",
+    "@types/mime-types": "^2.1.4",
+    "@types/node": "^22.0.0",
+    "@types/react": "^19.0.0",
+    "@types/react-dom": "^19.0.0",
+    "eslint": "^9.23.0",
+    "eslint-config-next": "^15.2.3",
+    "prettier": "^3.5.3",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2",
+    "typescript-eslint": "^8.27.0"
+  },
+  "ct3aMetadata": {
+    "initVersion": "7.40.0"
+  },
+  "overrides": {
+    "postcss": "8.5.10"
+  }
+}

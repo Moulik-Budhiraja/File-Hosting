@@ -1,0 +1,48 @@
+name: file-hosting
+
+services:
+  server:
+    build:
+      context: ./server
+    restart: unless-stopped
+    stop_grace_period: 30s
+    init: true
+    environment:
+      FS_TOKEN: ${FS_TOKEN:?Set FS_TOKEN in .env before starting the service}
+      DATABASE_URL: ${DATABASE_URL:-file:/data/sqlite/files.db}
+      FS_STORAGE_DIR: ${FS_STORAGE_DIR:-/data/files}
+      FS_PUBLIC_URL: ${FS_PUBLIC_URL:-https://files.moulik.dev}
+      FS_MAX_UPLOAD_BYTES: ${FS_MAX_UPLOAD_BYTES:-10737418240}
+      FS_MIN_FREE_BYTES: ${FS_MIN_FREE_BYTES:-1073741824}
+    volumes:
+      - ./runtime/files:/data/files
+      - ./runtime/sqlite:/data/sqlite
+    expose:
+      - "3000"
+    networks:
+      npm:
+        aliases:
+          - file-hosting-server
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+    healthcheck:
+      test:
+        - CMD
+        - node
+        - -e
+        - >-
+          fetch('http://127.0.0.1:3000/healthz')
+          .then((response) => process.exit(response.ok ? 0 : 1))
+          .catch(() => process.exit(1))
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+
+networks:
+  npm:
+    external: true
+    name: nginx-proxy_default
