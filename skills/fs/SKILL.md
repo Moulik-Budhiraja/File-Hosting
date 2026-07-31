@@ -5,10 +5,15 @@ description: Use the fs command-line client for files.moulik.dev to upload files
 
 # Use the `fs` file-hosting CLI
 
-Use `fs` for human- or agent-driven file exchange. Expect `FS_URL` and
-`FS_TOKEN` to be configured in the environment. The default URL is
-`https://files.moulik.dev`. Never print, log, place in a URL, or expose
-`FS_TOKEN`.
+Use `fs` for human- or agent-driven file exchange. The default URL is
+`https://files.moulik.dev`. Prefer the token saved by `fs auth set`; use
+`FS_TOKEN` only as an explicit override for CI or ephemeral environments.
+Saved credentials are scoped to `FS_URL`. Never print, log, place in a URL, or
+expose either token source.
+
+If authentication is missing, direct a human to run `fs auth set` in an
+interactive terminal. Use `fs auth status` to check configuration without
+revealing the token, and `fs auth delete` only when removal is requested.
 
 Run `fs --help` or a command's `--help` for the installed version's exact
 syntax. Keep requested data on stdout; allow diagnostics on stderr.

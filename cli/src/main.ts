@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { ApiClient, type ListParams } from "./api.js";
 import { loadConfig } from "./config.js";
+import { createCredentialStore, readSecret, type CredentialStore } from "./credentials.js";
 import { asCliError, CliError, EXIT, type ExitCode } from "./errors.js";
 import { extractArchive } from "./extract.js";
 import { prepareInputs } from "./inputs.js";
@@ -15,7 +16,7 @@ import { chooseOutputMode, formatBytes, printInfo, printItems, type OutputMode }
 import type { FileMetadata, Streams } from "./types.js";
 
 const LARGE_UPLOAD = 1024 ** 3;
-const COMMANDS = new Set(["up", "down", "list", "find", "info", "tag", "visibility", "rm", "help"]);
+const COMMANDS = new Set(["up", "down", "list", "find", "info", "tag", "visibility", "rm", "auth", "help"]);
 const FILE_ID = /^[A-Za-z0-9]{7}$/;
 
 const commonOutputOptions = {
@@ -32,6 +33,8 @@ export interface RunDependencies {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   streams?: Streams;
+  credentials?: CredentialStore;
+  readSecret?: () => Promise<string>;
 }
 
 const ROOT_HELP = `Usage:
@@ -44,6 +47,7 @@ const ROOT_HELP = `Usage:
   fs tag <id> add|remove|set <tag...>
   fs visibility <id> public|private
   fs rm <id...> [--yes]             Delete files
+  fs auth set|status|delete         Manage the saved token
 
 Environment:
   FS_URL       Server URL (default: https://files.moulik.dev)
@@ -99,8 +103,40 @@ function writeError(streams: Streams, error: CliError, prefix = "fs"): void {
 
 function requireToken(token: string): void {
   if (!token) {
-    throw new CliError("FS_TOKEN is required", EXIT.auth, "MISSING_TOKEN");
+    throw new CliError("No token configured. Run 'fs auth set' or set FS_TOKEN.", EXIT.auth, "MISSING_TOKEN");
   }
+}
+
+async function authCommand(args: string[], dependencies: RunDependencies, streams: Streams): Promise<ExitCode> {
+  if (args.length === 1 && ["--help", "-h"].includes(args[0]!)) {
+    streams.stdout.write("Usage: fs auth set|status|delete\n");
+    return EXIT.success;
+  }
+  const [action, ...extra] = args;
+  if (extra.length || !action || !["set", "status", "delete"].includes(action)) {
+    throw new CliError("Usage: fs auth set|status|delete", EXIT.usage, "INVALID_ARGUMENTS");
+  }
+  if (!dependencies.credentials) {
+    throw new CliError("Secure credential storage is unavailable", EXIT.auth, "CREDENTIAL_STORE_UNAVAILABLE");
+  }
+  if (action === "status") {
+    const configured = Boolean(dependencies.credentials.getPassword());
+    streams.stdout.write(`Authentication: ${configured ? "configured" : "not configured"}\n`);
+    return configured ? EXIT.success : EXIT.auth;
+  }
+  if (action === "delete") {
+    dependencies.credentials.deletePassword();
+    streams.stderr.write("Saved token deleted from the operating system credential store.\n");
+    return EXIT.success;
+  }
+  if (!dependencies.readSecret) {
+    throw new CliError("Secure credential storage is unavailable", EXIT.auth, "CREDENTIAL_STORE_UNAVAILABLE");
+  }
+  const token = (await dependencies.readSecret()).trim();
+  if (!token) throw new CliError("Token cannot be empty", EXIT.usage, "EMPTY_TOKEN");
+  dependencies.credentials.setPassword(token);
+  streams.stderr.write("Token saved in the operating system credential store.\n");
+  return EXIT.success;
 }
 
 function validateIds(ids: string[]): void {
@@ -576,7 +612,7 @@ async function dispatch(argv: string[], dependencies: RunDependencies): Promise<
     return EXIT.success;
   }
   if (argv[0] === "--version" || argv[0] === "-V") {
-    streams.stdout.write("0.1.0\n");
+    streams.stdout.write("0.2.0\n");
     return EXIT.success;
   }
 
@@ -584,6 +620,32 @@ async function dispatch(argv: string[], dependencies: RunDependencies): Promise<
   const command = explicit ? argv[0]! : "up";
   const args = explicit ? argv.slice(1) : argv;
   const config = loadConfig(dependencies.env);
+  const needsToken = !args.includes("--help") && !args.includes("-h");
+  const validAuthAction = command === "auth"
+    && args.length === 1
+    && ["set", "status", "delete"].includes(args[0]!);
+  if (command === "auth" && !validAuthAction) {
+    return authCommand(args, dependencies, streams);
+  }
+  let credentials = dependencies.credentials;
+  if (!credentials && validAuthAction) {
+    credentials = await createCredentialStore(config.baseUrl);
+  } else if (!config.token && needsToken) {
+    try {
+      credentials ??= await createCredentialStore(config.baseUrl);
+      config.token = credentials.getPassword() ?? "";
+    } catch {
+      // Native keyrings may be unavailable in headless sessions. Preserve the
+      // environment-variable fallback and report the standard missing-token guidance.
+      credentials = undefined;
+    }
+  }
+  const runtimeDependencies: RunDependencies = {
+    ...dependencies,
+    credentials,
+    readSecret: dependencies.readSecret ?? (() => readSecret(streams)),
+  };
+  if (command === "auth") return authCommand(args, runtimeDependencies, streams);
   if (!args.includes("--help") && !args.includes("-h")) requireToken(config.token);
   const api = new ApiClient(config, dependencies.fetch);
   switch (command) {

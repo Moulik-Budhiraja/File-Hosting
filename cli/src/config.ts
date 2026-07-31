@@ -16,6 +16,12 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
   if (url.protocol !== "http:" && url.protocol !== "https:") {
     throw new CliError("FS_URL must use http or https", EXIT.usage, "INVALID_URL");
   }
+  if (url.username || url.password) {
+    throw new CliError("FS_URL must not contain embedded credentials", EXIT.usage, "INVALID_URL");
+  }
+  if (url.search || url.hash) {
+    throw new CliError("FS_URL must not contain a query string or fragment", EXIT.usage, "INVALID_URL");
+  }
   return {
     baseUrl: url.toString().replace(/\/$/, ""),
     token: env.FS_TOKEN?.trim() || "",

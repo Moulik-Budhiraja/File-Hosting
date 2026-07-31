@@ -196,7 +196,12 @@ after(async () => {
 
 beforeEach(() => service.reset());
 
-async function cli(args: string[], input: string | Buffer = "", env: NodeJS.ProcessEnv = {}): Promise<{
+async function cli(
+  args: string[],
+  input: string | Buffer = "",
+  env: NodeJS.ProcessEnv = {},
+  dependencies: Record<string, unknown> = {},
+): Promise<{
   code: number;
   stdout: Capture;
   stderr: Capture;
@@ -208,6 +213,7 @@ async function cli(args: string[], input: string | Buffer = "", env: NodeJS.Proc
   const code = await run(args, {
     env: { FS_URL: service.url, FS_TOKEN: "secret", ...env },
     streams,
+    ...dependencies,
   });
   return { code, stdout, stderr };
 }
@@ -217,6 +223,126 @@ test("subcommand help works without credentials", async () => {
   assert.equal(result.code, 0);
   assert.match(result.stdout.text, /Usage: fs \[up\]/);
   assert.equal(service.requests.length, 0);
+});
+
+test("auth help works without loading credentials", async () => {
+  let reads = 0;
+  const result = await cli(["auth", "--help"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): null { reads += 1; return null; },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout.text, /fs auth set/);
+  assert.equal(reads, 0);
+});
+
+test("invalid auth actions return usage before touching credentials", async () => {
+  let reads = 0;
+  const result = await cli(["auth", "bogus"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): null { reads += 1; return null; },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 2);
+  assert.match(result.stderr.text, /Usage: fs auth/);
+  assert.equal(reads, 0);
+});
+
+test("uses a stored credential when FS_TOKEN is unset", async () => {
+  let reads = 0;
+  const result = await cli(["list"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): string {
+        reads += 1;
+        return "secret";
+      },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(reads, 1);
+  assert.equal(service.requests[0]?.authorization, "Bearer secret");
+});
+
+test("FS_TOKEN overrides the stored credential without reading it", async () => {
+  let reads = 0;
+  const result = await cli(["list"], "", {}, {
+    credentials: {
+      getPassword(): string {
+        reads += 1;
+        return "wrong";
+      },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(reads, 0);
+  assert.equal(service.requests[0]?.authorization, "Bearer secret");
+});
+
+test("falls back to the missing-token guidance when the credential store is unavailable", async () => {
+  const result = await cli(["list"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): string { throw new Error("credential backend unavailable"); },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 3);
+  assert.match(result.stderr.text, /auth set|FS_TOKEN/);
+  assert.doesNotMatch(result.stderr.text, /credential backend unavailable/);
+  assert.equal(service.requests.length, 0);
+});
+
+test("auth set securely prompts and saves without printing the token", async () => {
+  let saved = "";
+  const result = await cli(["auth", "set"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): null { return null; },
+      setPassword(password: string): void { saved = password; },
+      deletePassword(): void {},
+    },
+    readSecret: async (): Promise<string> => "new-secret-token",
+  });
+  assert.equal(result.code, 0);
+  assert.equal(saved, "new-secret-token");
+  assert.match(result.stderr.text, /saved/i);
+  assert.doesNotMatch(result.stdout.text + result.stderr.text, /new-secret-token/);
+  assert.equal(service.requests.length, 0);
+});
+
+test("auth status reports whether a token is saved without revealing it", async () => {
+  const result = await cli(["auth", "status"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): string { return "stored-secret-token"; },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.match(result.stdout.text, /configured/i);
+  assert.doesNotMatch(result.stdout.text + result.stderr.text, /stored-secret-token/);
+});
+
+test("auth delete removes the stored credential", async () => {
+  let deleted = false;
+  const result = await cli(["auth", "delete"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): string { return "stored-secret-token"; },
+      setPassword(): void {},
+      deletePassword(): void { deleted = true; },
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(deleted, true);
+  assert.match(result.stderr.text, /deleted/i);
 });
 
 test("upload shorthand streams bytes and applies tags and visibility", async () => {
