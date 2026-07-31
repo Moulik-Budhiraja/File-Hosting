@@ -129,7 +129,9 @@ class MockService {
         id,
         name: url.searchParams.get("name") ?? "file",
         size: body.length,
-        visibility: url.searchParams.get("private") === "true" ? "private" : "public",
+        visibility:
+          (url.searchParams.get("visibility") as FileMetadata["visibility"] | null) ??
+          (url.searchParams.get("private") === "true" ? "private" : "public"),
         tags: url.searchParams.getAll("tag"),
         archive: url.searchParams.get("archive") === "tar.gz" ? "tar.gz" : null,
         sha256: "test-sha",
@@ -431,6 +433,18 @@ test("global --no-input rejects interactive auth set without reading or saving",
   assert.match(result.stderr.text, /auth set.*interactive|interactive.*auth set/i);
   assert.equal(reads, 0);
   assert.equal(writes, 0);
+});
+
+test("upload creates protected objects atomically", async () => {
+  const path = join(scratch, "protected.txt");
+  await writeFile(path, "authenticated only");
+
+  const result = await cli([path, "--protected", "--json"]);
+  assert.equal(result.code, 0);
+  const [item] = JSON.parse(result.stdout.text) as FileMetadata[];
+  assert.equal(item.visibility, "protected");
+  const request = service.requests.find((entry) => entry.path === "/api/files")!;
+  assert.equal(request.query.get("visibility"), "protected");
 });
 
 test("upload shorthand streams bytes and applies tags and visibility", async () => {

@@ -271,12 +271,10 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
 
     const protectedPath = path.join(fixtureDir, "protected-e2e.txt");
     await writeFile(protectedPath, "authenticated only");
-    const [uploaded] = await uploadJson([protectedPath], { token: apiKey });
-    const changed = parseJson(
-      await cli(["visibility", uploaded.id, "protected", "--json"], { token: apiKey }),
-      "set protected visibility with custom API key",
-    );
-    assert.equal(changed.visibility, "protected");
+    const [uploaded] = await uploadJson([protectedPath, "--protected"], {
+      token: apiKey,
+    });
+    assert.equal(uploaded.visibility, "protected");
     assert.equal((await request(`/raw/${uploaded.id}`, {}, false)).status, 404);
     assert.equal((await fetch(`${baseUrl}/raw/${uploaded.id}`, { headers: { authorization: `Bearer ${apiKey}` } })).status, 200);
 

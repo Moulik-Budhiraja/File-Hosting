@@ -414,33 +414,52 @@ export class AuthRepository {
       args: [now.toISOString()],
     });
     const token = randomBytes(32).toString("base64url");
+    const sessionId = randomUUID();
     const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-    const result = await this.client.execute({
-      sql: authentication
-        ? `INSERT INTO sessions
-          (id, user_id, token_digest, created_at, expires_at, revoked_at)
-          SELECT ?, id, ?, ?, ?, NULL FROM users
-          WHERE id = ? AND password_hash = ? AND active = 1`
-        : `INSERT INTO sessions
-          (id, user_id, token_digest, created_at, expires_at, revoked_at)
-          VALUES (?, ?, ?, ?, ?, NULL)`,
-      args: authentication
-        ? [
-            randomUUID(),
-            digest(token),
-            now.toISOString(),
-            expiresAt,
-            userId,
-            authentication.passwordHash,
-          ]
-        : [randomUUID(), userId, digest(token), now.toISOString(), expiresAt],
-    });
-    if (authentication && result.rowsAffected === 0) {
-      throw new AppError(
-        401,
-        "invalid_credentials",
-        "Credentials changed; please log in again",
-      );
+    const transaction = await this.client.transaction("write");
+    try {
+      const result = await transaction.execute({
+        sql: authentication
+          ? `INSERT INTO sessions
+            (id, user_id, token_digest, created_at, expires_at, revoked_at)
+            SELECT ?, id, ?, ?, ?, NULL FROM users
+            WHERE id = ? AND password_hash = ? AND active = 1`
+          : `INSERT INTO sessions
+            (id, user_id, token_digest, created_at, expires_at, revoked_at)
+            VALUES (?, ?, ?, ?, ?, NULL)`,
+        args: authentication
+          ? [
+              sessionId,
+              digest(token),
+              now.toISOString(),
+              expiresAt,
+              userId,
+              authentication.passwordHash,
+            ]
+          : [sessionId, userId, digest(token), now.toISOString(), expiresAt],
+      });
+      if (authentication && result.rowsAffected === 0) {
+        throw new AppError(
+          401,
+          "invalid_credentials",
+          "Credentials changed; please log in again",
+        );
+      }
+      await transaction.execute({
+        sql: `DELETE FROM sessions WHERE id IN (
+          SELECT id FROM sessions
+          WHERE user_id = ? AND revoked_at IS NULL AND id <> ?
+          ORDER BY created_at DESC, id DESC
+          LIMIT -1 OFFSET 9
+        )`,
+        args: [userId, sessionId],
+      });
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    } finally {
+      transaction.close();
     }
     return { token, expiresAt };
   }

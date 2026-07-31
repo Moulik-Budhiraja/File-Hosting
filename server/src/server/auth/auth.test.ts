@@ -290,6 +290,53 @@ describe("user repository", () => {
     }
   });
 
+  it("caps active sessions per user while keeping the newest login", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-session-cap-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const repository = await AuthRepository.create(databaseUrl);
+    try {
+      const member = await repository.createUser({
+        username: "session.cap.member",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const start = new Date("2026-01-01T00:00:00.000Z");
+      const sessions = [];
+      for (let offset = 0; offset < 12; offset += 1) {
+        sessions.push(
+          await repository.createSession(
+            member.id,
+            new Date(start.getTime() + offset * 1000),
+          ),
+        );
+      }
+
+      const inspection = createClient({ url: databaseUrl, intMode: "number" });
+      try {
+        const result = await inspection.execute({
+          sql: "SELECT COUNT(*) AS count FROM sessions WHERE user_id = ? AND revoked_at IS NULL",
+          args: [member.id],
+        });
+        assert.equal(Number(result.rows[0]?.count), 10);
+      } finally {
+        inspection.close();
+      }
+      assert.equal(
+        await repository.resolveSession(sessions[0]!.token, start),
+        null,
+      );
+      assert.equal(
+        (await repository.resolveSession(sessions.at(-1)!.token, start))?.id,
+        member.id,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("purges expired and revoked sessions before creating a new session", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-session-retention-test-"),

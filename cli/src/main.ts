@@ -72,7 +72,8 @@ Options:
   -r, --recursive             Archive matched directories
   --name <name>               Stored name (one input only; required for '-')
   --tag <tag>                 Add a tag (repeatable)
-  --private                   Make uploaded objects private
+  --protected                 Require authentication to read uploaded objects
+  --private                   Make uploaded objects owner-only
   --allow-large-upload        Confirm prior human approval above 1 GiB
   --no-input                  Never prompt
   --json | --jsonl | --id     Machine-readable output
@@ -249,6 +250,7 @@ async function uploadCommand(
     recursive: { type: "boolean", short: "r" },
     name: { type: "string" },
     tag: { type: "string", multiple: true },
+    protected: { type: "boolean" },
     private: { type: "boolean" },
     "allow-large-upload": { type: "boolean" },
     "no-input": { type: "boolean" },
@@ -258,6 +260,13 @@ async function uploadCommand(
     return EXIT.success;
   }
   const mode = chooseOutputMode(parsed.values);
+  if (parsed.values.protected && parsed.values.private) {
+    throw new CliError(
+      "Choose only one of --protected or --private",
+      EXIT.usage,
+      "VISIBILITY_CONFLICT",
+    );
+  }
   const tags = tagsFrom(parsed.values.tag);
   const prepared = await prepareInputs(
     parsed.positionals,
@@ -295,7 +304,11 @@ async function uploadCommand(
             size: input.uploadSize,
             stream: progress.trackReadable(input.open()),
             tags,
-            private: parsed.values.private ?? false,
+            visibility: parsed.values.protected
+              ? "protected"
+              : parsed.values.private
+                ? "private"
+                : "public",
             archive: input.archive,
           }),
         );

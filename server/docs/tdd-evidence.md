@@ -150,5 +150,17 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: central JSON parsing now checks declared lengths and incrementally
       caps chunked bodies at 64 KiB before parsing, returning 413 on overflow.
 
+27. Atomic protected CLI upload
+    - RED: `fs up ... --protected` failed as an unknown option, requiring an unsafe
+      public upload followed by a visibility patch.
+    - GREEN: upload parsing and `ApiClient.upload` now send
+      `visibility=protected` on the creation request, with private/protected
+      mutual exclusion.
+
+28. Active-session cap
+    - RED: twelve valid logins retained twelve active session rows.
+    - GREEN: session issuance transactionally preserves the new token and deletes
+      older active sessions beyond a per-user maximum of ten.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

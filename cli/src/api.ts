@@ -74,12 +74,12 @@ export class ApiClient {
     size: number;
     stream: Readable;
     tags: string[];
-    private: boolean;
+    visibility: "public" | "protected" | "private";
     archive: "tar.gz" | null;
   }): Promise<FileMetadata> {
     const query = new URLSearchParams({ name: input.name });
     for (const tag of input.tags) query.append("tag", tag);
-    if (input.private) query.set("private", "true");
+    if (input.visibility !== "public") query.set("visibility", input.visibility);
     if (input.archive) query.set("archive", input.archive);
     const response = await this.checked(this.url("/api/files", query), {
       method: "POST",
