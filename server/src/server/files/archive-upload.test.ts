@@ -454,6 +454,125 @@ describe("archive upload contract", { concurrency: false }, () => {
     }
   });
 
+  it("rejects metadata headers the shipped extractor refuses, with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const paxRecord = (key: string, value: string): string => {
+      let length = key.length + value.length + 3;
+      for (;;) {
+        const next = String(length).length + key.length + value.length + 3;
+        if (next === length) return `${length} ${key}=${value}\n`;
+        length = next;
+      }
+    };
+    // node-tar's parser fires `path is required` for any header whose own
+    // name field decodes empty — GNU `L`/`K` and PAX `x`/`g` included — and
+    // `linkpath forbidden` for `L`/`K` metadata headers carrying a raw
+    // linkname. Certifying either shape stores an archive the shipped
+    // extractor fatally refuses.
+    const fixtures: Array<[string, Buffer, RegExp]> = [
+      [
+        "gnu-longpath-linkname",
+        Buffer.concat([
+          tarEntry("././@LongLink", "longname.txt\0", {
+            type: "L",
+            linkname: "whatever",
+          }),
+          tarEntry("longname.txt", "content"),
+          tarTrailer(),
+        ]),
+        /metadata header carries a link target/u,
+      ],
+      [
+        "gnu-longlink-linkname",
+        Buffer.concat([
+          tarEntry("target.txt", "content"),
+          tarEntry("././@LongLink", "target.txt\0", {
+            type: "K",
+            linkname: "zzz",
+          }),
+          tarEntry("link", "", { type: "2", linkname: "target.txt" }),
+          tarTrailer(),
+        ]),
+        /metadata header carries a link target/u,
+      ],
+      [
+        "gnu-longpath-empty-name",
+        Buffer.concat([
+          tarEntry("", "longname.txt\0", { type: "L" }),
+          tarEntry("stub", "content"),
+          tarTrailer(),
+        ]),
+        /metadata header has an empty path/u,
+      ],
+      [
+        "gnu-longlink-empty-name",
+        Buffer.concat([
+          tarEntry("target.txt", "content"),
+          tarEntry("", "target.txt\0", { type: "K" }),
+          tarEntry("link", "", { type: "2", linkname: "target.txt" }),
+          tarTrailer(),
+        ]),
+        /metadata header has an empty path/u,
+      ],
+      [
+        "pax-x-empty-name",
+        Buffer.concat([
+          tarEntry("", paxRecord("path", "renamed.txt"), { type: "x" }),
+          tarEntry("orig.txt", "content"),
+          tarTrailer(),
+        ]),
+        /metadata header has an empty path/u,
+      ],
+      [
+        "pax-g-empty-name",
+        Buffer.concat([
+          tarEntry("", paxRecord("comment", "inert"), { type: "g" }),
+          tarEntry("real.txt", "content"),
+          tarTrailer(),
+        ]),
+        /metadata header has an empty path/u,
+      ],
+    ];
+    for (const [name, fixture, pattern] of fixtures) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`${name}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError, name);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          assert.match(error.message, pattern, name);
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState, name);
+    }
+
+    // node-tar exempts PAX `x`/`g` from `linkpath forbidden`, so the mirror
+    // must keep accepting them — rejecting would refuse archives the shipped
+    // extractor materializes.
+    const accepted = await service.upload(
+      stream(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/renamed", paxRecord("path", "renamed.txt"), {
+              type: "x",
+              linkname: "ignored",
+            }),
+            tarEntry("orig.txt", "content"),
+            tarTrailer(),
+          ]),
+        ),
+      ),
+      uploadOptions("pax-x-linkname.tar.gz"),
+    );
+    assert.equal(accepted.archive, "tar.gz");
+    await service.delete(accepted.id);
+  });
+
   it("rejects header fields hiding a suffix behind a NUL, with no persistence", async () => {
     const { nulHiddenField, tarTrailer } = await import("./tar-fixtures");
     // node-tar reads header strings with `decString`, which drops only the

@@ -1665,6 +1665,108 @@ describe("TarGzArchiveValidator", () => {
       );
     });
 
+    // node-tar applies those raw-header gates BEFORE dispatching on the
+    // header type, so GNU `L`/`K` and PAX `x`/`g` metadata headers are
+    // subject to them too: `path is required` fires for any header whose own
+    // name field decodes empty (pending overrides are never applied to
+    // metadata headers), and `linkpath forbidden` fires for `L`/`K` — only
+    // link entries and PAX `x`/`g` are exempt. Certifying any of those
+    // shapes stores an archive the shipped extractor fatally refuses.
+    it("rejects GNU L/K metadata headers carrying a raw linkpath at any chunk size", async () => {
+      const longName = gzipSync(
+        Buffer.concat([
+          tarEntry("././@LongLink", "longname.txt\0", {
+            type: "L",
+            linkname: "whatever",
+          }),
+          tarEntry("longname.txt", "content"),
+          tarTrailer(),
+        ]),
+      );
+      const longLink = gzipSync(
+        Buffer.concat([
+          tarEntry("target.txt", "content"),
+          tarEntry("././@LongLink", "target.txt\0", {
+            type: "K",
+            linkname: "zzz",
+          }),
+          tarEntry("link", "", { type: "2", linkname: "target.txt" }),
+          tarTrailer(),
+        ]),
+      );
+      for (const bytes of [longName, longLink]) {
+        for (const chunkSize of [1, 7, 511, 512, 513, 65536]) {
+          await rejectsInvalid(
+            bytes,
+            /metadata header carries a link target/u,
+            chunkSize,
+          );
+        }
+      }
+    });
+
+    it("rejects L/K/x/g metadata headers with an empty name at any chunk size", async () => {
+      const fixtures = [
+        Buffer.concat([
+          tarEntry("", "longname.txt\0", { type: "L" }),
+          tarEntry("stub", "content"),
+          tarTrailer(),
+        ]),
+        Buffer.concat([
+          tarEntry("target.txt", "content"),
+          tarEntry("", "target.txt\0", { type: "K" }),
+          tarEntry("link", "", { type: "2", linkname: "target.txt" }),
+          tarTrailer(),
+        ]),
+        Buffer.concat([
+          tarEntry("", paxRecord("path", "renamed.txt"), { type: "x" }),
+          tarEntry("orig.txt", "content"),
+          tarTrailer(),
+        ]),
+        Buffer.concat([
+          tarEntry("", paxRecord("comment", "inert"), { type: "g" }),
+          tarEntry("real.txt", "content"),
+          tarTrailer(),
+        ]),
+      ];
+      for (const bytes of fixtures) {
+        for (const chunkSize of [1, 7, 511, 512, 513, 65536]) {
+          await rejectsInvalid(
+            gzipSync(bytes),
+            /metadata header has an empty path/u,
+            chunkSize,
+          );
+        }
+      }
+    });
+
+    it("keeps PAX x/g headers carrying a raw linkpath (node-tar exempts them)", async () => {
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/renamed", paxRecord("path", "renamed.txt"), {
+              type: "x",
+              linkname: "ignored",
+            }),
+            tarEntry("orig.txt", "content"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("GlobalHead", paxRecord("comment", "inert"), {
+              type: "g",
+              linkname: "ignored",
+            }),
+            tarEntry("real.txt", "content"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
     it("keeps dangling symlink targets that stay inside the root", async () => {
       await validate(
         gzipSync(

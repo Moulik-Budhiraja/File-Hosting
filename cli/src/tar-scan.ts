@@ -628,6 +628,22 @@ class TarScanWalker {
     let frameSize = size;
 
     if (type === "L" || type === "K" || type === "x" || type === "g") {
+      // node-tar's parser applies its raw-header gates BEFORE dispatching on
+      // the header type, so metadata headers are subject to them too: `path
+      // is required` fires for any header whose own name field decodes empty
+      // (pending overrides are never applied to metadata headers), and
+      // `linkpath forbidden` fires for GNU `L`/`K` — only link entries and
+      // PAX `x`/`g` are exempt. Mirror both so nothing accepted here is
+      // unextractable by node-tar.
+      if (headerPath === "") {
+        throw unsafe("Archive metadata header has an empty path");
+      }
+      if (
+        (type === "L" || type === "K") &&
+        decodeTarString(block.subarray(157, 257)) !== ""
+      ) {
+        throw unsafe("Archive metadata header carries a link target");
+      }
       this.capture = [];
       this.captured = 0;
       this.captureKind =

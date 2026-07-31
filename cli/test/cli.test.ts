@@ -2860,6 +2860,273 @@ test("hidden-suffix archives reject at every chunk size and are never persisted"
   }
 });
 
+// node-tar's parser applies its raw-header gates BEFORE dispatching on the
+// header type, so GNU `L`/`K` and PAX `x`/`g` metadata headers are subject to
+// them too: `path is required` fires for any header whose own name field
+// decodes empty, and `linkpath forbidden` fires for `L`/`K` — only link
+// entries and PAX `x`/`g` are exempt. The scanner must refuse exactly what
+// the shipped extractor refuses, or a server-certified archive could never be
+// materialized by `fs down --extract`.
+test("metadata headers the extractor refuses reject, match real tar.extract, and never publish", async () => {
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const { mkdir } = await import("node:fs/promises");
+  const fixtures: Array<{
+    name: string;
+    bytes: Buffer;
+    pattern: RegExp;
+    tarPattern: RegExp;
+  }> = [
+    {
+      name: "gnu-longpath-linkname",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("././@LongLink", "longname.txt\0", {
+              type: "L",
+              linkname: "whatever",
+            }),
+          ),
+          rawTarEntry("longname.txt", "content"),
+        ]),
+      ),
+      pattern: /metadata header carries a link target/i,
+      tarPattern: /linkpath forbidden/,
+    },
+    {
+      name: "gnu-longlink-linkname",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("target.txt", "content")),
+          stripMarker(
+            rawTarEntry("././@LongLink", "target.txt\0", {
+              type: "K",
+              linkname: "zzz",
+            }),
+          ),
+          rawTarEntry("link", "", { type: "2", linkname: "target.txt" }),
+        ]),
+      ),
+      pattern: /metadata header carries a link target/i,
+      tarPattern: /linkpath forbidden/,
+    },
+    {
+      name: "gnu-longpath-empty-name",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("", "longname.txt\0", { type: "L" })),
+          rawTarEntry("stub", "content"),
+        ]),
+      ),
+      pattern: /metadata header has an empty path/i,
+      tarPattern: /path is required/,
+    },
+    {
+      name: "gnu-longlink-empty-name",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("target.txt", "content")),
+          stripMarker(rawTarEntry("", "target.txt\0", { type: "K" })),
+          rawTarEntry("link", "", { type: "2", linkname: "target.txt" }),
+        ]),
+      ),
+      pattern: /metadata header has an empty path/i,
+      tarPattern: /path is required/,
+    },
+    {
+      name: "pax-x-empty-name",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("", rawPaxRecord("path", "renamed.txt"), {
+              type: "x",
+            }),
+          ),
+          rawTarEntry("orig.txt", "content"),
+        ]),
+      ),
+      pattern: /metadata header has an empty path/i,
+      tarPattern: /path is required/,
+    },
+    {
+      name: "pax-g-empty-name",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("", rawPaxRecord("comment", "inert"), { type: "g" }),
+          ),
+          rawTarEntry("real.txt", "content"),
+        ]),
+      ),
+      pattern: /metadata header has an empty path/i,
+      tarPattern: /path is required/,
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const room = await mkdtemp(join(scratch, `meta-gate-${fixture.name}-`));
+    const archivePath = join(room, "a.tar.gz");
+    await writeFile(archivePath, fixture.bytes);
+
+    // The scanner mirrors the gate.
+    await assert.rejects(
+      scanTarGzArchive(archivePath, fixture.bytes.length),
+      (error: unknown) => {
+        assert.match((error as Error).message, fixture.pattern, fixture.name);
+        return true;
+      },
+      fixture.name,
+    );
+
+    // The shipped extractor really does refuse the same bytes fatally.
+    const out = join(room, "out");
+    await mkdir(out);
+    await assert.rejects(
+      tar.extract({
+        file: archivePath,
+        cwd: out,
+        preservePaths: false,
+        strict: true,
+      }),
+      (error: unknown) => {
+        assert.match(
+          (error as Error).message,
+          fixture.tarPattern,
+          fixture.name,
+        );
+        return true;
+      },
+      fixture.name,
+    );
+
+    // Shipped command: no publish, no staging residue.
+    const item = service.seed(
+      { name: `${fixture.name}.tar.gz`, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(room, "dest");
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, fixture.name);
+    assert.match(result.stderr.text, fixture.pattern, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" }, fixture.name);
+    assert.deepEqual(
+      (await readdir(room)).sort(),
+      ["a.tar.gz", "out"],
+      `${fixture.name} left residue`,
+    );
+  }
+});
+
+// The rejection must be byte-identical no matter how the gzip stream is
+// framed, mirroring the server's chunk-size matrix.
+test("metadata-header gate rejections are stable across gzip framings", async () => {
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const room = await mkdtemp(join(scratch, "meta-gate-chunks-"));
+  const spellings: Array<{ tar: Buffer; pattern: RegExp }> = [
+    {
+      tar: Buffer.concat([
+        stripMarker(
+          rawTarEntry("././@LongLink", "longname.txt\0", {
+            type: "L",
+            linkname: "whatever",
+          }),
+        ),
+        rawTarEntry("longname.txt", "content"),
+      ]),
+      pattern: /metadata header carries a link target/i,
+    },
+    {
+      tar: Buffer.concat([
+        stripMarker(
+          rawTarEntry("", rawPaxRecord("path", "renamed.txt"), { type: "x" }),
+        ),
+        rawTarEntry("orig.txt", "content"),
+      ]),
+      pattern: /metadata header has an empty path/i,
+    },
+  ];
+  const archivePath = join(room, "a.tar.gz");
+  for (const spelling of spellings) {
+    for (const chunkSize of [64, 511, 512, 513, 65536]) {
+      const bytes = gzipSync(spelling.tar, { chunkSize });
+      await writeFile(archivePath, bytes);
+      await assert.rejects(
+        scanTarGzArchive(archivePath, bytes.length),
+        (error: unknown) => {
+          assert.match((error as Error).message, spelling.pattern);
+          return true;
+        },
+      );
+    }
+  }
+});
+
+// node-tar exempts PAX `x`/`g` from `linkpath forbidden`: those archives
+// extract fine, so the mirror must keep accepting and publishing them.
+test("PAX x/g headers carrying a raw linkname stay accepted and publish", async () => {
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const { mkdir } = await import("node:fs/promises");
+  const cases: Array<{ name: string; bytes: Buffer; published: string[] }> = [
+    {
+      name: "pax-x-linkname",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("PaxHeader/renamed", rawPaxRecord("path", "renamed.txt"), {
+              type: "x",
+              linkname: "ignored",
+            }),
+          ),
+          rawTarEntry("orig.txt", "content"),
+        ]),
+      ),
+      published: ["renamed.txt"],
+    },
+    {
+      name: "pax-g-linkname",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("comment", "inert"), {
+              type: "g",
+              linkname: "ignored",
+            }),
+          ),
+          rawTarEntry("real.txt", "content"),
+        ]),
+      ),
+      published: ["real.txt"],
+    },
+  ];
+  for (const item of cases) {
+    const room = await mkdtemp(join(scratch, `${item.name}-`));
+    const archivePath = join(room, "a.tar.gz");
+    await writeFile(archivePath, item.bytes);
+    const manifest = await scanTarGzArchive(archivePath, item.bytes.length);
+    assert.deepEqual(manifest.entries, item.published, item.name);
+
+    // Manifest equals the tree the real extractor materializes.
+    const out = join(room, "out");
+    await mkdir(out);
+    await tar.extract({
+      file: archivePath,
+      cwd: out,
+      preservePaths: false,
+      strict: true,
+    });
+    assert.deepEqual((await readdir(out)).sort(), item.published, item.name);
+
+    // Shipped command publishes it.
+    const seeded = service.seed(
+      { name: `${item.name}.tar.gz`, archive: "tar.gz", size: item.bytes.length },
+      item.bytes,
+    );
+    const destination = join(room, "dest");
+    const result = await cli(["down", seeded.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 0, item.name);
+    assert.deepEqual((await readdir(destination)).sort(), item.published, item.name);
+  }
+});
+
 // node-tar performs its filesystem work in raw fs callbacks. A fault raised
 // there — `fs.lstat`/`fs.mkdir` throwing ERR_INVALID_ARG_VALUE for a path
 // node-tar derived that contains a NUL byte, for instance — is thrown on the
@@ -3011,6 +3278,97 @@ test("a fault escaping the extract promise is contained in a real process", asyn
 
   // The staging tree is gone and the destination was never published.
   assert.deepEqual((await readdir(room)).sort(), ["a.tar.gz", "escape.mts"]);
+});
+
+// node-tar's Unpack keeps materializing already-queued entries after the
+// promise `tar.extract` returned has settled. Removing the staging tree while
+// those writes are in flight raced them: `rm` threw ENOTEMPTY out of the
+// cleanup, which replaced the truthful CliError AND left a partially
+// populated `.<name>.fs-XXXXXX` staging directory beside the destination.
+// The fault needs no adversarial metadata: an ordinary filesystem failure
+// mid-archive (here a scanner-legal 300-byte GNU long-name component that is
+// ENAMETOOLONG for the filesystem) with more entries queued behind it is
+// enough. The extractor lifecycle must be drained before cleanup, cleanup
+// must be verified, and a cleanup failure may never mask the primary error.
+test("a mid-archive extractor failure with queued writes keeps the truthful error and cleans staging", async () => {
+  const extract = await import("../src/extract.js");
+  const { mkdir } = await import("node:fs/promises");
+  const longName = `${"L".repeat(300)}.txt`;
+  const entries: Buffer[] = [];
+  for (let index = 0; index < 20; index += 1) {
+    entries.push(stripMarker(rawTarEntry(`a${index}.bin`, "x".repeat(8192))));
+  }
+  entries.push(
+    stripMarker(rawTarEntry("././@LongLink", `${longName}\0`, { type: "L" })),
+  );
+  entries.push(stripMarker(rawTarEntry(longName, "overlong")));
+  for (let index = 0; index < 60; index += 1) {
+    entries.push(stripMarker(rawTarEntry(`z${index}.bin`, "x".repeat(8192))));
+  }
+  const bytes = gzipSync(Buffer.concat([...entries, Buffer.alloc(1024)]));
+
+  const isTruthful = (error: unknown, label: string): boolean => {
+    assert.equal((error as { name?: string }).name, "CliError", label);
+    assert.equal((error as { code?: string }).code, "EXTRACT_FAILED", label);
+    assert.equal((error as { exitCode?: number }).exitCode, 1, label);
+    assert.match((error as Error).message, /ENAMETOOLONG|name too long/, label);
+    assert.doesNotMatch((error as Error).message, /ENOTEMPTY/, label);
+    return true;
+  };
+
+  // Repeated because the failure was a race: the shipped code lost it 8/8,
+  // but any single lucky pass must not hide a regression.
+  for (let round = 0; round < 5; round += 1) {
+    const room = await mkdtemp(join(scratch, "queued-fault-"));
+    const archivePath = join(room, "a.tar.gz");
+    await writeFile(archivePath, bytes);
+    const destination = join(room, "dest");
+    await assert.rejects(
+      extract.extractArchive(archivePath, destination, false),
+      (error: unknown) => isTruthful(error, `round ${round}`),
+      `round ${round}`,
+    );
+    // No staging residue, no backup residue, no destination.
+    assert.deepEqual(
+      (await readdir(room)).sort(),
+      ["a.tar.gz"],
+      `round ${round} left residue`,
+    );
+  }
+
+  // Under --force with an existing destination the old content is preserved
+  // untouched, with no backup or staging residue.
+  const forceRoom = await mkdtemp(join(scratch, "queued-fault-force-"));
+  const forceArchive = join(forceRoom, "a.tar.gz");
+  await writeFile(forceArchive, bytes);
+  const forceDestination = join(forceRoom, "dest");
+  await mkdir(forceDestination);
+  await writeFile(join(forceDestination, "keep.txt"), "keep");
+  await assert.rejects(
+    extract.extractArchive(forceArchive, forceDestination, true),
+    (error: unknown) => isTruthful(error, "force"),
+    "force",
+  );
+  assert.equal(
+    await readFile(join(forceDestination, "keep.txt"), "utf8"),
+    "keep",
+  );
+  assert.deepEqual((await readdir(forceRoom)).sort(), ["a.tar.gz", "dest"]);
+  assert.deepEqual(await readdir(forceDestination), ["keep.txt"]);
+
+  // End to end through the shipped command.
+  const item = service.seed(
+    { name: "queued-fault.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const room = await mkdtemp(join(scratch, "queued-fault-cli-"));
+  const destination = join(room, "dest");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr.text, /ENAMETOOLONG|name too long/);
+  assert.doesNotMatch(result.stderr.text, /ENOTEMPTY/);
+  await assert.rejects(readFile(destination), { code: "ENOENT" });
+  assert.deepEqual(await readdir(room), []);
 });
 
 // The CLI decoder must be the same expression as the server's and as
