@@ -434,7 +434,11 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     assert.equal(await readlink(path.join(extraction, "value-link")), "nested/value.bin");
   });
 
-  await t.test("archive extraction rejects traversal before writing outside the destination", async () => {
+  await t.test("the server rejects traversal archives before any metadata or object commit", async () => {
+    // The archive=tar.gz contract is now verified server-side: a tar whose
+    // entries escape the extraction root is refused with a 4xx and leaves no
+    // metadata row behind. (CLI-side defense in depth is covered by the CLI
+    // unit suite, which extracts hostile bytes served by a fake server.)
     const maliciousArchive = gzipSync(singleFileTar("../escaped.txt", "should never be written"));
     const response = await request("/api/files?name=malicious.tar.gz&archive=tar.gz", {
       method: "POST",
@@ -444,16 +448,21 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
       },
       body: maliciousArchive,
     });
-    assert.equal(response.status, 201);
-    const uploaded = await response.json();
-    assert.equal(uploaded.archive, "tar.gz");
+    assert.equal(response.status, 400);
+    const rejection = await response.json();
+    assert.equal(rejection.error.code, "invalid_archive");
 
-    const destination = path.join(downloadDir, "malicious-destination");
-    const escaped = path.join(downloadDir, "escaped.txt");
-    const result = await cli(["down", uploaded.id, "--extract", "-o", destination]);
-    assertExit(result, 1, "malicious archive traversal");
-    await assert.rejects(access(destination), { code: "ENOENT" });
-    await assert.rejects(access(escaped), { code: "ENOENT" });
+    const listed = await request(`/api/files?name=${encodeURIComponent("malicious.tar.gz")}`);
+    assert.equal(listed.status, 200);
+    assert.deepEqual((await listed.json()).items, []);
+
+    // Arbitrary bytes marked as an archive are equally refused.
+    const garbage = await request("/api/files?name=garbage.tar.gz&archive=tar.gz", {
+      method: "POST",
+      headers: { "content-type": "application/gzip" },
+      body: Buffer.from("not a gzip stream at all"),
+    });
+    assert.equal(garbage.status, 400);
   });
 
   let stdinFile;
@@ -528,6 +537,42 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     const after = parseJson(await cli(["list", "--json"]), "list after large preflight");
     assert.equal(after.length, before.length, "rejected large upload must not reach server storage");
     assert(!after.some((item) => item.name === "requires-approval.bin"));
+  });
+
+  await t.test("a real socket abort mid-upload is expected cancellation, not an error", async () => {
+    // Raw TCP so the abort is a genuine ECONNRESET at the server, not a
+    // polite client-side cancellation.
+    const socket = net.connect(port, "127.0.0.1");
+    await once(socket, "connect");
+    socket.write(
+      "POST /api/files HTTP/1.1\r\n" +
+        `Host: 127.0.0.1:${port}\r\n` +
+        `Authorization: Bearer ${token}\r\n` +
+        "Content-Type: application/octet-stream\r\n" +
+        "Content-Length: 1048576\r\n" +
+        "x-fs-name: socket-abort-upload.bin\r\n" +
+        "\r\n",
+    );
+    socket.write(Buffer.alloc(64 * 1024, 7));
+    await delay(300);
+    socket.destroy();
+
+    // The server stays healthy and fully cleans up the aborted transfer.
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const response = await request("/api/system");
+      assert.equal(response.status, 200);
+      const system = await response.json();
+      if (system.transfers.length === 0 && system.storage.temp_part_count === 0) break;
+      assert(Date.now() < deadline, `aborted upload not cleaned up: ${JSON.stringify(system.transfers)} / ${system.storage.temp_part_count} temp parts`);
+      await delay(200);
+    }
+    const listed = await request(`/api/files?name=${encodeURIComponent("socket-abort-upload.bin")}`);
+    assert.deepEqual((await listed.json()).items, []);
+
+    // No unhandled/error-level log — at most the structured info line.
+    const logs = server.logs();
+    assert(!logs.includes("Unhandled request error"), `unexpected error log:\n${logs}`);
   });
 
   await t.test("metadata and object bytes persist across a real server restart", async () => {

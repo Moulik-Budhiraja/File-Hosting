@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { createReadStream } from "node:fs";
 import {
   access,
   constants,
@@ -7,6 +6,7 @@ import {
   mkdir,
   open,
   readdir,
+  rename,
   stat,
   statfs,
   unlink,
@@ -15,6 +15,7 @@ import path from "node:path";
 
 import { lookup } from "mime-types";
 
+import { TarGzArchiveValidator } from "./archive-validation";
 import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
@@ -56,6 +57,7 @@ function normalizeMimeType(name: string, supplied?: string): string {
 
 export class FileService {
   readonly tempDir: string;
+  readonly trashDir: string;
   private readonly transfers = new TransferRegistry();
 
   private constructor(
@@ -63,6 +65,7 @@ export class FileService {
     readonly repository: FileRepository,
   ) {
     this.tempDir = path.join(config.storageDir, ".tmp");
+    this.trashDir = path.join(config.storageDir, ".trash");
   }
 
   static async create(config: FilesConfig): Promise<FileService> {
@@ -70,7 +73,9 @@ export class FileService {
     const repository = await FileRepository.create(config.databaseUrl);
     const service = new FileService(config, repository);
     await mkdir(service.tempDir, { recursive: true });
+    await mkdir(service.trashDir, { recursive: true });
     await service.cleanupTemporaryFiles();
+    await service.recoverPendingDeletions();
     return service;
   }
 
@@ -152,6 +157,10 @@ export class FileService {
     const tempPath = path.join(this.tempDir, `${crypto.randomUUID()}.part`);
     const handle = await open(tempPath, "wx", 0o600);
     const checksum = createHash("sha256");
+    // archive=tar.gz is a verified contract: the stream must prove it is a
+    // complete, safe tar.gz before any object placement or metadata commit.
+    const archiveValidator =
+      options.archive === "tar.gz" ? new TarGzArchiveValidator() : null;
     let size = 0;
     let bytesAtLastCapacityCheck = 0;
     let closed = false;
@@ -187,6 +196,7 @@ export class FileService {
         }
 
         this.transfers.progress(transferId, chunk.length);
+        if (archiveValidator) await archiveValidator.update(chunk);
         checksum.update(chunk);
         let offset = 0;
         while (offset < chunk.length) {
@@ -198,6 +208,7 @@ export class FileService {
           offset += written.bytesWritten;
         }
       }
+      if (archiveValidator) await archiveValidator.finish();
       await handle.sync();
       await handle.close();
       closed = true;
@@ -249,6 +260,7 @@ export class FileService {
       }
     } finally {
       this.transfers.end(transferId);
+      archiveValidator?.abort();
       if (!closed) await handle.close().catch(() => undefined);
       await unlink(tempPath).catch(() => undefined);
     }
@@ -272,19 +284,143 @@ export class FileService {
     return this.repository.update(id, input);
   }
 
-  async delete(id: string): Promise<StoredFile | null> {
-    const file = await this.repository.delete(id);
-    if (file)
-      await unlink(this.storagePath(file)).catch(
-        (error: NodeJS.ErrnoException) => {
-          if (error.code !== "ENOENT") throw error;
-        },
-      );
-    return file;
+  tombstonePath(storageKey: string): string {
+    return path.join(this.trashDir, storageKey);
   }
 
-  openReadStream(file: StoredFile, start?: number, end?: number) {
-    return createReadStream(this.storagePath(file), { start, end });
+  // Phase wrappers are instance methods so fault-injection tests can fail a
+  // single phase in isolation.
+  protected async stageObject(live: string, tombstone: string): Promise<void> {
+    await rename(live, tombstone);
+  }
+
+  protected async restoreObject(
+    tombstone: string,
+    live: string,
+  ): Promise<void> {
+    await rename(tombstone, live);
+  }
+
+  protected async removeTombstone(tombstone: string): Promise<void> {
+    await unlink(tombstone);
+  }
+
+  private async fileExists(filename: string): Promise<boolean> {
+    try {
+      await access(filename, constants.F_OK);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  // Two-phase permanent deletion. The live store may never hold bytes that
+  // metadata does not track:
+  //   1. stage the object into an ID-linked tombstone (atomic same-fs rename)
+  //   2. transactionally delete the metadata row
+  //   3. remove the tombstone
+  // A phase-2 failure restores the staged object; a phase-3 failure retains
+  // the tombstone as a discoverable, retryable cleanup record. Startup
+  // recovery (recoverPendingDeletions) resolves any tombstone left by a
+  // crash or persistent fault in either direction.
+  async delete(id: string): Promise<StoredFile | null> {
+    const file = await this.repository.get(id);
+    if (!file) return null;
+    const livePath = this.storagePath(file);
+    const tombstone = this.tombstonePath(file.storageKey);
+
+    let staged = false;
+    try {
+      await this.stageObject(livePath, tombstone);
+      staged = true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      // The live object is already gone — a previous partially completed
+      // delete may have left its tombstone behind.
+      staged = await this.fileExists(tombstone);
+    }
+
+    let deleted: StoredFile | null;
+    try {
+      deleted = await this.repository.delete(id);
+    } catch (error) {
+      if (staged) {
+        // The failure may be ambiguous — the transaction can have committed
+        // before the error surfaced. Restoring blindly would recreate
+        // metadata-less bytes in the live store, so verify the row first.
+        let verifiedRow: StoredFile | null | undefined;
+        try {
+          verifiedRow = await this.repository.get(id);
+        } catch {
+          verifiedRow = undefined; // verification itself failed
+        }
+        if (verifiedRow === null) {
+          // Verified committed: this IS a successful deletion; clean up (a
+          // failing cleanup just retains the retryable tombstone).
+          await this.removeTombstone(tombstone).catch(() => undefined);
+          return file;
+        }
+        if (verifiedRow) {
+          // Verified uncommitted: best-effort restore; if this also fails
+          // the tombstone remains discoverable and startup recovery
+          // restores it (the metadata row still exists).
+          await this.restoreObject(tombstone, livePath).catch(() => undefined);
+        }
+        // Unverifiable: never restore into live — the tombstone stays
+        // discoverable and startup recovery resolves it against the row
+        // once the database is reachable again.
+      }
+      throw error;
+    }
+
+    if (staged) {
+      // The deletion itself is committed; a failing cleanup only leaves a
+      // retryable tombstone record, never untracked live-store bytes.
+      await this.removeTombstone(tombstone).catch(() => undefined);
+    }
+    return deleted ?? file;
+  }
+
+  // Resolves tombstones left behind by a crash or persistent fault. A
+  // tombstone whose metadata row still exists was staged but never
+  // committed — restore it. A tombstone without a row is a committed
+  // deletion whose final cleanup failed — retry the cleanup.
+  async recoverPendingDeletions(): Promise<void> {
+    const entries = await readdir(this.trashDir, { withFileTypes: true });
+    for (const entry of entries) {
+      if (!entry.isFile()) continue;
+      const tombstone = this.tombstonePath(entry.name);
+      const row = await this.repository.get(entry.name);
+      if (row) {
+        await this.restoreObject(tombstone, this.storagePath(row)).catch(
+          () => undefined,
+        );
+      } else {
+        await this.removeTombstone(tombstone).catch(() => undefined);
+      }
+    }
+  }
+
+  async openReadStream(file: StoredFile, start?: number, end?: number) {
+    let handle;
+    try {
+      handle = await open(this.storagePath(file), "r");
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+      try {
+        // A delete may have atomically staged the object after this request
+        // resolved its metadata. Opening the tombstone preserves that
+        // already-authorized in-flight read; the descriptor remains valid
+        // even if deletion then unlinks the tombstone.
+        handle = await open(this.tombstonePath(file.storageKey), "r");
+      } catch (fallbackError) {
+        if ((fallbackError as NodeJS.ErrnoException).code === "ENOENT") {
+          throw new AppError(404, "not_found", "File not found");
+        }
+        throw fallbackError;
+      }
+    }
+    return handle.createReadStream({ start, end, autoClose: true });
   }
 
   activeTransfers(): ActiveTransfer[] {
@@ -294,13 +430,16 @@ export class FileService {
   // Download stream wrapped with live transfer accounting. The generator's
   // finally block runs on completion, error, and early cancellation (the
   // consumer calling return()), so entries never leak.
-  trackedDownloadStream(
+  async trackedDownloadStream(
     file: StoredFile,
     start?: number,
     end?: number,
-  ): AsyncIterable<Uint8Array> {
+  ): Promise<AsyncIterable<Uint8Array>> {
     const registry = this.transfers;
-    const source = this.openReadStream(file, start, end);
+    // Acquire the descriptor before the HTTP response is constructed so
+    // deletion races resolve to complete bytes or a truthful 404, never a
+    // late ENOENT that tears down an already-started 200 response.
+    const source = await this.openReadStream(file, start, end);
     const totalBytes =
       start !== undefined && end !== undefined ? end - start + 1 : file.size;
     return (async function* tracked() {

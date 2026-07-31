@@ -7,18 +7,20 @@ import { after, before, describe, it } from "node:test";
 import { POST as uploadRoute } from "../../app/api/files/route";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
+import { validTarGz } from "./tar-fixtures";
 
 const TOKEN = "a-test-secret-with-enough-entropy";
 
 function post(
   headers: Record<string, string>,
   url = "http://localhost/api/files",
+  body: string | Buffer = "payload-bytes",
 ) {
   return uploadRoute(
     new Request(url, {
       method: "POST",
       headers: { authorization: `Bearer ${TOKEN}`, ...headers },
-      body: "payload-bytes",
+      body: new Uint8Array(Buffer.from(body)),
     }),
   );
 }
@@ -47,15 +49,19 @@ describe("upload metadata header contract", () => {
   });
 
   it("accepts name, tags, visibility, and archive from x-fs-* headers with no query string", async () => {
-    const response = await post({
-      "x-fs-name": encodeURIComponent("café report ✓.tar.gz"),
-      "x-fs-tags": [
-        encodeURIComponent("ingest"),
-        encodeURIComponent("télé metry"),
-      ].join(","),
-      "x-fs-private": "true",
-      "x-fs-archive": "tar.gz",
-    });
+    const response = await post(
+      {
+        "x-fs-name": encodeURIComponent("café report ✓.tar.gz"),
+        "x-fs-tags": [
+          encodeURIComponent("ingest"),
+          encodeURIComponent("télé metry"),
+        ].join(","),
+        "x-fs-private": "true",
+        "x-fs-archive": "tar.gz",
+      },
+      "http://localhost/api/files",
+      validTarGz(),
+    );
     assert.equal(response.status, 201);
     const body = (await response.json()) as {
       name: string;

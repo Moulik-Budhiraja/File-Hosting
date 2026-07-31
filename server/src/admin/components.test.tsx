@@ -8,6 +8,7 @@ import { NavRail } from "./components/NavRail";
 import { ProposedBlock } from "./components/ProposedBlock";
 import { StateBanner } from "./components/StateBanner";
 import { UploadDialog } from "./components/UploadDialog";
+import { VisibilityLabel } from "./components/VisibilityLabel";
 
 describe("NavRail", () => {
   const markup = renderToStaticMarkup(
@@ -107,6 +108,27 @@ describe("ConfirmDialog", () => {
       ),
       "",
     );
+  });
+});
+
+describe("VisibilityLabel", () => {
+  // Finding 4: every visibility surface uses one shared component that
+  // carries the full accessible word AND the abbreviated mobile label; the
+  // dot is decoration only.
+  it("renders the full word, the mobile abbreviation, and a decorative dot", () => {
+    const publicMarkup = renderToStaticMarkup(
+      <VisibilityLabel visibility="public" />,
+    );
+    assert.match(publicMarkup, /class="vis-text"[^>]*>public</);
+    assert.match(publicMarkup, /class="vis-text-short"[^>]*>pub</);
+    assert.match(publicMarkup, /dot-success/);
+    assert.match(publicMarkup, /aria-hidden/);
+    const privateMarkup = renderToStaticMarkup(
+      <VisibilityLabel visibility="private" />,
+    );
+    assert.match(privateMarkup, /class="vis-text"[^>]*>private</);
+    assert.match(privateMarkup, /class="vis-text-short"[^>]*>prv</);
+    assert.match(privateMarkup, /dot-muted/);
   });
 });
 

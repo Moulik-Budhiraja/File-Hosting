@@ -5,38 +5,14 @@ import { CLI_EXAMPLES } from "@/admin/cli-examples";
 import { LoadFallback } from "@/admin/components/LoadFallback";
 import { ProposedBlock } from "@/admin/components/ProposedBlock";
 import { StaleBanner } from "@/admin/components/StaleBanner";
+import { StatusRow } from "@/admin/components/StatusRow";
+import {
+  COMPOSE_DEFAULTS,
+  COMPOSE_DEFAULT_SOURCE,
+  healthcheckSummary,
+  loggingSummary,
+} from "@/admin/compose-defaults";
 import { formatBytes, formatInteger, formatUptime } from "@/admin/format";
-
-interface StatusRowProps {
-  name: string;
-  detail: string;
-  source?: string;
-  state?: "ok" | "on" | "warning" | "danger";
-}
-
-function StatusRow({ name, detail, source, state }: StatusRowProps) {
-  return (
-    <div className="status-row">
-      <span className="status-name">{name}</span>
-      <span className="status-detail">{detail}</span>
-      {source ? <span className="status-source">{source}</span> : null}
-      {state ? (
-        <span className="status-state">
-          <span
-            className={`dot ${state === "ok" || state === "on" ? "dot-success" : state === "warning" ? "dot-warning" : "dot-danger"}`}
-            aria-hidden
-          />
-          {state}
-        </span>
-      ) : null}
-    </div>
-  );
-}
-
-// Deployment configuration recorded in the repository's compose.yaml. The
-// running process cannot observe the Docker daemon, so these are rendered
-// strictly as configured defaults — never as runtime state.
-const COMPOSE_DEFAULT_SOURCE = "compose.yaml default; runtime unverified";
 
 export default function SystemPage() {
   const system = useAdminData(() => adminApi.getSystem(), [], {
@@ -81,7 +57,8 @@ export default function SystemPage() {
                 name="Next.js app server"
                 detail={`node ${info.node} · up ${formatUptime(info.uptime_seconds)}`}
                 source="from /api/system"
-                state={fresh ? "ok" : undefined}
+                state="ok"
+                fresh={fresh}
               />
               <StatusRow
                 name="SQLite metadata DB"
@@ -91,17 +68,19 @@ export default function SystemPage() {
                     : `${formatBytes(info.database.db_bytes)} on disk${fresh ? " · ping ok" : ""}`
                 }
                 source="from /api/system"
-                state={fresh ? "ok" : undefined}
+                state="ok"
+                fresh={fresh}
               />
               <StatusRow
                 name="Filesystem object store"
                 detail={`${formatBytes(info.storage.free_bytes)} free${fresh ? " · read-write verified" : ""}`}
                 source="from /api/system"
-                state={fresh ? "ok" : undefined}
+                state="ok"
+                fresh={fresh}
               />
               <StatusRow
                 name="Docker healthcheck"
-                detail="probes /healthz · interval 30s · timeout 5s · retries 3 · start period 20s — pass/fail state is only visible to the Docker daemon"
+                detail={healthcheckSummary(COMPOSE_DEFAULTS.healthcheck)}
                 source={COMPOSE_DEFAULT_SOURCE}
               />
             </section>
@@ -164,26 +143,31 @@ export default function SystemPage() {
                 name="Streamed I/O"
                 detail="chunked upload/download · sha-256 computed in stream"
                 state="on"
+                fresh={fresh}
               />
               <StatusRow
                 name="Atomic placement"
                 detail="write to .tmp/*.part → fsync → link into store"
                 state="on"
+                fresh={fresh}
               />
               <StatusRow
                 name="Temp-part cleanup"
                 detail={`parts older than 24 h removed at startup · ${info.storage.temp_part_count} present now`}
                 state="on"
+                fresh={fresh}
               />
               <StatusRow
                 name="Bearer-token auth"
                 detail="single shared token · required for writes & private reads"
                 state="on"
+                fresh={fresh}
               />
               <StatusRow
                 name="Privacy-preserving 404"
                 detail="private objects indistinguishable from missing"
                 state="on"
+                fresh={fresh}
               />
             </section>
           </div>
@@ -200,10 +184,7 @@ export default function SystemPage() {
                 className="proposed-items"
                 style={{ padding: "12px 24px 18px" }}
               >
-                compose.yaml routes container stdout to the docker json-file
-                driver, 10 MB × 3 files — compose.yaml default; runtime
-                unverified. There is no log-read API, so no log contents or
-                rotation state can be shown here.
+                {loggingSummary(COMPOSE_DEFAULTS.logging)}
               </p>
             </section>
 

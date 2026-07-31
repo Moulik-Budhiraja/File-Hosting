@@ -476,6 +476,12 @@
   margin-right: 7px;
 }
 
+/* Shared visibility marker — used on every surface that shows visibility so
+   mobile abbreviation and accessible full word stay consistent. */
+.visibility-label .dot {
+  margin-right: 7px;
+}
+
 /* ---------- Overview ---------- */
 
 .storage-band {
@@ -1442,6 +1448,17 @@
   .tag-add input,
   .token-form input {
     height: 44px;
+  }
+
+  /* The wrapper alone is not a touch target — the ACTUAL input must be
+     >=44px tall so the whole row accepts taps and focuses the control. */
+  .field {
+    height: auto;
+    min-height: 44px;
+  }
+
+  .field > input {
+    min-height: 44px;
   }
 
   .tag-chip {

@@ -7,10 +7,11 @@ import { after, before, describe, it } from "node:test";
 import { GET as listRoute } from "../../app/api/files/route";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
+import { validTarGz } from "./tar-fixtures";
 
 const TOKEN = "a-test-secret-with-enough-entropy";
 
-async function* chunks(value: string): AsyncGenerator<Uint8Array> {
+async function* chunks(value: string | Buffer): AsyncGenerator<Uint8Array> {
   yield Buffer.from(value);
 }
 
@@ -46,7 +47,7 @@ describe("archive list filter", () => {
       minFreeBytes: 0,
     });
     setFileServiceForTests(service);
-    await service.upload(chunks("archive-bytes"), {
+    await service.upload(chunks(validTarGz()), {
       name: "backup.tar.gz",
       tags: [],
       visibility: "public",

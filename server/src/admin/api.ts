@@ -170,7 +170,10 @@ export function createAdminApi(options: AdminApiOptions): AdminApi {
     let response: Response;
     try {
       response = await fetchImpl(`${baseUrl}${path}`, { ...rest, headers });
-    } catch {
+    } catch (error) {
+      // An aborted request is the caller's own cancellation, not a
+      // connectivity failure — surface it unchanged.
+      if (error instanceof Error && error.name === "AbortError") throw error;
       throw new AdminApiError("disconnected", "Could not reach the server");
     }
     if (!response.ok) {

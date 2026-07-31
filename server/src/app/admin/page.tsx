@@ -8,6 +8,8 @@ import { LoadFallback } from "@/admin/components/LoadFallback";
 import { StaleBanner } from "@/admin/components/StaleBanner";
 import { ProposedBlock } from "@/admin/components/ProposedBlock";
 import { StateBanner } from "@/admin/components/StateBanner";
+import { TransfersPanel } from "@/admin/components/TransfersPanel";
+import { VisibilityLabel } from "@/admin/components/VisibilityLabel";
 import {
   formatBytes,
   formatInteger,
@@ -150,72 +152,19 @@ export default function OverviewPage() {
               <h2 className="section-label">
                 Active transfers
                 <small>
-                  {info
+                  {info && healthy
                     ? `${info.transfers.length} ${info.transfers.length === 1 ? "stream" : "streams"} · this server process · no history kept`
-                    : "awaiting /api/system"}
+                    : info
+                      ? "live view unavailable — refresh failed"
+                      : "awaiting /api/system"}
                 </small>
               </h2>
             </div>
-            {info ? (
-              info.transfers.length === 0 ? (
-                <p
-                  className="warning-detail"
-                  style={{ padding: "0 32px 18px" }}
-                >
-                  none in flight right now — streamed uploads and downloads
-                  appear here only while they are active
-                </p>
-              ) : (
-                <div className="table-scroll">
-                  <table className="data-table">
-                    <thead>
-                      <tr>
-                        <th scope="col">Object</th>
-                        <th scope="col" style={{ textAlign: "right" }}>
-                          Transferred
-                        </th>
-                        <th scope="col" className="cell-optional">
-                          Progress
-                        </th>
-                        <th scope="col">Stage</th>
-                      </tr>
-                    </thead>
-                    <tbody>
-                      {info.transfers.map((transfer, index) => (
-                        <tr key={`${transfer.started_at}-${index}`}>
-                          <td className="cell-name">
-                            <span aria-hidden>
-                              {transfer.direction === "upload" ? "↑ " : "↓ "}
-                            </span>
-                            {transfer.name}
-                          </td>
-                          <td className="cell-size">
-                            {formatBytes(transfer.bytes)}
-                            {transfer.total_bytes !== null
-                              ? ` / ${formatBytes(transfer.total_bytes)}`
-                              : ""}
-                          </td>
-                          <td className="cell-mime cell-optional">
-                            {transfer.total_bytes
-                              ? `${Math.min(100, Math.round((transfer.bytes / transfer.total_bytes) * 100))}%`
-                              : "size unknown"}
-                          </td>
-                          <td className="cell-vis">
-                            {transfer.direction === "upload"
-                              ? "streaming → .part"
-                              : "streaming → client"}
-                          </td>
-                        </tr>
-                      ))}
-                    </tbody>
-                  </table>
-                </div>
-              )
-            ) : (
-              <p className="warning-detail" style={{ padding: "0 32px 18px" }}>
-                unavailable until /api/system responds
-              </p>
-            )}
+            <TransfersPanel
+              status={system.status}
+              transfers={info ? info.transfers : null}
+              lastSuccessAt={system.lastSuccessAt}
+            />
           </section>
 
           <section
@@ -270,11 +219,7 @@ export default function OverviewPage() {
                             {file.mime_type}
                           </td>
                           <td className="cell-vis">
-                            <span
-                              className={`dot ${file.visibility === "public" ? "dot-success" : "dot-muted"}`}
-                              aria-hidden
-                            />
-                            <span className="vis-text">{file.visibility}</span>
+                            <VisibilityLabel visibility={file.visibility} />
                           </td>
                           <td className="cell-time">
                             {formatRecentTimestamp(file.created_at, now)}

@@ -7,6 +7,7 @@ import http from "node:http";
 
 import { expect, test, type Page } from "@playwright/test";
 
+import { validTarGz } from "../src/server/files/tar-fixtures";
 import { ensureSeeded } from "./seed.mjs";
 
 const TOKEN = process.env.FS_E2E_TOKEN ?? "e2e-dashboard-fixture-token";
@@ -25,7 +26,7 @@ const createdIds: string[] = [];
 
 async function apiUpload(options: {
   name: string;
-  body: string;
+  body: string | Buffer;
   tags?: string[];
   isPrivate?: boolean;
   archive?: "tar.gz";
@@ -46,7 +47,10 @@ async function apiUpload(options: {
   const response = await fetch(`${BASE}/api/files`, {
     method: "POST",
     headers,
-    body: options.body,
+    body:
+      typeof options.body === "string"
+        ? options.body
+        : new Uint8Array(options.body),
   });
   if (response.status !== 201)
     throw new Error(`fixture upload failed: ${response.status}`);
@@ -74,8 +78,10 @@ test.beforeAll(async () => {
     mime: "text/plain",
   });
   archiveId = await apiUpload({
+    // The server verifies the archive contract, so the fixture must be a
+    // structurally valid tar.gz.
     name: ARCHIVE_NAME,
-    body: "not-really-gzip-but-metadata-is-real",
+    body: validTarGz(),
     archive: "tar.gz",
     mime: "application/gzip",
   });

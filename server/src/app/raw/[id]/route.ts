@@ -59,7 +59,7 @@ async function respond(
       return new Response(null, { status: range ? 206 : 200, headers });
     }
     const stream = Readable.from(
-      service.trackedDownloadStream(file, range?.start, range?.end),
+      await service.trackedDownloadStream(file, range?.start, range?.end),
     );
     return new Response(
       Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>,

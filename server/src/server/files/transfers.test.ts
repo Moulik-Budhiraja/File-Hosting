@@ -104,9 +104,9 @@ describe("service transfer instrumentation", () => {
       visibility: "public",
       archive: null,
     });
-    const iterator = service
-      .trackedDownloadStream(file)
-      [Symbol.asyncIterator]();
+    const iterator = (await service.trackedDownloadStream(file))[
+      Symbol.asyncIterator
+    ]();
     await iterator.next();
     assert.equal(service.activeTransfers().length, 1);
     assert.equal(service.activeTransfers()[0]?.direction, "download");

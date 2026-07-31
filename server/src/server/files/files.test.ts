@@ -261,7 +261,10 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
   it("uploads through the raw-body endpoint and exposes metadata routes", async () => {
     const response = await postFile(
       new Request(
-        "http://localhost/api/files?name=unsafe.html&tag=web&tag=sample&archive=tar.gz",
+        // archive=tar.gz is no longer free-form metadata (the bytes would be
+        // rejected); archive plumbing is covered by the dedicated archive
+        // suites with real tar.gz payloads.
+        "http://localhost/api/files?name=unsafe.html&tag=web&tag=sample",
         {
           method: "POST",
           headers: { ...AUTHORIZATION, "content-type": "text/html" },
@@ -276,7 +279,7 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       preview_url: string;
     };
     uploadedId = metadata.id;
-    assert.equal(metadata.archive, "tar.gz");
+    assert.equal(metadata.archive, null);
     assert.equal(
       metadata.preview_url,
       `https://files.example.test/${uploadedId}`,

@@ -5,6 +5,7 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Readable, Writable } from "node:stream";
 import { after, before, beforeEach, test } from "node:test";
+import { gzipSync } from "node:zlib";
 import * as tar from "tar";
 import { run } from "../src/main.js";
 import type { ProgressScheduler } from "../src/progress.js";
@@ -757,6 +758,104 @@ test("folder archives download and extract safely", async () => {
   const downloaded = await cli(["down", item.id, "--extract", "-o", destination]);
   assert.equal(downloaded.code, 0);
   assert.equal(await readFile(join(destination, "inside.txt"), "utf8"), "inside");
+});
+
+// Minimal ustar block for hostile fixtures — node-tar refuses to CREATE
+// unsafe entries, so the attack bytes must be hand-built.
+function rawTarEntry(
+  pathname: string,
+  contents: string,
+  options: { type?: string; linkname?: string; declaredSize?: number } = {},
+): Buffer {
+  const body = Buffer.from(contents);
+  const header = Buffer.alloc(512);
+  header.write(pathname, 0, 100, "utf8");
+  header.write("0000644\0", 100, 8, "latin1");
+  header.write("0000000\0", 108, 8, "latin1");
+  header.write("0000000\0", 116, 8, "latin1");
+  const declaredSize = options.declaredSize ?? body.length;
+  if (declaredSize.toString(8).length <= 11) {
+    header.write(`${declaredSize.toString(8).padStart(11, "0")}\0`, 124, 12, "latin1");
+  } else {
+    // POSIX/GNU base-256 numeric encoding for large declared sizes.
+    let encoded = BigInt(declaredSize);
+    for (let index = 135; index >= 124; index -= 1) {
+      header[index] = Number(encoded & 0xffn);
+      encoded >>= 8n;
+    }
+    header[124] = (header[124] ?? 0) | 0x80;
+  }
+  header.write("00000000000\0", 136, 12, "latin1");
+  header.fill(0x20, 148, 156);
+  header.write(options.type ?? "0", 156, 1, "latin1");
+  if (options.linkname) header.write(options.linkname, 157, 100, "utf8");
+  header.write("ustar\0", 257, 6, "latin1");
+  header.write("00", 263, 2, "latin1");
+  let sum = 0;
+  for (const byte of header) sum += byte;
+  header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+  const padding = Buffer.alloc((512 - (body.length % 512)) % 512);
+  return Buffer.concat([header, body, padding, Buffer.alloc(1024)]);
+}
+
+// Server archive metadata is untrusted: extraction revalidates structure and
+// paths independently before writing anything to the destination.
+test("extraction refuses hostile bytes served under trusted archive metadata", async () => {
+  const hostile = gzipSync(rawTarEntry("../escaped.txt", "should never be written"));
+  const item = service.seed(
+    { name: "hostile.tar.gz", archive: "tar.gz", size: hostile.length },
+    hostile,
+  );
+  const destination = join(scratch, "hostile-destination");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr.text, /unsafe path/i);
+  await assert.rejects(readFile(destination), { code: "ENOENT" });
+  await assert.rejects(readFile(join(scratch, "escaped.txt")), { code: "ENOENT" });
+});
+
+test("extraction refuses Windows traversal, special entries, and oversized declarations", async () => {
+  const fixtures = [
+    {
+      name: "windows-traversal.tar.gz",
+      bytes: gzipSync(rawTarEntry("..\\escaped.txt", "escape")),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "device.tar.gz",
+      bytes: gzipSync(rawTarEntry("device", "", { type: "3" })),
+      pattern: /unsupported archive entry type/i,
+    },
+    {
+      name: "oversized.tar.gz",
+      bytes: gzipSync(rawTarEntry("huge.bin", "", { declaredSize: 101 * 1024 ** 3 })),
+      pattern: /declared uncompressed size/i,
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr.text, fixture.pattern);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+  await assert.rejects(readFile(join(scratch, "escaped.txt")), { code: "ENOENT" });
+});
+
+test("extraction fails cleanly on garbage bytes marked archive=tar.gz", async () => {
+  const item = service.seed(
+    { name: "garbage.tar.gz", archive: "tar.gz", size: 24 },
+    Buffer.from("definitely not a tar.gz!"),
+  );
+  const destination = join(scratch, "garbage-destination");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.notEqual(result.code, 0);
+  await assert.rejects(readFile(destination), { code: "ENOENT" });
 });
 
 test("multi-object operations return partial-success status 8", async () => {

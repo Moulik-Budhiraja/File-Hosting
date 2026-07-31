@@ -196,7 +196,11 @@ test.describe("inspector", () => {
     const save = page.getByRole("button", { name: "Save changes" });
     await expect(save).toBeDisabled();
     await page.getByRole("button", { name: "Make private" }).click();
-    await expect(page.getByText("private · unsaved")).toBeVisible();
+    // The staged state reads "private · unsaved" — the word now lives in the
+    // shared VisibilityLabel next to the unsaved marker.
+    const staged = page.locator(".meta-row .meta-action").first();
+    await expect(staged.locator(".vis-text")).toHaveText("private");
+    await expect(staged).toContainText("· unsaved");
     await expect(save).toBeEnabled();
 
     await page.getByLabel("Add tag").fill("brand");

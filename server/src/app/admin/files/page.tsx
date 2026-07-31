@@ -8,6 +8,7 @@ import { LoadFallback } from "@/admin/components/LoadFallback";
 import { StaleBanner } from "@/admin/components/StaleBanner";
 import { StateBanner } from "@/admin/components/StateBanner";
 import { UploadDialog } from "@/admin/components/UploadDialog";
+import { VisibilityLabel } from "@/admin/components/VisibilityLabel";
 import {
   formatBytes,
   formatInteger,
@@ -229,14 +230,7 @@ export default function FilesPage() {
                       {file.tags.join(" ") || "—"}
                     </td>
                     <td className="cell-vis">
-                      <span
-                        className={`dot ${file.visibility === "public" ? "dot-success" : "dot-muted"}`}
-                        aria-hidden
-                      />
-                      <span className="vis-text">{file.visibility}</span>
-                      <span className="vis-text-short" aria-hidden>
-                        {file.visibility === "public" ? "pub" : "prv"}
-                      </span>
+                      <VisibilityLabel visibility={file.visibility} />
                     </td>
                     <td className="cell-time">
                       {formatListTimestamp(file.created_at)}

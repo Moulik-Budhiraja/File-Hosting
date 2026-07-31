@@ -16,7 +16,7 @@
     "test": "tsx --tsconfig tsconfig.test.json --test src/server/files/*.test.ts src/admin/*.test.ts src/admin/*.test.tsx",
     "test:watch": "tsx --tsconfig tsconfig.test.json --test --watch src/server/files/*.test.ts src/admin/*.test.ts src/admin/*.test.tsx",
     "typecheck": "tsc --noEmit",
-    "test:e2e": "playwright test e2e/admin.spec.ts e2e/edge.spec.ts",
+    "test:e2e": "playwright test e2e/admin.spec.ts e2e/edge.spec.ts e2e/repair2.spec.ts",
     "test:ci": "npm run check && npm run build && npm run test:e2e"
   },
   "dependencies": {

@@ -234,6 +234,31 @@ describe("createAdminApi", () => {
     assert.deepEqual(seen.signals, [controller.signal, controller.signal]);
   });
 
+  // Finding 2: an aborted request is a client decision, not a connectivity
+  // failure — the abort must surface unchanged so callers can treat it as
+  // ordinary cancellation instead of rendering "Could not reach the server".
+  it("rethrows abort errors unchanged instead of classifying them as disconnected", async () => {
+    const abortError = new DOMException(
+      "The user aborted a request.",
+      "AbortError",
+    );
+    const api = createAdminApi({
+      fetchImpl: async () => {
+        throw abortError;
+      },
+      getToken: () => "secret",
+    });
+    const controller = new AbortController();
+    controller.abort();
+    await assert.rejects(
+      api.fetchRawStream("abc1234", { signal: controller.signal }),
+      (error: unknown) => {
+        assert.equal(error, abortError);
+        return true;
+      },
+    );
+  });
+
   it("fetches health without a token", async () => {
     const seen: { auth?: string | null } = {};
     const api = createAdminApi({

@@ -7,6 +7,7 @@ import { useEffect, useRef, useState } from "react";
 import { adminApi, useAdminData } from "@/admin/client";
 import { type FileEntry } from "@/admin/api";
 import { ConfirmDialog } from "@/admin/components/ConfirmDialog";
+import { VisibilityLabel } from "@/admin/components/VisibilityLabel";
 import { LoadFallback } from "@/admin/components/LoadFallback";
 import { browserDownloadEnvironment, downloadFile } from "@/admin/download";
 import {
@@ -243,10 +244,18 @@ export default function InspectorPage() {
       );
       setDownload({ busy: false, bytes: 0, error: null });
     } catch (error) {
+      // Cancellation is normalized to a resolved outcome by downloadFile;
+      // this guard keeps an abort that slips through from rendering as a
+      // failure.
+      const cancelled = error instanceof Error && error.name === "AbortError";
       setDownload({
         busy: false,
         bytes: 0,
-        error: error instanceof Error ? error.message : "Download failed",
+        error: cancelled
+          ? null
+          : error instanceof Error
+            ? error.message
+            : "Download failed",
       });
     } finally {
       downloadAbortRef.current = null;
@@ -423,11 +432,7 @@ export default function InspectorPage() {
               <dd>
                 <span className="meta-action">
                   <span>
-                    <span
-                      className={`dot ${effectiveVisibility === "public" ? "dot-success" : "dot-muted"}`}
-                      aria-hidden
-                    />{" "}
-                    {effectiveVisibility}
+                    <VisibilityLabel visibility={effectiveVisibility} />
                     {effectiveVisibility !== file.visibility
                       ? " · unsaved"
                       : ""}

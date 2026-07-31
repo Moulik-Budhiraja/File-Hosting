@@ -51,7 +51,23 @@ export interface DownloadOutcome {
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === "AbortError";
+  // DOMException in the browser, but abort errors from other realms (undici,
+  // polyfills, cross-frame) are plain Errors carrying the same name.
+  return error instanceof Error && error.name === "AbortError";
+}
+
+function abortable<T>(operation: Promise<T>, signal?: AbortSignal): Promise<T> {
+  if (!signal) return operation;
+  if (signal.aborted) {
+    return Promise.reject(new DOMException("cancelled", "AbortError"));
+  }
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(new DOMException("cancelled", "AbortError"));
+    signal.addEventListener("abort", onAbort, { once: true });
+    operation.then(resolve, reject).finally(() => {
+      signal.removeEventListener("abort", onAbort);
+    });
+  });
 }
 
 async function streamToDisk(
@@ -69,39 +85,66 @@ async function streamToDisk(
     // is a plain cancellation, not a failure.
     handle = await picker({ suggestedName: target.name });
   } catch (error) {
-    if (isAbortError(error)) return { method: "stream", cancelled: true };
+    if (isAbortError(error) || options.signal?.aborted) {
+      return { method: "stream", cancelled: true };
+    }
     throw error;
   }
 
-  const response = await environment.fetchStream(target.id, {
-    signal: options.signal,
-  });
+  let response: Response;
+  let writable: WritableLike;
+  try {
+    response = await environment.fetchStream(target.id, {
+      signal: options.signal,
+    });
+  } catch (error) {
+    // Aborting while the response is being established is ordinary
+    // cancellation; real network/HTTP failures keep propagating.
+    if (isAbortError(error) || options.signal?.aborted) {
+      return { method: "stream", cancelled: true };
+    }
+    throw error;
+  }
   const body = response.body;
   if (!body) {
     throw new Error("The download response had no body to stream");
   }
-  const writable = await handle.createWritable();
+  try {
+    writable = await handle.createWritable();
+  } catch (error) {
+    if (isAbortError(error) || options.signal?.aborted) {
+      return { method: "stream", cancelled: true };
+    }
+    throw error;
+  }
   const reader = body.getReader();
   const abort = () => void reader.cancel().catch(() => undefined);
   options.signal?.addEventListener("abort", abort);
   let bytes = 0;
   try {
     for (;;) {
-      const { done, value } = await reader.read();
+      const { done, value } = await abortable(reader.read(), options.signal);
       if (options.signal?.aborted) {
-        await writable.abort(new DOMException("cancelled", "AbortError"));
+        // Cancellation is already the outcome. Cleanup failure (for example,
+        // a writer that concurrently closed) must not turn it into a false
+        // download failure.
+        await writable
+          .abort(new DOMException("cancelled", "AbortError"))
+          .catch(() => undefined);
         return { method: "stream", cancelled: true };
       }
       if (done) break;
-      await writable.write(value);
+      await abortable(writable.write(value), options.signal);
       bytes += value.length;
       options.onProgress?.(bytes, target.size);
     }
-    await writable.close();
+    await abortable(writable.close(), options.signal);
     return { method: "stream", cancelled: false };
   } catch (error) {
     await writable.abort(error).catch(() => undefined);
-    if (isAbortError(error)) return { method: "stream", cancelled: true };
+    if (isAbortError(error) || options.signal?.aborted) {
+      return { method: "stream", cancelled: true };
+    }
     throw error;
   } finally {
     options.signal?.removeEventListener("abort", abort);
@@ -116,6 +159,12 @@ export async function downloadFile(
     onProgress?: (bytes: number, totalBytes: number) => void;
   } = {},
 ): Promise<DownloadOutcome> {
+  if (options.signal?.aborted) {
+    return {
+      method: environment.showSaveFilePicker ? "stream" : "buffer",
+      cancelled: true,
+    };
+  }
   if (environment.showSaveFilePicker) {
     return streamToDisk(
       target,
@@ -127,9 +176,17 @@ export async function downloadFile(
   if (target.size > BUFFERED_DOWNLOAD_LIMIT) {
     throw new DownloadTooLargeError(target.size);
   }
-  const blob = await environment.fetchBlob(target.id, {
-    signal: options.signal,
-  });
+  let blob: Blob;
+  try {
+    blob = await environment.fetchBlob(target.id, {
+      signal: options.signal,
+    });
+  } catch (error) {
+    if (isAbortError(error) || options.signal?.aborted) {
+      return { method: "buffer", cancelled: true };
+    }
+    throw error;
+  }
   environment.saveBlob(blob, target.name);
   return { method: "buffer", cancelled: false };
 }

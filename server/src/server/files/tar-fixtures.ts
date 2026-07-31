@@ -1,0 +1,54 @@
+// Synthetic ustar fixture builders for tests. Checksums follow the tar spec;
+// cross-tool agreement is proven by the root E2E suite, which uploads real
+// node-tar archives created by the CLI.
+import { gzipSync } from "node:zlib";
+
+const BLOCK = 512;
+
+export function tarHeader(
+  name: string,
+  size: number,
+  options: { type?: string; linkname?: string } = {},
+): Buffer {
+  const block = Buffer.alloc(BLOCK);
+  block.write(name, 0, 100, "utf8");
+  block.write("0000644\0", 100, 8, "latin1");
+  block.write("0000000\0", 108, 8, "latin1");
+  block.write("0000000\0", 116, 8, "latin1");
+  block.write(`${size.toString(8).padStart(11, "0")}\0`, 124, 12, "latin1");
+  block.write("00000000000\0", 136, 12, "latin1");
+  block.write("        ", 148, 8, "latin1");
+  block.write(options.type ?? "0", 156, 1, "latin1");
+  if (options.linkname) block.write(options.linkname, 157, 100, "utf8");
+  block.write("ustar\0", 257, 6, "latin1");
+  block.write("00", 263, 2, "latin1");
+  let sum = 0;
+  for (const byte of block) sum += byte;
+  block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+  return block;
+}
+
+export function tarEntry(
+  name: string,
+  content: Buffer | string,
+  options: { type?: string; linkname?: string } = {},
+): Buffer {
+  const body = Buffer.from(content);
+  const padded = Buffer.alloc(Math.ceil(body.length / BLOCK) * BLOCK);
+  body.copy(padded);
+  return Buffer.concat([tarHeader(name, body.length, options), padded]);
+}
+
+export function tarTrailer(): Buffer {
+  return Buffer.alloc(2 * BLOCK);
+}
+
+export function validTarGz(): Buffer {
+  return gzipSync(
+    Buffer.concat([
+      tarEntry("dir/", "", { type: "5" }),
+      tarEntry("dir/hello.txt", "hello world"),
+      tarTrailer(),
+    ]),
+  );
+}
