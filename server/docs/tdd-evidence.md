@@ -100,5 +100,11 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       `docker compose config --quiet` validation was unavailable because Docker is
       not installed in this runner.
 
+19. Invalid-username authentication isolation
+    - RED: the focused `never maps malformed usernames` test authenticated the
+      valid `invalid-user` account when `$` was submitted as its username.
+    - GREEN: failed normalization now retains an explicit null identity, uses only
+      the dummy bcrypt path, and derives a non-account throttle identity.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

@@ -90,6 +90,29 @@ describe("user repository", () => {
     }
   });
 
+  it("never maps malformed usernames onto a valid account", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-invalid-username-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      await repository.bootstrapAdmin({
+        username: "invalid-user",
+        password: ADMIN_CREDENTIAL,
+      });
+
+      await assert.rejects(
+        repository.authenticatePassword("$", ADMIN_CREDENTIAL, "192.0.2.50"),
+        /invalid username or password/iu,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not issue a password session after the verified hash changes", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-session-race-test-"),

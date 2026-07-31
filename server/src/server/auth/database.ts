@@ -334,13 +334,14 @@ export class AuthRepository {
     remoteAddress: string,
     now = new Date(),
   ): Promise<PasswordAuthentication> {
-    let username = "invalid-user";
+    let username: string | null = null;
     try {
       username = normalizeUsername(usernameInput);
     } catch {
       // Continue through the same bcrypt path to avoid username enumeration.
     }
-    const throttleKey = digest(`${remoteAddress}\0${username}`);
+    const throttleIdentity = username ?? `invalid:${digest(usernameInput)}`;
+    const throttleKey = digest(`${remoteAddress}\0${throttleIdentity}`);
     await this.client.execute({
       sql: "DELETE FROM login_failures WHERE window_started_at <= ?",
       args: [new Date(now.getTime() - LOGIN_WINDOW_MS).toISOString()],
@@ -360,11 +361,14 @@ export class AuthRepository {
       );
     }
 
-    const result = await this.client.execute({
-      sql: "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
-      args: [username],
-    });
-    const row = result.rows[0];
+    const row = username
+      ? (
+          await this.client.execute({
+            sql: "SELECT * FROM users WHERE username = ? COLLATE NOCASE",
+            args: [username],
+          })
+        ).rows[0]
+      : undefined;
     const dummyHash =
       "$2b$12$C6UzMDM.H6dfI/f/IKcEe.5fMltXVrRjRQgIaY10beI7u1Y7Q5n6e";
     const matches = await verifyPassword(
