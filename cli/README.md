@@ -28,7 +28,10 @@ fs auth status
 ```
 
 The prompt does not echo the token. To remove the saved token, run
-`fs auth delete`.
+`fs auth delete`. The noninteractive `auth status` and `auth delete` actions
+accept and ignore the global `--no-input` flag. `auth set` always requires an
+interactive terminal and rejects `--no-input`; use `FS_TOKEN` instead in
+noninteractive environments.
 
 For CI and other noninteractive environments, configure the endpoint and token
 with environment variables instead:

@@ -75,6 +75,12 @@ Options:
   --json | --jsonl | --id     Machine-readable output
 `;
 
+const AUTH_HELP = `Usage: fs auth set|status|delete
+
+--no-input is accepted by status and delete, which never prompt. auth set is
+interactive and rejects --no-input; use FS_TOKEN in noninteractive environments.
+`;
+
 interface ParsedArguments {
   // Node's parseArgs conditional return type becomes unwieldy once common option
   // maps are composed. Command handlers still own and validate each value.
@@ -108,13 +114,21 @@ function requireToken(token: string): void {
 }
 
 async function authCommand(args: string[], dependencies: RunDependencies, streams: Streams): Promise<ExitCode> {
-  if (args.length === 1 && ["--help", "-h"].includes(args[0]!)) {
-    streams.stdout.write("Usage: fs auth set|status|delete\n");
+  const parsed = parse(args, { "no-input": { type: "boolean" }, help: { type: "boolean", short: "h" } });
+  if (parsed.values.help) {
+    streams.stdout.write(AUTH_HELP);
     return EXIT.success;
   }
-  const [action, ...extra] = args;
+  const [action, ...extra] = parsed.positionals;
   if (extra.length || !action || !["set", "status", "delete"].includes(action)) {
     throw new CliError("Usage: fs auth set|status|delete", EXIT.usage, "INVALID_ARGUMENTS");
+  }
+  if (action === "set" && parsed.values["no-input"]) {
+    throw new CliError(
+      "fs auth set is interactive and cannot be used with --no-input; set FS_TOKEN instead",
+      EXIT.usage,
+      "INTERACTIVE_REQUIRED",
+    );
   }
   if (!dependencies.credentials) {
     throw new CliError("Secure credential storage is unavailable", EXIT.auth, "CREDENTIAL_STORE_UNAVAILABLE");
@@ -625,16 +639,20 @@ async function dispatch(argv: string[], dependencies: RunDependencies): Promise<
   const args = explicit ? argv.slice(1) : argv;
   const config = loadConfig(dependencies.env);
   const needsToken = !args.includes("--help") && !args.includes("-h");
+  const authPositionals = args.filter((arg) => arg !== "--no-input");
   const validAuthAction = command === "auth"
-    && args.length === 1
-    && ["set", "status", "delete"].includes(args[0]!);
-  if (command === "auth" && !validAuthAction) {
+    && authPositionals.length === 1
+    && ["set", "status", "delete"].includes(authPositionals[0]!);
+  const interactiveAuthSetBlocked = validAuthAction
+    && authPositionals[0] === "set"
+    && args.includes("--no-input");
+  if (command === "auth" && (!validAuthAction || interactiveAuthSetBlocked)) {
     return authCommand(args, dependencies, streams);
   }
   let credentials = dependencies.credentials;
   if (!credentials && validAuthAction) {
     credentials = await createCredentialStore(config.baseUrl);
-  } else if (!config.token && needsToken) {
+  } else if (command !== "auth" && !config.token && needsToken) {
     try {
       credentials ??= await createCredentialStore(config.baseUrl);
       config.token = credentials.getPassword() ?? "";

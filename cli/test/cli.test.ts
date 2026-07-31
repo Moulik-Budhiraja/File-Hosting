@@ -358,6 +358,51 @@ test("auth delete reports when no saved credential exists", async () => {
   assert.doesNotMatch(result.stderr.text, /token deleted/i);
 });
 
+test("global --no-input is ignored by auth status", async () => {
+  let reads = 0;
+  const result = await cli(["--no-input", "auth", "status"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): string { reads += 1; return "stored-secret-token"; },
+      setPassword(): void {},
+      deletePassword(): void {},
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(reads, 1);
+  assert.match(result.stdout.text, /configured/i);
+});
+
+test("global --no-input is ignored by auth delete", async () => {
+  let deletes = 0;
+  const result = await cli(["--no-input", "auth", "delete"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): null { return null; },
+      setPassword(): void {},
+      deletePassword(): boolean { deletes += 1; return true; },
+    },
+  });
+  assert.equal(result.code, 0);
+  assert.equal(deletes, 1);
+  assert.match(result.stderr.text, /deleted/i);
+});
+
+test("global --no-input rejects interactive auth set without reading or saving", async () => {
+  let reads = 0;
+  let writes = 0;
+  const result = await cli(["--no-input", "auth", "set"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): null { return null; },
+      setPassword(): void { writes += 1; },
+      deletePassword(): void {},
+    },
+    readSecret: async (): Promise<string> => { reads += 1; return "new-secret-token"; },
+  });
+  assert.equal(result.code, 2);
+  assert.match(result.stderr.text, /auth set.*interactive|interactive.*auth set/i);
+  assert.equal(reads, 0);
+  assert.equal(writes, 0);
+});
+
 test("upload shorthand streams bytes and applies tags and visibility", async () => {
   const path = join(scratch, "report.txt");
   await writeFile(path, "hello agent");
