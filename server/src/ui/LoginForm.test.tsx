@@ -1,0 +1,143 @@
+import { cleanup, render, screen } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
+import { afterEach, expect, test, vi } from "vitest";
+
+import { LoginForm } from "./LoginForm";
+
+afterEach(() => {
+  cleanup();
+  vi.unstubAllGlobals();
+});
+
+function jsonResponse(status: number, body: unknown): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "content-type": "application/json; charset=utf-8" },
+  });
+}
+
+const user = {
+  id: "u1",
+  username: "ops-admin",
+  role: "admin",
+  active: true,
+  created_at: "2026-07-01T00:00:00.000Z",
+  updated_at: "2026-07-01T00:00:00.000Z",
+};
+
+test("successful sign-in posts credentials and reports the signed-in user", async () => {
+  const fetchMock = vi.fn(async () =>
+    jsonResponse(200, { user, expires_at: "2026-08-07T00:00:00.000Z" }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "correct horse batt");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(onSuccess).toHaveBeenCalledWith(
+    expect.objectContaining({ username: "ops-admin", role: "admin" }),
+    "2026-08-07T00:00:00.000Z",
+  );
+  const [url, init] = fetchMock.mock.calls[0] as unknown as [
+    string,
+    RequestInit,
+  ];
+  expect(url).toBe("/api/auth/login");
+  expect(JSON.parse(init.body as string)).toEqual({
+    username: "ops-admin",
+    password: "correct horse batt",
+  });
+});
+
+test("invalid credentials show one generic error, clear the password, keep the username", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse(401, {
+        error: {
+          code: "invalid_credentials",
+          message: "Invalid username or password",
+        },
+      }),
+    ),
+  );
+  render(<LoginForm onSuccess={vi.fn()} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "wrong password!!");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(screen.getByText("Username or password is incorrect.")).toBeTruthy();
+  expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe(
+    "ops-admin",
+  );
+  expect((screen.getByLabelText("Password") as HTMLInputElement).value).toBe(
+    "",
+  );
+});
+
+test("throttled sign-in states the lock in words and disables the submit", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse(429, {
+        error: {
+          code: "login_throttled",
+          message: "Too many login attempts; try again later",
+        },
+      }),
+    ),
+  );
+  render(<LoginForm onSuccess={vi.fn()} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "wrong password!!");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(screen.getByText("Too many attempts.")).toBeTruthy();
+  expect(screen.getByText(/locked for this address/i).textContent).toMatch(
+    /try again/i,
+  );
+  const locked = screen.getByRole("button", {
+    name: "Sign in — locked",
+  }) as HTMLButtonElement;
+  expect(locked.disabled).toBe(true);
+});
+
+test("server errors state that nothing changed and keep the form usable", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse(500, {
+        error: {
+          code: "internal_error",
+          message: "An internal server error occurred",
+        },
+      }),
+    ),
+  );
+  render(<LoginForm onSuccess={vi.fn()} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "some password!!!");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(screen.getByText(/couldn't sign you in \(500\)/i)).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+
+test("session-expired mode shows the banner and prefills the username", () => {
+  render(<LoginForm onSuccess={vi.fn()} expired initialUsername="ops-admin" />);
+  expect(
+    screen.getByText("Session expired — sign in again to continue."),
+  ).toBeTruthy();
+  expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe(
+    "ops-admin",
+  );
+});
