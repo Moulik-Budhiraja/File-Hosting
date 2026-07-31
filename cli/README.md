@@ -108,7 +108,11 @@ fs info "$id" --json
 ```
 
 The CLI never prompts when standard streams are redirected or when
-`--no-input` is set. Output contains no color control sequences.
+`--no-input` is set. Uploads and file downloads that are still running after
+2.5 seconds show live bytes, rate, and (when the size is known) percentage and
+ETA on an interactive stderr. Fast transfers, machine-readable upload modes,
+redirected stderr, and downloads streamed with `-o -` do not show progress.
+Progress never writes to stdout. Output contains no color control sequences.
 
 Stable exit statuses are:
 

@@ -7,9 +7,11 @@ import { Readable, Writable } from "node:stream";
 import { after, before, beforeEach, test } from "node:test";
 import * as tar from "tar";
 import { run } from "../src/main.js";
+import type { ProgressScheduler } from "../src/progress.js";
 import type { FileMetadata, Streams } from "../src/types.js";
 
 class Capture extends Writable {
+  isTTY = false;
   readonly chunks: Buffer[] = [];
   _write(chunk: Buffer | string, _encoding: BufferEncoding, callback: (error?: Error | null) => void): void {
     this.chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
@@ -17,6 +19,31 @@ class Capture extends Writable {
   }
   get buffer(): Buffer { return Buffer.concat(this.chunks); }
   get text(): string { return this.buffer.toString("utf8"); }
+}
+
+class CliScheduler implements ProgressScheduler {
+  private nowValue = 0;
+  private sequence = 0;
+  private readonly timeouts = new Map<number, { at: number; callback: () => void }>();
+
+  now(): number { return this.nowValue; }
+  setTimeout(callback: () => void, delay: number): object {
+    const id = ++this.sequence;
+    this.timeouts.set(id, { at: this.nowValue + delay, callback });
+    return { id };
+  }
+  clearTimeout(handle: object): void { this.timeouts.delete((handle as { id: number }).id); }
+  setInterval(_callback: () => void, _delay: number): object { return { id: ++this.sequence }; }
+  clearInterval(_handle: object): void {}
+  advance(ms: number): void {
+    this.nowValue += ms;
+    for (const [id, task] of [...this.timeouts]) {
+      if (task.at <= this.nowValue) {
+        this.timeouts.delete(id);
+        task.callback();
+      }
+    }
+  }
 }
 
 interface Stored {
@@ -200,7 +227,7 @@ async function cli(
   args: string[],
   input: string | Buffer = "",
   env: NodeJS.ProcessEnv = {},
-  dependencies: Record<string, unknown> = {},
+  options: Record<string, unknown> & { tty?: boolean; fetch?: typeof fetch; scheduler?: ProgressScheduler } = {},
 ): Promise<{
   code: number;
   stdout: Capture;
@@ -208,12 +235,15 @@ async function cli(
 }> {
   const stdout = new Capture();
   const stderr = new Capture();
+  stderr.isTTY = options.tty ?? false;
   const stdin = Readable.from([input]);
   const streams: Streams = { stdin, stdout, stderr };
   const code = await run(args, {
     env: { FS_URL: service.url, FS_TOKEN: "secret", ...env },
     streams,
-    ...dependencies,
+    ...options,
+    fetch: options.fetch,
+    progressScheduler: options.scheduler,
   });
   return { code, stdout, stderr };
 }
@@ -417,6 +447,53 @@ test("upload shorthand streams bytes and applies tags and visibility", async () 
   assert.equal(service.requests[0]?.authorization, "Bearer secret");
 });
 
+test("upload progress is delayed and suppressed for structured output", async () => {
+  const path = join(scratch, "slow-upload.bin");
+  await writeFile(path, Buffer.alloc(256 * 1024));
+  const delayedUpload = (progressScheduler: CliScheduler): typeof fetch => async (input, init) => {
+    const requestUrl = new URL(input instanceof Request ? input.url : input.toString());
+    let size = 0;
+    let first = true;
+    for await (const chunk of init!.body as unknown as Readable) {
+      size += Buffer.byteLength(chunk);
+      if (first) {
+        first = false;
+        progressScheduler.advance(2_500);
+      }
+    }
+    return Response.json({
+      id: "Ab90001",
+      name: requestUrl.searchParams.get("name"),
+      size,
+      visibility: "public",
+      tags: [],
+      archive: null,
+    }, { status: 201 });
+  };
+
+  const fastScheduler = new CliScheduler();
+  const fast = await cli([path], "", {}, { tty: true, scheduler: fastScheduler });
+  assert.equal(fast.code, 0);
+  assert.equal(fast.stderr.text, "");
+
+  const slowScheduler = new CliScheduler();
+  const slow = await cli([path], "", {}, { tty: true, scheduler: slowScheduler, fetch: delayedUpload(slowScheduler) });
+  assert.equal(slow.code, 0);
+  assert.match(slow.stderr.text, /Uploading slow-upload\.bin: 256\.0 KB \/ 256\.0 KB \(100%\).*done\n$/);
+
+  for (const flag of ["--json", "--jsonl", "--id"]) {
+    const structuredScheduler = new CliScheduler();
+    const structured = await cli([path, flag], "", {}, {
+      tty: true,
+      scheduler: structuredScheduler,
+      fetch: delayedUpload(structuredScheduler),
+    });
+    assert.equal(structured.stderr.text, "");
+    if (flag === "--id") assert.match(structured.stdout.text, /^Ab\d{5}\n$/);
+    else assert.doesNotThrow(() => JSON.parse(structured.stdout.text));
+  }
+});
+
 test("stdin upload requires a name and can emit only an ID", async () => {
   const missing = await cli(["up", "-", "--id"], "piped");
   assert.equal(missing.code, 2);
@@ -551,6 +628,43 @@ test("download streams exact bytes to stdout", async () => {
   assert.equal(result.code, 0);
   assert.deepEqual(result.stdout.buffer, body);
   assert.equal(result.stderr.text, "");
+});
+
+test("download progress is delayed and suppressed when streaming to stdout", async () => {
+  const body = Buffer.alloc(1_000, 7);
+  const item = service.seed({ name: "slow-download.bin" }, body);
+
+  const fastDestination = join(scratch, "fast-download.bin");
+  const fastScheduler = new CliScheduler();
+  const fast = await cli(["down", item.id, "-o", fastDestination, "--force"], "", {}, { tty: true, scheduler: fastScheduler });
+  assert.equal(fast.code, 0);
+  assert.equal(fast.stderr.text, "");
+
+  const slowDestination = join(scratch, "slow-download.bin");
+  const slowScheduler = new CliScheduler();
+  const slowFetch: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (new URL(input instanceof Request ? input.url : input.toString()).pathname.startsWith("/raw/")) slowScheduler.advance(2_500);
+    return response;
+  };
+  const slow = await cli(["down", item.id, "-o", slowDestination, "--force"], "", {}, {
+    tty: true,
+    scheduler: slowScheduler,
+    fetch: slowFetch,
+  });
+  assert.equal(slow.code, 0);
+  assert.deepEqual(await readFile(slowDestination), body);
+  assert.match(slow.stderr.text, /Downloading slow-download\.bin: 1000 B \/ 1000 B \(100%\).*done\n$/);
+
+  const stdoutScheduler = new CliScheduler();
+  const stdoutFetch: typeof fetch = async (input, init) => {
+    const response = await fetch(input, init);
+    if (new URL(input instanceof Request ? input.url : input.toString()).pathname.startsWith("/raw/")) stdoutScheduler.advance(2_500);
+    return response;
+  };
+  const piped = await cli(["down", item.id, "-o", "-"], "", {}, { tty: true, scheduler: stdoutScheduler, fetch: stdoutFetch });
+  assert.deepEqual(piped.stdout.buffer, body);
+  assert.equal(piped.stderr.text, "");
 });
 
 test("download avoids overwrite unless --force", async () => {
