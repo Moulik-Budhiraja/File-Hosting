@@ -1454,10 +1454,11 @@ describe("TarGzArchiveValidator", () => {
       );
     });
 
-    it("accepts a benign global linkpath masking a hostile local one, matching node-tar", async () => {
-      // The local ../../outside value is never published by node-tar; the
-      // global safe.txt wins.
-      await validate(
+    it("rejects a hostile local linkpath even when a benign global masks it", async () => {
+      // node-tar publishes the global value here, but no benign override may
+      // launder a hostile one that a differently-ordered extractor would
+      // apply: every applicable override is validated in its own right.
+      await rejectsInvalid(
         gzipSync(
           Buffer.concat([
             tarEntry("safe.txt", "content"),
@@ -1465,6 +1466,23 @@ describe("TarGzArchiveValidator", () => {
               type: "g",
             }),
             tarEntry("PaxHeader/link", paxRecord("linkpath", "../../out"), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "raw.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+      // The same shape with two portable, contained values stays valid.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "content"),
+            tarEntry("GlobalHead", paxRecord("linkpath", "safe.txt"), {
+              type: "g",
+            }),
+            tarEntry("PaxHeader/link", paxRecord("linkpath", "other.txt"), {
               type: "x",
             }),
             tarEntry("link", "", { type: "2", linkname: "raw.txt" }),
@@ -1554,6 +1572,595 @@ describe("TarGzArchiveValidator", () => {
           ]),
         ),
         /link/u,
+      );
+    });
+  });
+
+  // node-tar does not read a pax payload by its length framing: pax.js splits
+  // the whole body on "\n" and keeps only lines whose declared length equals
+  // the line's byte length + 1. A single length-framed record can therefore
+  // carry, inside its own value, a second self-consistent pax line that the
+  // extractor honors and a framing-only parser never observes — so an ignored
+  // outer key can hide a hostile path/linkpath/size. Both interpretations
+  // must agree, or the archive is not certifiable.
+  describe("extractor-faithful pax record parsing", () => {
+    // One length-framed record under `outerKey` whose value embeds `hidden`
+    // (itself a well-formed pax line) after a newline.
+    function hidingPaxRecord(outerKey: string, hidden: string): string {
+      return paxRecord(outerKey, `${"J".repeat(24)}\n${hidden.slice(0, -1)}`);
+    }
+
+    it("rejects a local pax record hiding a linkpath the extractor publishes", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "safe"),
+            tarEntry(
+              "PaxHeader/link",
+              hidingPaxRecord("FSAUDIT", paxRecord("linkpath", "COM1.log")),
+              { type: "x" },
+            ),
+            tarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /pax metadata/u,
+      );
+    });
+
+    it("rejects a global pax record hiding a linkpath the extractor publishes", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "safe"),
+            tarEntry(
+              "GlobalHead",
+              hidingPaxRecord("FSAUDIT", paxRecord("linkpath", "NUL.txt")),
+              { type: "g" },
+            ),
+            tarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /pax metadata/u,
+      );
+    });
+
+    it("rejects hidden path records in every hostile spelling", async () => {
+      const hiddenPaths = [
+        "CON.txt", // DOS device basename
+        "file:stream", // ADS colon
+        "bad.", // trailing dot
+        "bad ", // trailing space
+        "tab\there.txt", // control character
+        "../escape.txt", // traversal
+        "/etc/passwd", // absolute
+        "C:\\drive.txt", // Windows drive
+        "GOOD.TXT", // case alias of the accepted good.txt
+        "goo\u0308d.txt", // NFD alias
+      ];
+      for (const hidden of hiddenPaths) {
+        await rejectsInvalid(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("good.txt", "a"),
+              tarEntry(
+                "PaxHeader/x",
+                hidingPaxRecord("FSAUDIT", paxRecord("path", hidden)),
+                { type: "x" },
+              ),
+              tarEntry("benign.txt", "b"),
+              tarTrailer(),
+            ]),
+          ),
+          /pax metadata/u,
+        );
+      }
+    });
+
+    it("rejects a hidden path that collapses two entries onto one destination", async () => {
+      // The manifest would promise one.txt and two.txt; the extractor
+      // publishes a single one.txt holding the second entry's bytes.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("one.txt", "AAAA"),
+            tarEntry(
+              "PaxHeader/two.txt",
+              hidingPaxRecord("FSAUDIT", paxRecord("path", "one.txt")),
+              { type: "x" },
+            ),
+            tarEntry("two.txt", "BBBB"),
+            tarTrailer(),
+          ]),
+        ),
+        /pax metadata/u,
+      );
+    });
+
+    it("rejects a hidden size record that reframes the following entry", async () => {
+      for (const type of ["x", "g"] as const) {
+        await rejectsInvalid(
+          gzipSync(
+            Buffer.concat([
+              tarEntry(
+                type === "x" ? "PaxHeader/f.txt" : "GlobalHead",
+                hidingPaxRecord("FSAUDIT", paxRecord("size", "1024")),
+                { type },
+              ),
+              tarEntry("f.txt", "0123456789"),
+              tarTrailer(),
+            ]),
+          ),
+          /pax metadata/u,
+        );
+      }
+    });
+
+    it("rejects a hidden record even under a key the extractor also ignores", async () => {
+      // `comment` is parsed by node-tar but never affects extraction; the
+      // hidden line still does.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry(
+              "PaxHeader/x",
+              hidingPaxRecord("comment", paxRecord("path", "NUL.txt")),
+              { type: "x" },
+            ),
+            tarEntry("benign.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /pax metadata/u,
+      );
+    });
+
+    it("rejects embedded NUL and CR in pax record values", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "benign.txt\0CON"), {
+              type: "x",
+            }),
+            tarEntry("placeholder.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /pax metadata/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "carriage\rreturn.txt"), {
+              type: "x",
+            }),
+            tarEntry("placeholder.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path|pax metadata/u,
+      );
+    });
+
+    it("rejects a payload the extractor's line parser reads differently", async () => {
+      // A zero-padded length prefix is well-formed under length framing but
+      // node-tar's parseInt/byte-length equality test skips the line, so the
+      // two interpretations disagree about `path`.
+      const record = paxRecord("path", "renamed.txt");
+      const padded = `0${record}`;
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", padded, { type: "x" }),
+            tarEntry("placeholder.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /pax metadata/u,
+      );
+    });
+
+    it("keeps valid pax framing, duplicate precedence, and size semantics", async () => {
+      // Multi-record payloads as real tools emit them stay valid.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry(
+              "PaxHeader/x",
+              paxRecord("path", "dir/renamed.txt") +
+                paxRecord("mtime", "1700000000.5") +
+                paxRecord("uname", "admin") +
+                paxRecord("SCHILY.dev", "16777230"),
+              { type: "x" },
+            ),
+            tarEntry("placeholder.txt", "hello"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+      // Duplicate keys: the last record wins, exactly as node-tar's reduce does.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry(
+              "PaxHeader/x",
+              paxRecord("path", "benign.txt") + paxRecord("path", "CON.txt"),
+              { type: "x" },
+            ),
+            tarEntry("placeholder.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry(
+              "PaxHeader/x",
+              paxRecord("path", "CON.txt") + paxRecord("path", "benign.txt"),
+              { type: "x" },
+            ),
+            tarEntry("placeholder.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+      // A pax size still frames the following entry (kept here so the
+      // agreement gate cannot silently disable size overrides).
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/big", paxRecord("size", "5"), { type: "x" }),
+            tarHeader("big.bin", 0),
+            Buffer.from("hello\0".padEnd(512, "\0"), "latin1"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+  });
+
+  // A backslash is an ordinary filename character on POSIX — node-tar's
+  // normalize-windows-path is the identity off Windows — and a separator on
+  // Windows. Normalizing it to "/" made the scanners derive a manifest path
+  // the extractor never publishes (so the server certified archives the
+  // shipped CLI can never materialize) and would launder a Windows traversal
+  // into a safe-looking path. Every raw entry path, link target, and override
+  // carrying one rejects with a truthful reason.
+  describe("backslash entry path and link fidelity", () => {
+    it("rejects raw backslashes in entry paths", async () => {
+      for (const name of ["dir/back\\slash.txt", "a\\b.txt", "back\\"]) {
+        await rejectsInvalid(
+          gzipSync(Buffer.concat([tarEntry(name, "x"), tarTrailer()])),
+          /unsafe entry path/u,
+        );
+      }
+    });
+
+    it("rejects raw backslashes in symlink and hardlink targets", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("target.txt", "x"),
+            tarEntry("link", "", { type: "2", linkname: "back\\slash.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("target.txt", "x"),
+            tarEntry("hard", "", { type: "1", linkname: "dir\\target.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("rejects backslashes arriving via every override form", async () => {
+      const fixtures: Array<[Buffer, RegExp]> = [
+        // GNU long path.
+        [
+          Buffer.concat([
+            tarEntry("././@LongLink", "dir/back\\slash.txt\0", { type: "L" }),
+            tarEntry("placeholder.txt", "x"),
+            tarTrailer(),
+          ]),
+          /unsafe entry path/u,
+        ],
+        // GNU long link.
+        [
+          Buffer.concat([
+            tarEntry("target.txt", "x"),
+            tarEntry("././@LongLink", "back\\slash.txt\0", { type: "K" }),
+            tarEntry("link", "", { type: "2", linkname: "placeholder" }),
+            tarTrailer(),
+          ]),
+          /unsafe link target/u,
+        ],
+        // Local pax path.
+        [
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "dir/back\\slash.txt"), {
+              type: "x",
+            }),
+            tarEntry("placeholder.txt", "x"),
+            tarTrailer(),
+          ]),
+          /unsafe entry path/u,
+        ],
+        // Local pax linkpath.
+        [
+          Buffer.concat([
+            tarEntry("target.txt", "x"),
+            tarEntry(
+              "PaxHeader/link",
+              paxRecord("linkpath", "back\\slash.txt"),
+              {
+                type: "x",
+              },
+            ),
+            tarEntry("link", "", { type: "2", linkname: "target.txt" }),
+            tarTrailer(),
+          ]),
+          /unsafe link target/u,
+        ],
+        // Global pax linkpath.
+        [
+          Buffer.concat([
+            tarEntry("target.txt", "x"),
+            tarEntry("GlobalHead", paxRecord("linkpath", "back\\slash.txt"), {
+              type: "g",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "target.txt" }),
+            tarTrailer(),
+          ]),
+          /unsafe link target/u,
+        ],
+      ];
+      for (const [fixture, pattern] of fixtures) {
+        await rejectsInvalid(gzipSync(fixture), pattern);
+      }
+    });
+
+    it("keeps the Windows traversal and device defenses", async () => {
+      // Rejection must never depend on normalizing the backslash away first.
+      const spellings = [
+        "..\\escape.txt",
+        "dir\\..\\..\\escape.txt",
+        "C:\\absolute.txt",
+        "\\\\server\\share\\file.txt",
+        "\\\\.\\PIPE\\name",
+        "dir\\CON.txt",
+      ];
+      for (const name of spellings) {
+        await rejectsInvalid(
+          gzipSync(Buffer.concat([tarEntry(name, "x"), tarTrailer()])),
+          /unsafe entry path/u,
+        );
+      }
+    });
+
+    it("keeps ordinary forward-slash archives valid", async () => {
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("dir/", "", { type: "5" }),
+            tarEntry("dir/plain name.txt", "x"),
+            tarEntry("dir/link", "", { type: "2", linkname: "plain name.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+  });
+
+  // node-tar joins the ustar `prefix` field to the name only inside
+  // `if (buf.subarray(257, 265).toString() === "ustar\u000000")`
+  // (dist/esm/header.js), and reads 130 or 155 bytes of it depending on
+  // whether offset 475 is non-zero. Deriving a prefix from a non-ustar header
+  // invents a destination the extractor never publishes, so the manifest
+  // stops matching the real extraction and collisions go unnoticed.
+  describe("ustar prefix magic gating", () => {
+    const OLD_GNU = "ustar  \0";
+
+    it("ignores the prefix on non-ustar headers, so aliases still collide", async () => {
+      // Both headers extract as inner.txt; only a prefix the extractor never
+      // applies would make them look like distinct destinations.
+      for (const magic of [OLD_GNU, "ustar\0\0\0", "\0".repeat(8)]) {
+        await rejectsInvalid(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("inner.txt", "a"),
+              tarEntry("inner.txt", "b", { magic, prefix: "00000000000" }),
+              tarTrailer(),
+            ]),
+          ),
+          /conflicting entry paths/u,
+        );
+      }
+    });
+
+    it("still applies the prefix on a real ustar header", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("outer/inner.txt", "a"),
+            tarEntry("inner.txt", "b", { prefix: "outer" }),
+            tarTrailer(),
+          ]),
+        ),
+        /conflicting entry paths/u,
+      );
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("inner.txt", "b", { prefix: "outer" }),
+            tarEntry("other.txt", "c"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    it("mirrors the 130/155-byte prefix split at offset 475", async () => {
+      // Offset 475 non-zero means the whole 155-byte field is the prefix and
+      // node-tar joins it unconditionally — even when it decodes empty, which
+      // yields an absolute "/inner.txt" the extractor refuses.
+      const prefixBytes = Buffer.alloc(155);
+      prefixBytes[130] = 0x41;
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("inner.txt", "b", { prefixBytes }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("keeps a local pax path override winning over any prefix", async () => {
+      // ReadEntry re-applies the local override after Header joined the
+      // prefix, so the published path is the override alone.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("outer/renamed.txt", "a"),
+            tarEntry("PaxHeader/x", paxRecord("path", "outer/renamed.txt"), {
+              type: "x",
+            }),
+            tarEntry("inner.txt", "b", { prefix: "somewhere" }),
+            tarTrailer(),
+          ]),
+        ),
+        /conflicting entry paths/u,
+      );
+    });
+  });
+
+  // The contract: no benign value may hide a hostile one. Every override the
+  // extractor could apply (GNU L/K, PAX local path/linkpath, PAX global
+  // linkpath) is validated in full even when another override masks it. Raw
+  // header fields are validated in full when they are the published value;
+  // when an override masks them they still must be contained (no absolute,
+  // drive, backslash, or `..` form), but the portable-name policy is not
+  // applied to them because the raw field is a lossy 100-byte truncation of
+  // the real name — node-tar and bsdtar both emit one for long paths — and
+  // the extractor demonstrably never publishes it.
+  describe("override masking", () => {
+    it("rejects a hostile override masked by a later override of the same kind", async () => {
+      // GNU long path followed by a pax path record for the same entry.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("././@LongLink", "../escape.txt\0", { type: "L" }),
+            tarEntry("PaxHeader/x", paxRecord("path", "benign.txt"), {
+              type: "x",
+            }),
+            tarEntry("placeholder.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+      // GNU long link followed by a pax linkpath record.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "x"),
+            tarEntry("././@LongLink", "../../outside\0", { type: "K" }),
+            tarEntry("PaxHeader/link", paxRecord("linkpath", "safe.txt"), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "raw.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("rejects a non-portable override masked by a benign one", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("././@LongLink", "dir/CON.txt\0", { type: "L" }),
+            tarEntry("PaxHeader/x", paxRecord("path", "benign.txt"), {
+              type: "x",
+            }),
+            tarEntry("placeholder.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("rejects an uncontained raw header value masked by a benign override", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "benign.txt"), {
+              type: "x",
+            }),
+            tarEntry("../escape.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "x"),
+            tarEntry("PaxHeader/link", paxRecord("linkpath", "safe.txt"), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "../../outside" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("keeps a lossily truncated raw header name behind a valid override", async () => {
+      // node-tar and bsdtar both write a 100-byte truncation of a long path
+      // into the raw name field alongside the pax `path` record; that
+      // truncation can land on a trailing dot or a device-name prefix, and
+      // the extractor never publishes it.
+      for (const rawName of ["report.", "CON", "trailing "]) {
+        await validate(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("PaxHeader/x", paxRecord("path", "report.name.txt"), {
+                type: "x",
+              }),
+              tarEntry(rawName, "x"),
+              tarTrailer(),
+            ]),
+          ),
+        );
+      }
+    });
+
+    it("keeps the global pax path inert, since node-tar never applies it", async () => {
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("GlobalHead", paxRecord("path", "../../outside"), {
+              type: "g",
+            }),
+            tarEntry("inner.txt", "content"),
+            tarTrailer(),
+          ]),
+        ),
       );
     });
   });

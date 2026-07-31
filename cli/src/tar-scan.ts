@@ -81,6 +81,17 @@ const RESERVED_DEVICE_BASENAMES =
   /^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9¹²³]|LPT[1-9¹²³])$/iu;
 const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
 
+// node-tar's `normalize-windows-path` is the identity off Windows, so a
+// backslash is an ordinary POSIX filename character node-tar publishes
+// verbatim — while on Windows it is a separator. Either way a value carrying
+// one cannot be scanned faithfully: rewriting it to "/" derives a name the
+// extractor never produces (extraction could then never satisfy the
+// manifest), and keeping it risks a Windows-side escape. It is rejected raw,
+// everywhere, before any normalization can make it look safe.
+function hasBackslash(value: string): boolean {
+  return value.includes("\\");
+}
+
 function isUnsafePortableSegment(segment: string): boolean {
   if (segment.includes(":")) return true;
   if (CONTROL_CHARS.test(segment)) return true;
@@ -90,7 +101,11 @@ function isUnsafePortableSegment(segment: string): boolean {
 }
 
 function normalizeEntryPath(path: string): string | null {
-  const normalized = path.replaceAll("\\", "/");
+  // A backslash never becomes a separator here: rewriting it would derive a
+  // manifest path node-tar never publishes, and would launder a Windows
+  // traversal spelling into a safe-looking one. See `hasBackslash`.
+  if (hasBackslash(path)) return null;
+  const normalized = path;
   if (normalized.startsWith("/")) return null;
   if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
   // `.` and empty segments are lexical no-ops that node-tar collapses;
@@ -115,7 +130,8 @@ export function isUnsafeArchivePath(entryPath: string): boolean {
 // node-tar normalizes paths — or null when the target is absolute,
 // drive/device-formed, or contains any `..` component.
 function normalizeRootRelative(path: string): string | null {
-  const normalized = path.replaceAll("\\", "/");
+  if (hasBackslash(path)) return null;
+  const normalized = path;
   if (normalized.startsWith("/")) return null;
   if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
   const segments = normalized
@@ -125,11 +141,17 @@ function normalizeRootRelative(path: string): string | null {
   return segments.join("/");
 }
 
+// `portable: false` judges containment only (absolute, drive, backslash, and
+// `..` escape). That weaker form is what a RAW header field gets when an
+// override masks it: node-tar never publishes it, and the field is a lossy
+// 100-byte truncation of the real value.
 export function isUnsafeLinkTarget(
   entryPath: string,
   linkTarget: string,
+  portable = true,
 ): boolean {
-  const normalizedTarget = linkTarget.replaceAll("\\", "/");
+  if (hasBackslash(linkTarget)) return true;
+  const normalizedTarget = linkTarget;
   if (normalizedTarget.startsWith("/")) return true;
   if (WINDOWS_DRIVE_PREFIX.test(normalizedTarget)) return true;
   const normalizedEntry = normalizeEntryPath(entryPath);
@@ -146,7 +168,7 @@ export function isUnsafeLinkTarget(
     } else {
       // `..`/`.` are traversal syntax judged by containment above; every
       // named segment must additionally be portable on its own.
-      if (isUnsafePortableSegment(segment)) return true;
+      if (portable && isUnsafePortableSegment(segment)) return true;
       segments.push(segment);
     }
   }
@@ -189,7 +211,50 @@ function checksumMatches(block: Buffer): boolean {
   return stored === unsigned || stored === signed;
 }
 
+// Keys whose value changes what node-tar materializes.
+const PAX_EFFECTIVE_KEYS = ["path", "linkpath", "size"] as const;
+
+// node-tar's own reading of a pax payload (dist/esm/pax.js `parseKV`): the
+// whole body is split on "\n" and a line is kept only when its declared
+// length equals its byte length + 1. It never uses the length prefix to find
+// the next record, so a value containing a newline can carry a second line
+// that this length-framed walker would never see.
+function extractorPaxView(payload: Buffer): Map<string, string> {
+  const view = new Map<string, string>();
+  for (const line of payload.toString("utf8").replace(/\n$/u, "").split("\n")) {
+    const declared = Number.parseInt(line, 10);
+    if (declared !== Buffer.byteLength(line) + 1) continue;
+    const fields = line.slice(String(declared).length + 1).split("=");
+    const key = fields.shift();
+    if (!key) continue;
+    view.set(
+      key.replace(/^SCHILY\.(dev|ino|nlink)/u, "$1"),
+      fields.join("=").replace(/\0[\s\S]*$/u, ""),
+    );
+  }
+  return view;
+}
+
+// Length-framed parse, then proof that node-tar reads the same payload the
+// same way. Fail-closed on both counts: a record may not carry an embedded
+// newline or NUL (the only way one value can hide another record, or be
+// truncated differently), and the two interpretations must agree on every
+// effective key. Embedded CR needs no separate gate — it cannot hide a
+// record, and the portable-segment policy rejects it in a path or link target.
 function parsePaxRecords(payload: Buffer): Map<string, string> {
+  const records = parseFramedPaxRecords(payload);
+  const view = extractorPaxView(payload);
+  for (const key of PAX_EFFECTIVE_KEYS) {
+    if (records.get(key) !== view.get(key)) {
+      throw invalid(
+        "Archive pax metadata is interpreted differently by the extractor",
+      );
+    }
+  }
+  return records;
+}
+
+function parseFramedPaxRecords(payload: Buffer): Map<string, string> {
   const records = new Map<string, string>();
   let offset = 0;
   while (offset < payload.length) {
@@ -216,10 +281,34 @@ function parsePaxRecords(payload: Buffer): Map<string, string> {
     if (equals <= 0) throw invalid("Archive has a malformed pax record");
     const key = body.subarray(0, equals).toString("utf8");
     const value = body.subarray(equals + 1).toString("utf8");
+    if (/[\n\0]/u.test(key) || /[\n\0]/u.test(value)) {
+      throw invalid(
+        "Archive pax metadata record hides a second record from the extractor",
+      );
+    }
     records.set(key, value);
     offset = end;
   }
   return records;
+}
+
+// Exact mirror of node-tar's header.js path derivation: the ustar `prefix`
+// field is joined ONLY when the magic+version field is exactly "ustar\0" +
+// "00" — old-GNU (`ustar  \0`) and other headers never get one — and the
+// field is read as 155 bytes joined unconditionally when offset 475 is
+// non-zero, otherwise as 130 bytes joined only when non-empty. Deriving a
+// prefix the extractor never applies invents a destination that is neither
+// validated nor materialized.
+const USTAR_MAGIC = "ustar\u000000";
+
+function decodeHeaderPath(block: Buffer): string {
+  const name = cString(block.subarray(0, 100));
+  if (block.subarray(257, 265).toString("binary") !== USTAR_MAGIC) return name;
+  if ((block[475] ?? 0) !== 0) {
+    return `${cString(block.subarray(345, 500))}/${name}`;
+  }
+  const prefix = cString(block.subarray(345, 475));
+  return prefix ? `${prefix}/${name}` : name;
 }
 
 class TarScanWalker {
@@ -235,6 +324,11 @@ class TarScanWalker {
   private captured = 0;
   private overridePath: string | null = null;
   private overrideLink: string | null = null;
+  // Every override value captured since the last ordinary entry, in order.
+  // A single slot would let a later override erase an earlier hostile one
+  // before it was ever validated.
+  private readonly pendingPathOverrides: string[] = [];
+  private readonly pendingLinkOverrides: string[] = [];
   private overrideSize: number | null = null;
   private globalLink: string | null = null;
   private globalSize: number | null = null;
@@ -258,7 +352,7 @@ class TarScanWalker {
   >();
   // Symlinks in archive order, for the finish-time composed-resolution and
   // extractor-compatibility passes over the final virtual manifest.
-  private readonly symlinks: { path: string; target: string }[] = [];
+  readonly symlinks: { path: string; target: string }[] = [];
   // Every accepted entry path, in order — extraction verifies each one
   // materialized before the destination is published.
   readonly expectedPaths: string[] = [];
@@ -389,7 +483,7 @@ class TarScanWalker {
     const declared = new Set<string>();
     for (const link of this.symlinks) {
       const parts = link.path.split("/").slice(0, -1);
-      for (const segment of link.target.replaceAll("\\", "/").split("/")) {
+      for (const segment of link.target.split("/")) {
         if (segment === "" || segment === ".") continue;
         if (segment === "..") {
           parts.pop();
@@ -430,7 +524,6 @@ class TarScanWalker {
     }
     const stack = [...base];
     const segments = target
-      .replaceAll("\\", "/")
       .split("/")
       .filter((segment) => segment !== "" && segment !== ".");
     for (const [index, segment] of segments.entries()) {
@@ -471,6 +564,30 @@ class TarScanWalker {
     return stack;
   }
 
+  // One candidate link value, judged the way node-tar would apply it:
+  // hardlink targets resolve from the archive root, symlink targets from the
+  // entry's parent. `portable` is false for a masked raw header field.
+  private checkLinkCandidate(
+    entryPath: string,
+    type: string,
+    value: string,
+    portable: boolean,
+  ): void {
+    if (value === "") return;
+    if (type === "1") {
+      const target = normalizeRootRelative(value);
+      if (
+        target === null ||
+        target === "" ||
+        (portable && target.split("/").some(isUnsafePortableSegment))
+      ) {
+        throw unsafe(`Archive contains an unsafe link: ${value}`);
+      }
+    } else if (isUnsafeLinkTarget(entryPath, value, portable)) {
+      throw unsafe(`Archive contains an unsafe link: ${value}`);
+    }
+  }
+
   private consumeHeaderBlock(block: Buffer): void {
     const isZero = block.every((byte) => byte === 0);
     if (isZero) {
@@ -490,10 +607,7 @@ class TarScanWalker {
     }
     const typeByte = block[156] ?? 0;
     const type = String.fromCharCode(typeByte === 0 ? 0x30 : typeByte);
-    const prefix = cString(block.subarray(345, 500));
-    const headerPath = prefix
-      ? `${prefix}/${cString(block.subarray(0, 100))}`
-      : cString(block.subarray(0, 100));
+    const headerPath = decodeHeaderPath(block);
     // Metadata records are always framed by their own header size; only an
     // ordinary entry's content honors a pending pax size override.
     let frameSize = size;
@@ -517,14 +631,48 @@ class TarScanWalker {
         throw unsafe(`Unsupported archive entry type: ${JSON.stringify(type)}`);
       }
       frameSize = this.overrideSize ?? this.globalSize ?? size;
+      const headerLink = cString(block.subarray(157, 257));
+      // Backslash gate over every value node-tar could apply — the raw header
+      // fields and each GNU/PAX override — so a benign override can never
+      // mask a hostile spelling behind it.
+      for (const candidate of [headerPath, this.overridePath]) {
+        if (candidate !== null && hasBackslash(candidate)) {
+          throw unsafe(
+            `Archive contains an unsafe path (backslash is not a portable name character): ${candidate}`,
+          );
+        }
+      }
+      for (const candidate of [headerLink, this.overrideLink, this.globalLink]) {
+        if (candidate !== null && hasBackslash(candidate)) {
+          throw unsafe(
+            `Archive contains an unsafe link (backslash is not a portable name character): ${candidate}`,
+          );
+        }
+      }
       // node-tar ignores the `path` key of PAX global headers: the extractor
       // publishes the local override or the raw header path, so that exact
       // value — never a global path — is what the policy validates.
       const entryPath = this.overridePath ?? headerPath;
-      if (entryPath === "" || isUnsafeArchivePath(entryPath)) {
-        throw unsafe(`Archive contains an unsafe path: ${entryPath}`);
+      // No benign value may hide a hostile one. Every override node-tar could
+      // apply is validated in full, even when a later or higher-precedence
+      // one masks it.
+      for (const candidate of this.pendingPathOverrides) {
+        if (candidate === "" || isUnsafeArchivePath(candidate)) {
+          throw unsafe(`Archive contains an unsafe path: ${candidate}`);
+        }
       }
-      const headerLink = cString(block.subarray(157, 257));
+      if (this.overridePath === null) {
+        if (entryPath === "" || isUnsafeArchivePath(entryPath)) {
+          throw unsafe(`Archive contains an unsafe path: ${entryPath}`);
+        }
+      } else if (normalizeEntryPath(headerPath) === null) {
+        // Masked by an override node-tar publishes instead: the raw field is
+        // a lossy 100-byte truncation of the real name (node-tar and bsdtar
+        // both emit one for long paths), so the portable-name policy cannot
+        // be applied to it — but a traversal, absolute, drive, or backslash
+        // spelling still rejects.
+        throw unsafe(`Archive contains an unsafe path: ${headerPath}`);
+      }
       const isLink = type === "1" || type === "2";
       // node-tar's parser gates on the RAW header linkpath: link entries
       // without one are invalid ("linkpath required") even when a pax record
@@ -552,6 +700,17 @@ class TarScanWalker {
         // interpretations of the same stream.
         throw unsafe(`Archive link entry declares content bytes: ${entryPath}`);
       }
+      if (isLink) {
+        // Same rule for link targets: every applicable override in full, and
+        // a masked raw field for containment only. A link value on a
+        // non-link entry is metadata the extractor never acts on.
+        for (const candidate of this.pendingLinkOverrides) {
+          this.checkLinkCandidate(entryPath, type, candidate, true);
+        }
+        if (this.globalLink !== null || this.overrideLink !== null) {
+          this.checkLinkCandidate(entryPath, type, headerLink, false);
+        }
+      }
       if (type === "1") {
         // Hardlink targets resolve from the archive root, never from the
         // containing entry; any `..` component (or absolute/device form)
@@ -573,7 +732,7 @@ class TarScanWalker {
       } else if (type === "2" && isUnsafeLinkTarget(entryPath, linkTarget)) {
         throw unsafe(`Archive contains an unsafe link: ${entryPath}`);
       }
-      const trailingSeparator = entryPath.replaceAll("\\", "/").endsWith("/");
+      const trailingSeparator = entryPath.endsWith("/");
       if (
         trailingSeparator &&
         type !== "5" &&
@@ -611,6 +770,8 @@ class TarScanWalker {
       this.overridePath = null;
       this.overrideLink = null;
       this.overrideSize = null;
+      this.pendingPathOverrides.length = 0;
+      this.pendingLinkOverrides.length = 0;
       this.entryCount += 1;
       this.uncompressedBytes += frameSize;
       enforceArchiveBudget(
@@ -636,8 +797,10 @@ class TarScanWalker {
     this.captureKind = null;
     if (kind === "gnu-path") {
       this.overridePath = cString(payload);
+      this.pendingPathOverrides.push(this.overridePath);
     } else if (kind === "gnu-link") {
       this.overrideLink = cString(payload);
+      this.pendingLinkOverrides.push(this.overrideLink);
     } else if (kind === "pax-next" || kind === "pax-global") {
       const records = parsePaxRecords(payload);
       const path = records.get("path");
@@ -648,11 +811,20 @@ class TarScanWalker {
         // A global `path` key is deliberately dropped: node-tar never
         // applies it, so tracking it would validate a value the extractor
         // does not publish (and mask the one it does).
-        if (link !== undefined) this.globalLink = link;
+        if (link !== undefined) {
+          this.globalLink = link;
+          this.pendingLinkOverrides.push(link);
+        }
         if (size !== undefined) this.globalSize = size;
       } else {
-        if (path !== undefined) this.overridePath = path;
-        if (link !== undefined) this.overrideLink = link;
+        if (path !== undefined) {
+          this.overridePath = path;
+          this.pendingPathOverrides.push(path);
+        }
+        if (link !== undefined) {
+          this.overrideLink = link;
+          this.pendingLinkOverrides.push(link);
+        }
         if (size !== undefined) this.overrideSize = size;
       }
     }
@@ -681,6 +853,9 @@ export interface ArchiveScanManifest {
   // Normalized root-relative paths of every accepted entry, in archive
   // order; extraction must materialize each one before publishing.
   entries: string[];
+  // Accepted symlinks with the exact target the scanner validated; the
+  // staged tree must reproduce each one verbatim.
+  links: { path: string; target: string }[];
 }
 
 // Scan the archive file's raw bytes against the strict contract. Resolves
@@ -733,5 +908,5 @@ export async function scanTarGzArchive(
     });
     source.pipe(gunzip);
   });
-  return { entries: walker.expectedPaths };
+  return { entries: walker.expectedPaths, links: walker.symlinks };
 }

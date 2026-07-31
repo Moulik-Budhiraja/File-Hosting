@@ -3,6 +3,7 @@ import {
   mkdir,
   mkdtemp,
   readdir,
+  readlink,
   rename,
   rm,
   stat,
@@ -53,7 +54,22 @@ function comparisonKey(relativePath: string): string {
 export async function verifyExtractionCompleteness(
   root: string,
   entries: string[],
+  links: readonly { path: string; target: string }[] = [],
 ): Promise<void> {
+  // A published symlink's target is as much a destination as its path: the
+  // scanner validated one exact string, so anything else in the staged tree
+  // means the extractor read the stream differently.
+  for (const link of links) {
+    const staged = join(root, ...link.path.split("/"));
+    const actual = await readlink(staged).catch(() => null);
+    if (actual !== link.target) {
+      throw new CliError(
+        `Archive extraction produced an unexpected link target: ${link.path} -> ${actual ?? "(not a symlink)"}`,
+        EXIT.general,
+        "INCOMPLETE_EXTRACTION",
+      );
+    }
+  }
   for (const entry of entries) {
     if (!(await exists(join(root, ...entry.split("/"))))) {
       throw new CliError(
@@ -115,8 +131,19 @@ async function recoverLeftoverBackups(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  for (const name of names) {
-    if (!name.startsWith(prefix)) continue;
+  const backups = names.filter((name) => name.startsWith(prefix)).sort();
+  // Two backups can only coexist after two crashes or two concurrent runs
+  // against this destination. There is no evidence for which one holds the
+  // real previous content, so restoring one and deleting the other would
+  // destroy data on a guess: refuse, keep both, and let the user decide.
+  if (backups.length > 1) {
+    throw new CliError(
+      `Multiple leftover backups found beside ${destination} (${backups.join(", ")}); remove all but the correct one and retry`,
+      EXIT.conflict,
+      "AMBIGUOUS_BACKUP",
+    );
+  }
+  for (const name of backups) {
     const backupRoot = join(parent, name);
     const previous = join(backupRoot, "previous");
     if (!(await exists(destination)) && (await exists(previous))) {
@@ -172,7 +199,11 @@ export async function extractArchive(
       onwarn: (code, message) => warnings.push(`${code}: ${message}`),
     });
     throwIfExtractionWarnings(warnings);
-    await verifyExtractionCompleteness(staging, manifest.entries);
+    await verifyExtractionCompleteness(
+      staging,
+      manifest.entries,
+      manifest.links,
+    );
 
     // Rollback-safe replacement: the old destination is moved to a unique
     // backup beside it, the staging tree is published, and only after a

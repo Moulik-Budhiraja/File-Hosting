@@ -765,7 +765,16 @@ test("folder archives download and extract safely", async () => {
 function rawTarEntry(
   pathname: string,
   contents: string,
-  options: { type?: string; linkname?: string; declaredSize?: number } = {},
+  options: {
+    type?: string;
+    linkname?: string;
+    declaredSize?: number;
+    // ustar name prefix (offset 345) and the full 8-byte magic+version field
+    // (offset 257); node-tar honors a prefix only for exactly "ustar\u000000".
+    prefix?: string;
+    prefixBytes?: Buffer;
+    magic?: string;
+  } = {},
 ): Buffer {
   const body = Buffer.from(contents);
   const header = Buffer.alloc(512);
@@ -789,8 +798,9 @@ function rawTarEntry(
   header.fill(0x20, 148, 156);
   header.write(options.type ?? "0", 156, 1, "latin1");
   if (options.linkname) header.write(options.linkname, 157, 100, "utf8");
-  header.write("ustar\0", 257, 6, "latin1");
-  header.write("00", 263, 2, "latin1");
+  header.write(options.magic ?? "ustar\u000000", 257, 8, "latin1");
+  if (options.prefix) header.write(options.prefix, 345, 155, "utf8");
+  if (options.prefixBytes) options.prefixBytes.copy(header, 345);
   let sum = 0;
   for (const byte of header) sum += byte;
   header.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
@@ -2035,4 +2045,563 @@ test("HTTP auth, missing metadata, and network failures map to stable exit codes
   assert.equal(missing.code, 4);
   const network = await cli(["list"], "", { FS_URL: "http://127.0.0.1:1" });
   assert.equal(network.code, 6);
+});
+
+// node-tar reads a pax payload line by line (pax.js `parseKV`), never by the
+// length framing, so one length-framed record can hide a second self-
+// consistent pax line inside its own value. The scanner must read the payload
+// exactly as the extractor does, or it certifies destinations it never saw.
+function hidingPaxRecord(outerKey: string, hidden: string): string {
+  return rawPaxRecord(outerKey, `${"J".repeat(24)}\n${hidden.slice(0, -1)}`);
+}
+
+test("real node-tar honors a pax record hidden inside another record's value", async () => {
+  // Executable proof of the vector the scanner must fail closed on: node-tar
+  // publishes link -> COM1.log although the only length-framed record is an
+  // ignored FSAUDIT key.
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("safe.txt", "safe")),
+      stripMarker(
+        rawTarEntry(
+          "PaxHeader/link",
+          hidingPaxRecord("FSAUDIT", rawPaxRecord("linkpath", "COM1.log")),
+          { type: "x" },
+        ),
+      ),
+      rawTarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+    ]),
+  );
+  const { mkdir, readlink } = await import("node:fs/promises");
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const room = await mkdtemp(join(scratch, "hidden-pax-real-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, bytes);
+  const out = join(room, "out");
+  await mkdir(out);
+  await tar.extract({ file: archivePath, cwd: out, preservePaths: false, strict: true });
+  assert.equal(await readlink(join(out, "link")), "COM1.log");
+
+  // The shipped scanner therefore must refuse the same bytes.
+  await assert.rejects(scanTarGzArchive(archivePath, bytes.length), (error: unknown) => {
+    assert.match((error as Error).message, /pax metadata/i);
+    return true;
+  });
+});
+
+test("extraction refuses pax payloads that hide a second record, publishing nothing", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "hidden-linkpath-local.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          stripMarker(
+            rawTarEntry(
+              "PaxHeader/link",
+              hidingPaxRecord("FSAUDIT", rawPaxRecord("linkpath", "COM1.log")),
+              { type: "x" },
+            ),
+          ),
+          rawTarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+        ]),
+      ),
+    },
+    {
+      name: "hidden-linkpath-global.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          stripMarker(
+            rawTarEntry(
+              "GlobalHead",
+              hidingPaxRecord("FSAUDIT", rawPaxRecord("linkpath", "NUL.txt")),
+              { type: "g" },
+            ),
+          ),
+          rawTarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+        ]),
+      ),
+    },
+    {
+      name: "hidden-path-local.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry(
+              "PaxHeader/x",
+              hidingPaxRecord("FSAUDIT", rawPaxRecord("path", "CON.txt")),
+              { type: "x" },
+            ),
+          ),
+          rawTarEntry("benign.txt", "b"),
+        ]),
+      ),
+    },
+    {
+      name: "hidden-path-duplicate-destination.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("one.txt", "AAAA")),
+          stripMarker(
+            rawTarEntry(
+              "PaxHeader/two.txt",
+              hidingPaxRecord("FSAUDIT", rawPaxRecord("path", "one.txt")),
+              { type: "x" },
+            ),
+          ),
+          rawTarEntry("two.txt", "BBBB"),
+        ]),
+      ),
+    },
+    {
+      name: "hidden-size.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry(
+              "PaxHeader/f.txt",
+              hidingPaxRecord("FSAUDIT", rawPaxRecord("size", "1024")),
+              { type: "x" },
+            ),
+          ),
+          rawTarEntry("f.txt", "0123456789"),
+        ]),
+      ),
+    },
+    {
+      name: "pax-embedded-nul.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("PaxHeader/x", rawPaxRecord("path", "benign.txt\0CON"), {
+              type: "x",
+            }),
+          ),
+          rawTarEntry("placeholder.txt", "b"),
+        ]),
+      ),
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /pax metadata/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+test("valid pax framing, duplicate precedence, and size semantics still extract", async () => {
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(
+        rawTarEntry(
+          "PaxHeader/x",
+          rawPaxRecord("path", "dir/renamed.txt") +
+            rawPaxRecord("mtime", "1700000000.5") +
+            rawPaxRecord("uname", "admin") +
+            rawPaxRecord("path", "dir/final.txt"),
+          { type: "x" },
+        ),
+      ),
+      rawTarEntry("placeholder.txt", "hello"),
+    ]),
+  );
+  const item = service.seed(
+    { name: "valid-pax.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const destination = join(scratch, "valid-pax-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  // Last duplicate record wins, exactly as node-tar's reduce does.
+  assert.equal(await readFile(join(destination, "dir", "final.txt"), "utf8"), "hello");
+});
+
+// A backslash is an ordinary POSIX filename character (node-tar's
+// normalize-windows-path is the identity off Windows) but a separator on
+// Windows. Rewriting it to "/" made the scanner derive a manifest path the
+// extractor never publishes, so an archive the shipped CLI itself produced
+// scanned clean and then failed with a misleading "incomplete extraction".
+test("a backslash filename is rejected truthfully, not mis-normalized", async () => {
+  const { mkdir } = await import("node:fs/promises");
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const source = await mkdtemp(join(scratch, "backslash-source-"));
+  await writeFile(join(source, "back\\slash.txt"), "literal");
+  const uploaded = await cli(["up", "-r", source, "--json"]);
+  assert.equal(uploaded.code, 0, uploaded.stderr.text);
+  const [item] = JSON.parse(uploaded.stdout.text) as FileMetadata[];
+
+  // Real node-tar publishes the literal name, so a "/"-normalized manifest
+  // path could never be materialized.
+  const stored = service.files.get(item.id)!.body;
+  const room = await mkdtemp(join(scratch, "backslash-real-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, stored);
+  const out = join(room, "out");
+  await mkdir(out);
+  await tar.extract({ file: archivePath, cwd: out, preservePaths: false, strict: true });
+  assert.equal(await readFile(join(out, "back\\slash.txt"), "utf8"), "literal");
+
+  // The scanner refuses it up front with an accurate reason.
+  await assert.rejects(scanTarGzArchive(archivePath, stored.length), (error: unknown) => {
+    assert.match((error as Error).message, /unsafe path \(backslash/i);
+    return true;
+  });
+  const destination = join(scratch, "backslash-destination");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr.text, /unsafe path \(backslash/i);
+  assert.doesNotMatch(result.stderr.text, /incomplete/i);
+  await assert.rejects(readFile(destination), { code: "ENOENT" });
+});
+
+test("backslashes in raw link targets and every override form reject without publishing", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer; pattern: RegExp }> = [
+    {
+      name: "raw-backslash-path.tar.gz",
+      bytes: gzipSync(rawTarEntry("dir/back\\slash.txt", "x")),
+      pattern: /unsafe path \(backslash/i,
+    },
+    {
+      name: "raw-backslash-symlink.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("target.txt", "x")),
+          rawTarEntry("link", "", { type: "2", linkname: "back\\slash.txt" }),
+        ]),
+      ),
+      pattern: /unsafe link \(backslash/i,
+    },
+    {
+      name: "raw-backslash-hardlink.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("target.txt", "x")),
+          rawTarEntry("hard", "", { type: "1", linkname: "dir\\target.txt" }),
+        ]),
+      ),
+      pattern: /unsafe link \(backslash/i,
+    },
+    {
+      name: "gnu-longpath-backslash.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("././@LongLink", "dir/back\\slash.txt\0", { type: "L" })),
+          rawTarEntry("placeholder.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path \(backslash/i,
+    },
+    {
+      name: "gnu-longlink-backslash.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("target.txt", "x")),
+          stripMarker(rawTarEntry("././@LongLink", "back\\slash.txt\0", { type: "K" })),
+          rawTarEntry("link", "", { type: "2", linkname: "placeholder" }),
+        ]),
+      ),
+      pattern: /unsafe link \(backslash/i,
+    },
+    {
+      name: "pax-local-path-backslash.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("PaxHeader/x", rawPaxRecord("path", "dir/back\\slash.txt"), {
+              type: "x",
+            }),
+          ),
+          rawTarEntry("placeholder.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path \(backslash/i,
+    },
+    {
+      name: "pax-global-linkpath-backslash.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("target.txt", "x")),
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("linkpath", "back\\slash.txt"), {
+              type: "g",
+            }),
+          ),
+          rawTarEntry("link", "", { type: "2", linkname: "target.txt" }),
+        ]),
+      ),
+      pattern: /unsafe link \(backslash/i,
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, fixture.pattern, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+// node-tar joins the ustar `prefix` field only when the magic+version field
+// is exactly "ustar\u000000" (dist/esm/header.js). A prefix taken from a
+// non-ustar header invents a manifest path the extractor never publishes.
+test("the ustar prefix is applied exactly when node-tar applies it", async () => {
+  // Old-GNU magic with non-zero prefix bytes: node-tar publishes inner.txt,
+  // so the manifest must say inner.txt and extraction must succeed.
+  const ignored = gzipSync(
+    rawTarEntry("inner.txt", "x", { magic: "ustar  \0", prefix: "00000000000" }),
+  );
+  const ignoredItem = service.seed(
+    { name: "nonustar-prefix.tar.gz", archive: "tar.gz", size: ignored.length },
+    ignored,
+  );
+  const ignoredOut = join(scratch, "nonustar-prefix-out");
+  const ignoredResult = await cli(["down", ignoredItem.id, "--extract", "-o", ignoredOut]);
+  assert.equal(ignoredResult.code, 0, ignoredResult.stderr.text);
+  assert.equal(await readFile(join(ignoredOut, "inner.txt"), "utf8"), "x");
+  assert.deepEqual(await (await import("node:fs/promises")).readdir(ignoredOut), [
+    "inner.txt",
+  ]);
+
+  // A real ustar prefix still applies.
+  const applied = gzipSync(rawTarEntry("inner.txt", "y", { prefix: "outer" }));
+  const appliedItem = service.seed(
+    { name: "ustar-prefix.tar.gz", archive: "tar.gz", size: applied.length },
+    applied,
+  );
+  const appliedOut = join(scratch, "ustar-prefix-out");
+  const appliedResult = await cli(["down", appliedItem.id, "--extract", "-o", appliedOut]);
+  assert.equal(appliedResult.code, 0, appliedResult.stderr.text);
+  assert.equal(await readFile(join(appliedOut, "outer", "inner.txt"), "utf8"), "y");
+
+  // Two headers that really extract to the same destination collide, and
+  // nothing is published.
+  const colliding = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("inner.txt", "a")),
+      rawTarEntry("inner.txt", "b", { magic: "ustar  \0", prefix: "00000000000" }),
+    ]),
+  );
+  const collideItem = service.seed(
+    { name: "prefix-collision.tar.gz", archive: "tar.gz", size: colliding.length },
+    colliding,
+  );
+  const collideOut = join(scratch, "prefix-collision-out");
+  const collideResult = await cli(["down", collideItem.id, "--extract", "-o", collideOut]);
+  assert.equal(collideResult.code, 1);
+  assert.match(collideResult.stderr.text, /conflicting entry paths/i);
+  await assert.rejects(readFile(collideOut), { code: "ENOENT" });
+});
+
+// No benign value may hide a hostile one: every override node-tar could
+// apply is validated in its own right, and a masked raw header field must
+// still be contained.
+test("hostile values cannot be masked by benign overrides, and nothing is published", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer; pattern: RegExp }> = [
+    {
+      name: "masked-gnu-longpath.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("././@LongLink", "../escape.txt\0", { type: "L" })),
+          stripMarker(
+            rawTarEntry("PaxHeader/x", rawPaxRecord("path", "benign.txt"), { type: "x" }),
+          ),
+          rawTarEntry("placeholder.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "masked-nonportable-gnu-longpath.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("././@LongLink", "dir/CON.txt\0", { type: "L" })),
+          stripMarker(
+            rawTarEntry("PaxHeader/x", rawPaxRecord("path", "benign.txt"), { type: "x" }),
+          ),
+          rawTarEntry("placeholder.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "masked-raw-traversal.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("PaxHeader/x", rawPaxRecord("path", "benign.txt"), { type: "x" }),
+          ),
+          rawTarEntry("../escape.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "masked-local-linkpath.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "x")),
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("linkpath", "safe.txt"), { type: "g" }),
+          ),
+          stripMarker(
+            rawTarEntry("PaxHeader/link", rawPaxRecord("linkpath", "../../out"), {
+              type: "x",
+            }),
+          ),
+          rawTarEntry("link", "", { type: "2", linkname: "raw.txt" }),
+        ]),
+      ),
+      pattern: /unsafe link/i,
+    },
+    {
+      name: "masked-raw-linkname.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "x")),
+          stripMarker(
+            rawTarEntry("PaxHeader/link", rawPaxRecord("linkpath", "safe.txt"), {
+              type: "x",
+            }),
+          ),
+          rawTarEntry("link", "", { type: "2", linkname: "../../outside" }),
+        ]),
+      ),
+      pattern: /unsafe link/i,
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, fixture.pattern, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+test("a long name written by the shipped archiver still round-trips", async () => {
+  // node-tar writes a 100-byte truncation of the real name into the raw
+  // header field beside the pax `path` record; that truncation can land on a
+  // trailing dot, so the raw field must not face the portable-name policy.
+  const source = await mkdtemp(join(scratch, "longname-source-"));
+  const longName = `${"segment.".repeat(14)}report.name.txt`;
+  await writeFile(join(source, longName), "long");
+  const uploaded = await cli(["up", "-r", source, "--json"]);
+  assert.equal(uploaded.code, 0, uploaded.stderr.text);
+  const [item] = JSON.parse(uploaded.stdout.text) as FileMetadata[];
+  const destination = join(scratch, "longname-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  assert.equal(await readFile(join(destination, longName), "utf8"), "long");
+});
+
+// Two leftover backups can only coexist after two crashes or two concurrent
+// runs against the same destination. Restoring whichever `readdir` returned
+// first — and deleting the other — would destroy real data on a coin flip,
+// so the ambiguity is refused instead.
+test("multiple leftover backups fail closed instead of guessing", async () => {
+  const extract = await import("../src/extract.js");
+  const { mkdir, readdir } = await import("node:fs/promises");
+  const room = await mkdtemp(join(scratch, "ambiguous-backup-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(
+    archivePath,
+    gzipSync(rawTarEntry("inside.txt", "new content")),
+  );
+  for (const suffix of ["abc123", "def456"]) {
+    const backupRoot = join(room, `.dest.fs-backup-${suffix}`);
+    await mkdir(backupRoot);
+    await writeFile(join(backupRoot, "previous"), `old ${suffix}`);
+  }
+
+  for (const force of [false, true]) {
+    const failure = await extract
+      .extractArchive(archivePath, join(room, "dest"), force)
+      .then(() => null, (error: Error) => error);
+    assert.ok(failure, `--force=${force} must fail closed`);
+    assert.match(failure.message, /multiple leftover backups/i);
+    // Nothing restored, nothing deleted, nothing published.
+    assert.deepEqual((await readdir(room)).sort(), [
+      ".dest.fs-backup-abc123",
+      ".dest.fs-backup-def456",
+      "a.tar.gz",
+    ]);
+    assert.equal(
+      await readFile(join(room, ".dest.fs-backup-abc123", "previous"), "utf8"),
+      "old abc123",
+    );
+    assert.equal(
+      await readFile(join(room, ".dest.fs-backup-def456", "previous"), "utf8"),
+      "old def456",
+    );
+  }
+
+  // With the ambiguity resolved down to one backup, recovery proceeds.
+  await rm(join(room, ".dest.fs-backup-def456"), { recursive: true });
+  await extract.extractArchive(archivePath, join(room, "dest"), true);
+  assert.equal(
+    await readFile(join(room, "dest", "inside.txt"), "utf8"),
+    "new content",
+  );
+  assert.deepEqual((await readdir(room)).sort(), ["a.tar.gz", "dest"]);
+});
+
+// Path-only completeness cannot see a symlink whose TARGET the extractor
+// resolved differently than the scanner did, and a published link target is
+// exactly what the portable-name and containment policy is about. The staged
+// tree is therefore checked against the declared targets too.
+test("staged symlink targets must match the scan manifest exactly", async () => {
+  const extract = await import("../src/extract.js");
+  const { mkdir, symlink } = await import("node:fs/promises");
+  const staging = await mkdtemp(join(scratch, "link-verify-"));
+  await mkdir(join(staging, "dir"));
+  await writeFile(join(staging, "dir", "real.txt"), "x");
+  await symlink("real.txt", join(staging, "dir", "link"));
+
+  await extract.verifyExtractionCompleteness(
+    staging,
+    ["dir/real.txt", "dir/link"],
+    [{ path: "dir/link", target: "real.txt" }],
+  );
+  await assert.rejects(
+    extract.verifyExtractionCompleteness(
+      staging,
+      ["dir/real.txt", "dir/link"],
+      [{ path: "dir/link", target: "COM1.log" }],
+    ),
+    (error: unknown) => {
+      assert.match((error as Error).message, /link target/i);
+      return true;
+    },
+  );
+});
+
+test("a scanned archive reports its symlink targets in the manifest", async () => {
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const room = await mkdtemp(join(scratch, "link-manifest-"));
+  const archivePath = join(room, "a.tar.gz");
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("dir/real.txt", "x")),
+      rawTarEntry("dir/link", "", { type: "2", linkname: "real.txt" }),
+    ]),
+  );
+  await writeFile(archivePath, bytes);
+  const manifest = await scanTarGzArchive(archivePath, bytes.length);
+  assert.deepEqual(manifest.entries, ["dir/real.txt", "dir/link"]);
+  assert.deepEqual(manifest.links, [{ path: "dir/link", target: "real.txt" }]);
 });

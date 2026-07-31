@@ -388,6 +388,172 @@ describe("archive upload contract", { concurrency: false }, () => {
     assert.deepEqual(await storeState(), beforeState);
   });
 
+  it("rejects a prefix-aliased collision on non-ustar headers with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    // node-tar applies the ustar prefix only when the magic+version field is
+    // exactly ustar+NUL+00, so both headers really extract to inner.txt and
+    // the archive is a silent duplicate-destination.
+    const bytes = gzipSync(
+      Buffer.concat([
+        tarEntry("inner.txt", "a"),
+        tarEntry("inner.txt", "b", {
+          magic: "ustar  \0",
+          prefix: "00000000000",
+        }),
+        tarTrailer(),
+      ]),
+    );
+    const beforeState = await storeState();
+    await assert.rejects(
+      service.upload(stream(bytes), uploadOptions("prefix-collision.tar.gz")),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.status, 400);
+        assert.equal(error.code, "invalid_archive");
+        assert.match(error.message, /conflicting entry paths/u);
+        return true;
+      },
+    );
+    assert.deepEqual(await storeState(), beforeState);
+  });
+
+  it("rejects backslash entry paths and link targets with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    // node-tar publishes a backslash name verbatim on POSIX, so certifying
+    // one would store an archive whose real destinations differ from the
+    // validated manifest and that the shipped CLI can never materialize.
+    const fixtures = [
+      Buffer.concat([tarEntry("dir/back\\slash.txt", "x"), tarTrailer()]),
+      Buffer.concat([
+        tarEntry("target.txt", "x"),
+        tarEntry("link", "", { type: "2", linkname: "back\\slash.txt" }),
+        tarTrailer(),
+      ]),
+      Buffer.concat([
+        tarEntry("target.txt", "x"),
+        tarEntry("hard", "", { type: "1", linkname: "dir\\target.txt" }),
+        tarTrailer(),
+      ]),
+    ];
+    for (const [index, fixture] of fixtures.entries()) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`backslash-${index}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          assert.match(error.message, /backslash/u);
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
+  it("rejects pax payloads hiding a second record, with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    function paxRecord(key: string, value: string): string {
+      let length = key.length + value.length + 3;
+      for (;;) {
+        const next = String(length).length + key.length + value.length + 3;
+        if (next === length) return `${length} ${key}=${value}\n`;
+        length = next;
+      }
+    }
+    // An ignored outer key whose value carries a second, self-consistent pax
+    // line: node-tar honors the inner line, so the stored archive's real
+    // destinations would never have been validated.
+    function hiding(outerKey: string, hidden: string): string {
+      return paxRecord(outerKey, `${"J".repeat(24)}\n${hidden.slice(0, -1)}`);
+    }
+    const fixtures = [
+      // Local pax header hiding a hostile link target.
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry(
+          "PaxHeader/link",
+          hiding("FSAUDIT", paxRecord("linkpath", "COM1.log")),
+          {
+            type: "x",
+          },
+        ),
+        tarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+        tarTrailer(),
+      ]),
+      // Global pax header hiding a hostile link target.
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry(
+          "GlobalHead",
+          hiding("FSAUDIT", paxRecord("linkpath", "NUL.txt")),
+          {
+            type: "g",
+          },
+        ),
+        tarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+        tarTrailer(),
+      ]),
+      // Hidden path (non-portable destination).
+      Buffer.concat([
+        tarEntry(
+          "PaxHeader/x",
+          hiding("FSAUDIT", paxRecord("path", "CON.txt")),
+          {
+            type: "x",
+          },
+        ),
+        tarEntry("benign.txt", "b"),
+        tarTrailer(),
+      ]),
+      // Hidden path collapsing two entries onto one destination.
+      Buffer.concat([
+        tarEntry("one.txt", "AAAA"),
+        tarEntry(
+          "PaxHeader/two.txt",
+          hiding("FSAUDIT", paxRecord("path", "one.txt")),
+          {
+            type: "x",
+          },
+        ),
+        tarEntry("two.txt", "BBBB"),
+        tarTrailer(),
+      ]),
+      // Hidden size reframing the following entry.
+      Buffer.concat([
+        tarEntry(
+          "PaxHeader/f.txt",
+          hiding("FSAUDIT", paxRecord("size", "1024")),
+          {
+            type: "x",
+          },
+        ),
+        tarEntry("f.txt", "0123456789"),
+        tarTrailer(),
+      ]),
+    ];
+    for (const [index, fixture] of fixtures.entries()) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`hidden-pax-${index}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          assert.match(error.message, /pax metadata/u);
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
   it("rejects non-zero entry content padding with no persistence", async () => {
     const { tarHeader, tarTrailer } = await import("./tar-fixtures");
     const bytes = gzipSync(
