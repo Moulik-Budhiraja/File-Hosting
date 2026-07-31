@@ -91,6 +91,13 @@ describe("user repository", () => {
     }
   });
 
+  it("rejects connection-local in-memory database URLs", async () => {
+    await assert.rejects(
+      AuthRepository.create("file::memory:"),
+      /connection-local in-memory databases are not supported/iu,
+    );
+  });
+
   it("limits varied usernames from the same remote address before bcrypt", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-address-throttle-test-"),

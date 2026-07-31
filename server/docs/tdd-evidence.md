@@ -138,5 +138,17 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: expected-hash password updates also require `active = 1` in the same
       conditional write transaction.
 
+25. Connection-local in-memory database rejection
+    - RED: `AuthRepository.create("file::memory:")` completed even though the file
+      repository would open a separate database without the shared user schema.
+    - GREEN: shared database URL preparation now rejects bare and `file:`
+      connection-local in-memory URLs before either repository connects.
+
+26. Bounded JSON request parsing
+    - RED: the focused login-body regression parsed a JSON object larger than 64
+      KiB without rejection.
+    - GREEN: central JSON parsing now checks declared lengths and incrementally
+      caps chunked bodies at 64 KiB before parsing, returning 413 on overflow.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

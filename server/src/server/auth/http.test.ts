@@ -18,8 +18,9 @@ import {
   GET as listUsers,
   POST as createUser,
 } from "../../app/api/users/route";
+import { AppError } from "../files/errors";
 import { FileService } from "../files/service";
-import { cookieValue, SESSION_COOKIE } from "./http";
+import { cookieValue, jsonObject, SESSION_COOKIE } from "./http";
 import { setFileServiceForTests } from "../files/singleton";
 
 const LEGACY_TOKEN = "legacy-admin-service-token";
@@ -165,6 +166,18 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     const cookie = response.headers.get("set-cookie") ?? "";
     assert.match(cookie, /^fs_session=/u);
     assert.doesNotMatch(cookie, /(?:^|;\s*)Secure(?:;|$)/iu);
+  });
+
+  it("rejects oversized JSON bodies before parsing", async () => {
+    const request = new Request("https://files.example.test/api/auth/login", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ payload: "x".repeat(65_536) }),
+    });
+    await assert.rejects(
+      jsonObject(request),
+      (error: unknown) => error instanceof AppError && error.status === 413,
+    );
   });
 
   it("does not mark an HTTP public URL logout cookie Secure in production", async (t) => {

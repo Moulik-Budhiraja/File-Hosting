@@ -91,13 +91,58 @@ export function assertCsrf(
   }
 }
 
+const MAX_JSON_BODY_BYTES = 64 * 1024;
+
+async function boundedJsonText(request: Request): Promise<string> {
+  const declaredLength = Number(request.headers.get("content-length"));
+  if (Number.isFinite(declaredLength) && declaredLength > MAX_JSON_BODY_BYTES) {
+    throw new AppError(
+      413,
+      "request_too_large",
+      "JSON request body is too large",
+    );
+  }
+
+  if (!request.body) return "";
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let total = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      total += value.byteLength;
+      if (total > MAX_JSON_BODY_BYTES) {
+        await reader.cancel();
+        throw new AppError(
+          413,
+          "request_too_large",
+          "JSON request body is too large",
+        );
+      }
+      chunks.push(value);
+    }
+  } finally {
+    reader.releaseLock();
+  }
+
+  const bytes = new Uint8Array(total);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+  return new TextDecoder().decode(bytes);
+}
+
 export async function jsonObject(
   request: Request,
 ): Promise<Record<string, unknown>> {
   let value: unknown;
   try {
-    value = await request.json();
+    value = JSON.parse(await boundedJsonText(request)) as unknown;
   } catch (cause) {
+    if (cause instanceof AppError) throw cause;
     throw new AppError(400, "invalid_json", "Request body must be valid JSON", {
       cause,
     });
