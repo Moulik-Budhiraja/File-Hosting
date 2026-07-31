@@ -281,10 +281,13 @@ export class FileRepository {
     await this.ready;
     const transaction = await this.client.transaction("write");
     try {
-      await transaction.execute({
+      const inserted = await transaction.execute({
         sql: `INSERT INTO files
           (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE ? IS NULL OR EXISTS (
+            SELECT 1 FROM users WHERE id = ? AND active = 1
+          )`,
         args: [
           file.id,
           file.name,
@@ -297,8 +300,17 @@ export class FileRepository {
           file.archive,
           file.createdAt,
           file.updatedAt,
+          file.ownerId,
+          file.ownerId,
         ],
       });
+      if (inserted.rowsAffected === 0) {
+        throw new AppError(
+          401,
+          "account_inactive",
+          "The upload owner is no longer active",
+        );
+      }
       for (const tag of tags) {
         await transaction.execute({
           sql: "INSERT INTO tags (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",

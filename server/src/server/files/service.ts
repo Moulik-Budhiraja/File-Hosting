@@ -249,6 +249,7 @@ export class FileService {
         return await this.repository.insert(file, options.tags);
       } catch (cause) {
         await unlink(finalPath).catch(() => undefined);
+        if (cause instanceof AppError) throw cause;
         throw new AppError(
           500,
           "metadata_write_failed",

@@ -8,8 +8,50 @@ import { createClient, type Client } from "@libsql/client";
 
 import { AuthRepository } from "../auth/database";
 import { FileRepository } from "./database";
+import { AppError } from "./errors";
 
 describe("file schema migration and access filtering", () => {
+  it("rejects finalizing an owned upload after the owner is disabled", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-disabled-upload-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "files.db")}`;
+    const auth = await AuthRepository.create(databaseUrl);
+    const repository = await FileRepository.create(databaseUrl);
+    try {
+      const member = await auth.createUser({
+        username: "disabled.upload.owner",
+        password: "fixture-disabled-upload-credential-value",
+        role: "member",
+      });
+      await auth.setActive(member.id, false);
+      await assert.rejects(
+        repository.insert(
+          {
+            id: "Disab1e",
+            name: "disabled.txt",
+            size: 8,
+            mimeType: "text/plain",
+            sha256: "0".repeat(64),
+            visibility: "private",
+            ownerId: member.id,
+            storageKey: "Disab1e",
+            archive: null,
+            createdAt: "2026-07-31T00:00:00.000Z",
+            updatedAt: "2026-07-31T00:00:00.000Z",
+          },
+          [],
+        ),
+        (error: unknown) =>
+          error instanceof AppError && error.code === "account_inactive",
+      );
+    } finally {
+      await repository.close();
+      await auth.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("serializes concurrent legacy migrations before accepting owned files", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-concurrent-migration-test-"),

@@ -127,7 +127,7 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       still-legacy table; the delayed second startup preserves the owner.
 
 23. Address-wide pre-bcrypt throttling
-    - RED: five invalid attempts with distinct usernames from one address were
+    - RED: ten invalid attempts with distinct usernames from one address were
       followed by another full bcrypt path and `invalid_credentials`, not 429.
     - GREEN: each attempt now atomically reserves both identity-specific and
       address-wide slots before bcrypt; either exhausted slot returns 429.
@@ -172,6 +172,19 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - RED: an eleventh active key was created successfully for one member.
     - GREEN: creation atomically enforces at most ten active keys per user and
       purges revoked key history before inserting a replacement.
+
+31. Persistent address-wide throttle
+    - RED: a successful login deleted the shared address reservation, leaving only
+      one identity-specific failure row.
+    - GREEN: successful authentication clears only its identity slot and retains
+      address-wide attempt history until the fixed window expires.
+
+32. Upload finalization activity check
+    - RED: file metadata insertion succeeded after the captured owner had been
+      disabled.
+    - GREEN: metadata insertion now conditionally requires a still-active owner in
+      the same write transaction; service cleanup preserves that authorization
+      error while removing finalized bytes.
 
 Final full-suite commands and results are recorded in the pull request
 validation section.

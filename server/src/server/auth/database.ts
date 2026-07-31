@@ -82,6 +82,7 @@ CREATE INDEX IF NOT EXISTS login_failures_window_idx ON login_failures(window_st
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_FAILURES = 5;
+const MAX_ADDRESS_LOGIN_ATTEMPTS = 10;
 const MAX_ACTIVE_API_KEYS = 10;
 
 function digest(value: string): string {
@@ -362,8 +363,9 @@ export class AuthRepository {
     );
     if (
       reservations.some(
-        (reservation) =>
-          Number(reservation.rows[0]?.failures) > MAX_LOGIN_FAILURES,
+        (reservation, index) =>
+          Number(reservation.rows[0]?.failures) >
+          (index === 0 ? MAX_LOGIN_FAILURES : MAX_ADDRESS_LOGIN_ATTEMPTS),
       )
     ) {
       throw new AppError(
@@ -395,8 +397,8 @@ export class AuthRepository {
       );
     }
     await this.client.execute({
-      sql: "DELETE FROM login_failures WHERE throttle_key IN (?, ?)",
-      args: throttleKeys,
+      sql: "DELETE FROM login_failures WHERE throttle_key = ?",
+      args: [throttleKeys[0]!],
     });
     return {
       user: userFromRow(row),

@@ -91,6 +91,47 @@ describe("user repository", () => {
     }
   });
 
+  it("preserves address-wide throttle history after successful login", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-address-success-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const repository = await AuthRepository.create(databaseUrl);
+    try {
+      await repository.createUser({
+        username: "known.account",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      await assert.rejects(
+        repository.authenticatePassword(
+          "unknown.account",
+          WRONG_CREDENTIAL,
+          "198.51.100.44",
+        ),
+        /invalid username or password/iu,
+      );
+      await repository.authenticatePassword(
+        "known.account",
+        MEMBER_CREDENTIAL,
+        "198.51.100.44",
+      );
+
+      const inspection = createClient({ url: databaseUrl, intMode: "number" });
+      try {
+        const result = await inspection.execute(
+          "SELECT COUNT(*) AS count FROM login_failures",
+        );
+        assert.equal(Number(result.rows[0]?.count), 2);
+      } finally {
+        inspection.close();
+      }
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("rejects connection-local in-memory database URLs", async () => {
     await assert.rejects(
       AuthRepository.create("file::memory:"),
@@ -106,7 +147,7 @@ describe("user repository", () => {
       `file:${path.join(directory, "auth.db")}`,
     );
     try {
-      for (let attempt = 0; attempt < 5; attempt += 1) {
+      for (let attempt = 0; attempt < 10; attempt += 1) {
         await assert.rejects(
           repository.authenticatePassword(
             `missing.user.${attempt}`,
