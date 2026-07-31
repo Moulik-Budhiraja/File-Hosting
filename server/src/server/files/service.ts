@@ -278,6 +278,60 @@ export class FileService {
     return createReadStream(this.storagePath(file), { start, end });
   }
 
+  async systemInfo(): Promise<{
+    node: string;
+    uptimeSeconds: number;
+    storage: {
+      freeBytes: number;
+      objectBytes: number;
+      objectCount: number;
+      publicCount: number;
+      privateCount: number;
+      tempPartCount: number;
+    };
+    database: { dbBytes: number | null };
+    config: {
+      maxUploadBytes: number;
+      minFreeBytes: number;
+      publicUrl: string;
+    };
+  }> {
+    const [stats, health, tempEntries] = await Promise.all([
+      this.repository.stats(),
+      this.checkHealth(),
+      readdir(this.tempDir, { withFileTypes: true }),
+    ]);
+    const databasePath = this.repository.databasePath();
+    let dbBytes: number | null = null;
+    if (databasePath) {
+      try {
+        dbBytes = (await stat(databasePath)).size;
+      } catch {
+        // Remote or not-yet-created database files have no measurable size.
+      }
+    }
+    return {
+      node: process.version,
+      uptimeSeconds: Math.floor(process.uptime()),
+      storage: {
+        freeBytes: health.freeBytes,
+        objectBytes: stats.objectBytes,
+        objectCount: stats.objectCount,
+        publicCount: stats.publicCount,
+        privateCount: stats.privateCount,
+        tempPartCount: tempEntries.filter(
+          (entry) => entry.isFile() && entry.name.endsWith(".part"),
+        ).length,
+      },
+      database: { dbBytes },
+      config: {
+        maxUploadBytes: this.config.maxUploadBytes,
+        minFreeBytes: this.config.minFreeBytes,
+        publicUrl: this.config.publicUrl,
+      },
+    };
+  }
+
   async checkHealth(): Promise<{ freeBytes: number }> {
     await this.repository.ping();
     await access(this.config.storageDir, constants.R_OK | constants.W_OK);

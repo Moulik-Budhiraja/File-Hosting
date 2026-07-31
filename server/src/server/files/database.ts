@@ -125,7 +125,10 @@ export function decodeCursor(value: string): { createdAt: string; id: string } {
 export class FileRepository {
   private readonly ready: Promise<void>;
 
-  constructor(private readonly client: Client) {
+  constructor(
+    private readonly client: Client,
+    private readonly localPath: string | null = null,
+  ) {
     this.ready = this.initialize();
   }
 
@@ -135,6 +138,7 @@ export class FileRepository {
       await mkdir(path.dirname(databasePath), { recursive: true });
     const repository = new FileRepository(
       createClient({ url: databaseUrl, intMode: "number" }),
+      databasePath,
     );
     await repository.ensureReady();
     return repository;
@@ -353,6 +357,35 @@ export class FileRepository {
       transaction.close();
     }
     return this.get(id);
+  }
+
+  async stats(): Promise<{
+    objectCount: number;
+    objectBytes: number;
+    publicCount: number;
+    privateCount: number;
+  }> {
+    await this.ready;
+    const result = await this.client.execute(
+      `SELECT
+        COUNT(*) AS object_count,
+        COALESCE(SUM(size), 0) AS object_bytes,
+        COALESCE(SUM(visibility = 'public'), 0) AS public_count,
+        COALESCE(SUM(visibility = 'private'), 0) AS private_count
+      FROM files`,
+    );
+    const row = result.rows[0];
+    if (!row) throw new Error("Statistics query returned no rows");
+    return {
+      objectCount: rowNumber(row, "object_count"),
+      objectBytes: rowNumber(row, "object_bytes"),
+      publicCount: rowNumber(row, "public_count"),
+      privateCount: rowNumber(row, "private_count"),
+    };
+  }
+
+  databasePath(): string | null {
+    return this.localPath;
   }
 
   async delete(id: string): Promise<StoredFile | null> {

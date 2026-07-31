@@ -7,6 +7,9 @@
 
 # testing
 /coverage
+/.e2e-runtime
+/test-results
+/playwright-report
 
 # database
 /prisma/db.sqlite

@@ -13,8 +13,8 @@
     "lint:fix": "eslint . --fix",
     "preview": "next build && next start",
     "start": "node .next/standalone/server.js",
-    "test": "tsx --test src/server/files/*.test.ts",
-    "test:watch": "tsx --test --watch src/server/files/*.test.ts",
+    "test": "tsx --tsconfig tsconfig.test.json --test src/server/files/*.test.ts src/admin/*.test.ts src/admin/*.test.tsx",
+    "test:watch": "tsx --tsconfig tsconfig.test.json --test --watch src/server/files/*.test.ts src/admin/*.test.ts src/admin/*.test.tsx",
     "typecheck": "tsc --noEmit"
   },
   "dependencies": {
@@ -26,6 +26,7 @@
   },
   "devDependencies": {
     "@eslint/eslintrc": "^3.3.1",
+    "@playwright/test": "^1.62.1",
     "@types/mime-types": "^2.1.4",
     "@types/node": "^22.0.0",
     "@types/react": "^19.0.0",
