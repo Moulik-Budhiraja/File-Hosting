@@ -1369,25 +1369,19 @@ test("extraction keeps ordinary Unicode and device look-alike names", async () =
   );
 });
 
-test("extraction rejects empty and dot path segments without publishing", async () => {
-  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+test("extraction canonicalizes removable dot and empty segments", async () => {
+  // `.` and empty segments are lexical no-ops the extractor collapses; the
+  // scanner canonicalizes them the same way instead of rejecting.
+  const accepted: Array<{ name: string; bytes: Buffer; check: string }> = [
     {
       name: "empty-entry-segment.tar.gz",
       bytes: gzipSync(rawTarEntry("dir//file.txt", "x")),
+      check: "dir/file.txt",
     },
     {
       name: "dot-entry-segment.tar.gz",
       bytes: gzipSync(rawTarEntry("dir/./file.txt", "x")),
-    },
-    {
-      name: "regular-trailing-separator.tar.gz",
-      bytes: gzipSync(rawTarEntry("regular.txt/", "x")),
-    },
-    {
-      name: "empty-symlink-segment.tar.gz",
-      bytes: gzipSync(
-        rawTarEntry("link", "", { type: "2", linkname: "dir//name" }),
-      ),
+      check: "dir/file.txt",
     },
     {
       name: "dot-hardlink-segment.tar.gz",
@@ -1397,28 +1391,35 @@ test("extraction rejects empty and dot path segments without publishing", async 
           rawTarEntry("hard", "", { type: "1", linkname: "a/./file.txt" }),
         ]),
       ),
+      check: "hard",
     },
   ];
-
-  for (const fixture of fixtures) {
+  for (const fixture of accepted) {
     const item = service.seed(
       { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
       Buffer.from(fixture.bytes),
     );
-    const destination = join(scratch, `${fixture.name}-destination`);
+    const destination = join(scratch, `${fixture.name}-out`);
     const result = await cli(["down", item.id, "--extract", "-o", destination]);
-    assert.equal(result.code, 1, `${fixture.name} must fail`);
-    assert.match(result.stderr.text, /unsafe (?:path|link)/i, fixture.name);
-    await assert.rejects(readFile(destination), { code: "ENOENT" });
+    assert.equal(result.code, 0, `${fixture.name}: ${result.stderr.text}`);
+    assert.ok(await readFile(join(destination, fixture.check)));
   }
+
+  // A file spelled with a trailing slash and content is still invalid, and
+  // a rejected archive never touches an existing --force destination.
+  const bytes = gzipSync(rawTarEntry("regular.txt/", "x"));
+  const item = service.seed(
+    { name: "regular-trailing-separator.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const fresh = join(scratch, "trailing-separator-out");
+  const rejected = await cli(["down", item.id, "--extract", "-o", fresh]);
+  assert.equal(rejected.code, 1);
+  assert.match(rejected.stderr.text, /unsafe path/i);
+  await assert.rejects(readFile(fresh), { code: "ENOENT" });
 
   const existing = join(scratch, "keep-empty-segment");
   await writeFile(existing, "existing content");
-  const first = fixtures[0]!;
-  const item = service.seed(
-    { name: first.name, archive: "tar.gz", size: first.bytes.length },
-    Buffer.from(first.bytes),
-  );
   const forced = await cli([
     "down",
     item.id,
@@ -1429,6 +1430,363 @@ test("extraction rejects empty and dot path segments without publishing", async 
   ]);
   assert.equal(forced.code, 1);
   assert.equal(await readFile(existing, "utf8"), "existing content");
+});
+
+test("extraction keeps the stock tar dot-root spelling for hardlinks and symlinks", async () => {
+  const { readlink, stat: statFile } = await import("node:fs/promises");
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("./", "", { type: "5" })),
+      stripMarker(rawTarEntry("./b.txt", "content")),
+      stripMarker(rawTarEntry("./a.txt", "", { type: "1", linkname: "./b.txt" })),
+      rawTarEntry("./link.txt", "", { type: "2", linkname: "./b.txt" }),
+    ]),
+  );
+  const item = service.seed(
+    { name: "dot-root.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const destination = join(scratch, "dot-root-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  assert.equal(await readFile(join(destination, "b.txt"), "utf8"), "content");
+  const a = await statFile(join(destination, "a.txt"));
+  const b = await statFile(join(destination, "b.txt"));
+  assert.equal(a.ino, b.ino, "hardlink must share the inode");
+  assert.equal(await readlink(join(destination, "link.txt")), "./b.txt");
+});
+
+test("a stock system tar archive of a dot root with hardlinks extracts", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const { link, mkdir } = await import("node:fs/promises");
+  const run = promisify(execFile);
+  const source = await mkdtemp(join(scratch, "stock-tar-"));
+  await writeFile(join(source, "b.txt"), "shared bytes");
+  await link(join(source, "b.txt"), join(source, "a.txt"));
+  await mkdir(join(source, "sub"));
+  await symlink("../b.txt", join(source, "sub/rel.txt"));
+  await symlink("./b.txt", join(source, "rel2.txt"));
+  const archive = join(scratch, "stock-dot.tar.gz");
+  await run("tar", ["-czf", archive, "-C", source, "."]);
+  const bytes = await readFile(archive);
+  const item = service.seed(
+    { name: "stock-dot.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const destination = join(scratch, "stock-dot-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  const { stat: statFile } = await import("node:fs/promises");
+  const a = await statFile(join(destination, "a.txt"));
+  const b = await statFile(join(destination, "b.txt"));
+  assert.equal(a.ino, b.ino);
+  assert.equal(
+    await readFile(join(destination, "sub/rel.txt"), "utf8"),
+    "shared bytes",
+  );
+  assert.equal(
+    await readFile(join(destination, "rel2.txt"), "utf8"),
+    "shared bytes",
+  );
+});
+
+test("a shipped-CLI recursive archive containing a ./ symlink round-trips", async () => {
+  const { readlink } = await import("node:fs/promises");
+  const source = await mkdtemp(join(scratch, "dot-symlink-src-"));
+  await writeFile(join(source, "target.txt"), "pointed at");
+  await symlink("./target.txt", join(source, "link.txt"));
+  const uploaded = await cli(["up", "-r", source, "--json"]);
+  assert.equal(uploaded.code, 0, uploaded.stderr.text);
+  const [item] = JSON.parse(uploaded.stdout.text) as FileMetadata[];
+  const destination = join(scratch, "dot-symlink-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  assert.equal(
+    await readFile(join(destination, "target.txt"), "utf8"),
+    "pointed at",
+  );
+  assert.equal(await readlink(join(destination, "link.txt")), "./target.txt");
+});
+
+test("extraction validates the real header path under a global pax path", async () => {
+  // node-tar ignores a global pax `path`, so the raw header path is what
+  // extracts — a benign global value must not mask a hostile header path.
+  const fixtures: Array<{ name: string; bytes: Buffer; pattern: RegExp }> = [
+    {
+      name: "global-path-masks-device.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("d/", "", { type: "5" })),
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("path", "d/"), {
+              type: "g",
+            }),
+          ),
+          rawTarEntry("CON.txt", ""),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "global-path-masks-traversal.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("path", "benign.txt"), {
+              type: "g",
+            }),
+          ),
+          rawTarEntry("../escape.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, fixture.pattern, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+  await assert.rejects(readFile(join(scratch, "escape.txt")), {
+    code: "ENOENT",
+  });
+
+  // A hostile global path over a benign header path is inert (node-tar
+  // never applies it) and must not block extraction of the header path.
+  const inert = gzipSync(
+    Buffer.concat([
+      stripMarker(
+        rawTarEntry("GlobalHead", rawPaxRecord("path", "../../outside"), {
+          type: "g",
+        }),
+      ),
+      rawTarEntry("inner.txt", "content"),
+    ]),
+  );
+  const item = service.seed(
+    { name: "global-path-inert.tar.gz", archive: "tar.gz", size: inert.length },
+    inert,
+  );
+  const destination = join(scratch, "global-path-inert-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  assert.equal(await readFile(join(destination, "inner.txt"), "utf8"), "content");
+});
+
+test("extraction applies node-tar's global-over-local linkpath precedence", async () => {
+  const { readlink } = await import("node:fs/promises");
+  // Hostile global linkpath masked by a benign local one must reject: the
+  // extractor publishes the GLOBAL value.
+  const masked = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("safe.txt", "content")),
+      stripMarker(
+        rawTarEntry("GlobalHead", rawPaxRecord("linkpath", "NUL.txt"), {
+          type: "g",
+        }),
+      ),
+      stripMarker(
+        rawTarEntry("PaxHeader/link", rawPaxRecord("linkpath", "safe.txt"), {
+          type: "x",
+        }),
+      ),
+      rawTarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+    ]),
+  );
+  const maskedItem = service.seed(
+    { name: "global-linkpath-mask.tar.gz", archive: "tar.gz", size: masked.length },
+    masked,
+  );
+  const maskedOut = join(scratch, "global-linkpath-mask-out");
+  const maskedResult = await cli([
+    "down",
+    maskedItem.id,
+    "--extract",
+    "-o",
+    maskedOut,
+  ]);
+  assert.equal(maskedResult.code, 1);
+  assert.match(maskedResult.stderr.text, /unsafe link/i);
+  await assert.rejects(readFile(maskedOut), { code: "ENOENT" });
+
+  // Positive control: the published symlink target is the global value.
+  const positive = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("real.txt", "real")),
+      stripMarker(rawTarEntry("other.txt", "other")),
+      stripMarker(
+        rawTarEntry("GlobalHead", rawPaxRecord("linkpath", "real.txt"), {
+          type: "g",
+        }),
+      ),
+      rawTarEntry("link", "", { type: "2", linkname: "other.txt" }),
+    ]),
+  );
+  const positiveItem = service.seed(
+    { name: "global-linkpath-wins.tar.gz", archive: "tar.gz", size: positive.length },
+    positive,
+  );
+  const positiveOut = join(scratch, "global-linkpath-wins-out");
+  const positiveResult = await cli([
+    "down",
+    positiveItem.id,
+    "--extract",
+    "-o",
+    positiveOut,
+  ]);
+  assert.equal(positiveResult.code, 0, positiveResult.stderr.text);
+  assert.equal(await readlink(join(positiveOut, "link")), "real.txt");
+});
+
+test("extraction rejects empty symlink targets before staging", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "empty-symlink.tar.gz",
+      bytes: gzipSync(rawTarEntry("link", "", { type: "2" })),
+    },
+    {
+      name: "pax-only-symlink-target.tar.gz",
+      // node-tar refuses a link entry whose RAW linkpath is empty even when
+      // a pax record supplies one ("linkpath required").
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "content")),
+          stripMarker(
+            rawTarEntry("PaxHeader/link", rawPaxRecord("linkpath", "real.txt"), {
+              type: "x",
+            }),
+          ),
+          rawTarEntry("link", "", { type: "2" }),
+        ]),
+      ),
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /empty link target/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+test("extraction resolves composed symlink chains over the final manifest", async () => {
+  const { readlink } = await import("node:fs/promises");
+  const rejects: Array<{ name: string; bytes: Buffer; pattern: RegExp }> = [
+    {
+      name: "composed-escape.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("d/", "", { type: "5" })),
+          stripMarker(rawTarEntry("d/s1", "", { type: "2", linkname: ".." })),
+          rawTarEntry("d/s2", "", { type: "2", linkname: "s1/../.." }),
+        ]),
+      ),
+      pattern: /outside the extraction root/i,
+    },
+    {
+      name: "symlink-self-loop.tar.gz",
+      bytes: gzipSync(rawTarEntry("s", "", { type: "2", linkname: "s" })),
+      pattern: /symlink (cycle|chain)/i,
+    },
+    {
+      name: "symlink-pair-loop.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("a", "", { type: "2", linkname: "b" })),
+          rawTarEntry("b", "", { type: "2", linkname: "a" }),
+        ]),
+      ),
+      pattern: /symlink (cycle|chain)|cannot materialize/i,
+    },
+    {
+      name: "through-file.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("f.txt", "content")),
+          rawTarEntry("s", "", { type: "2", linkname: "f.txt/x" }),
+        ]),
+      ),
+      pattern: /non-directory/i,
+    },
+    {
+      name: "chain-target-declared-earlier.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "content")),
+          stripMarker(rawTarEntry("s1", "", { type: "2", linkname: "real.txt" })),
+          rawTarEntry("s2", "", { type: "2", linkname: "s1" }),
+        ]),
+      ),
+      pattern: /cannot materialize/i,
+    },
+  ];
+  for (const fixture of rejects) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, fixture.pattern, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+
+  // Contained chain in extractor-creatable order (s2 precedes s1) extracts
+  // and resolves inside the destination.
+  const chain = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("real.txt", "chained")),
+      stripMarker(rawTarEntry("s2", "", { type: "2", linkname: "s1" })),
+      rawTarEntry("s1", "", { type: "2", linkname: "real.txt" }),
+    ]),
+  );
+  const chainItem = service.seed(
+    { name: "contained-chain.tar.gz", archive: "tar.gz", size: chain.length },
+    chain,
+  );
+  const chainOut = join(scratch, "contained-chain-out");
+  const chainResult = await cli([
+    "down",
+    chainItem.id,
+    "--extract",
+    "-o",
+    chainOut,
+  ]);
+  assert.equal(chainResult.code, 0, chainResult.stderr.text);
+  assert.equal(await readlink(join(chainOut, "s2")), "s1");
+  assert.equal(await readFile(join(chainOut, "s2"), "utf8"), "chained");
+
+  // Dangling but contained targets stay valid.
+  const dangling = gzipSync(
+    rawTarEntry("link", "", { type: "2", linkname: "absent.txt" }),
+  );
+  const danglingItem = service.seed(
+    { name: "dangling.tar.gz", archive: "tar.gz", size: dangling.length },
+    dangling,
+  );
+  const danglingOut = join(scratch, "dangling-out");
+  const danglingResult = await cli([
+    "down",
+    danglingItem.id,
+    "--extract",
+    "-o",
+    danglingOut,
+  ]);
+  assert.equal(danglingResult.code, 0, danglingResult.stderr.text);
+  assert.equal(await readlink(join(danglingOut, "link")), "absent.txt");
 });
 
 test("extraction rejects non-zero entry content padding without touching destinations", async () => {
@@ -1501,6 +1859,153 @@ test("the extraction completeness guard rejects a staging tree missing a manifes
       return true;
     },
   );
+});
+
+test("the completeness guard rejects staging entries the scanner never declared", async () => {
+  const extract = await import("../src/extract.js");
+  const staging = await mkdtemp(join(scratch, "exactness-"));
+  const { mkdir } = await import("node:fs/promises");
+  await mkdir(join(staging, "a"));
+  await writeFile(join(staging, "a", "b.txt"), "x");
+  // Implicit parent directories of declared entries are expected.
+  await extract.verifyExtractionCompleteness(staging, ["a/b.txt"]);
+  // An extra file the scanner never saw must reject: a stream the extractor
+  // interprets differently than the scanner cannot publish silently.
+  await writeFile(join(staging, "smuggled.txt"), "x");
+  await assert.rejects(
+    extract.verifyExtractionCompleteness(staging, ["a/b.txt"]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /undeclared/i);
+      assert.match(error.message, /smuggled\.txt/);
+      return true;
+    },
+  );
+});
+
+test("--force replacement survives an injected publish-rename failure", async () => {
+  const extract = await import("../src/extract.js");
+  const { readdir } = await import("node:fs/promises");
+  const bytes = gzipSync(rawTarEntry("inside.txt", "new content"));
+  const archivePath = join(scratch, "force-publish.tar.gz");
+  await writeFile(archivePath, bytes);
+  const room = await mkdtemp(join(scratch, "force-room-"));
+  const destination = join(room, "dest");
+  await writeFile(destination, "old content");
+
+  let calls = 0;
+  await assert.rejects(
+    extract.extractArchive(archivePath, destination, true, {
+      publishRename: async (from: string, to: string) => {
+        calls += 1;
+        throw Object.assign(new Error("injected rename failure"), {
+          code: "EIO",
+          from,
+          to,
+        });
+      },
+    }),
+    /injected rename failure/,
+  );
+  assert.equal(calls, 1);
+  // The old destination is restored, and nothing else is left beside it.
+  assert.equal(await readFile(destination, "utf8"), "old content");
+  assert.deepEqual(await readdir(room), ["dest"]);
+
+  // Without injection the same replacement succeeds.
+  await extract.extractArchive(archivePath, destination, true);
+  assert.equal(
+    await readFile(join(destination, "inside.txt"), "utf8"),
+    "new content",
+  );
+  assert.deepEqual(await readdir(room), ["dest"]);
+});
+
+test("--force keeps the new destination when backup removal fails, then recovers", async () => {
+  const extract = await import("../src/extract.js");
+  const { readdir } = await import("node:fs/promises");
+  const bytes = gzipSync(rawTarEntry("inside.txt", "new content"));
+  const archivePath = join(scratch, "force-rmfail.tar.gz");
+  await writeFile(archivePath, bytes);
+  const room = await mkdtemp(join(scratch, "rmfail-room-"));
+  const destination = join(room, "dest");
+  await writeFile(destination, "old content");
+
+  await assert.rejects(
+    extract.extractArchive(archivePath, destination, true, {
+      removeBackup: async () => {
+        throw Object.assign(new Error("injected remove failure"), {
+          code: "EIO",
+        });
+      },
+    }),
+    /injected remove failure/,
+  );
+  // Publish already happened: the new content is live, the backup remains.
+  assert.equal(
+    await readFile(join(destination, "inside.txt"), "utf8"),
+    "new content",
+  );
+  const leftovers = (await readdir(room)).filter((name) =>
+    name.includes(".fs-backup-"),
+  );
+  assert.equal(leftovers.length, 1);
+  assert.equal(
+    await readFile(join(room, leftovers[0]!, "previous"), "utf8"),
+    "old content",
+  );
+
+  // The next invocation detects the leftover backup and cleans it up.
+  const again = join(room, "second-out");
+  await extract.extractArchive(archivePath, join(room, "dest"), true);
+  assert.deepEqual(await readdir(room), ["dest"]);
+  await extract.extractArchive(archivePath, again, false);
+  assert.equal(
+    await readFile(join(again, "inside.txt"), "utf8"),
+    "new content",
+  );
+});
+
+test("a crash between backup and publish is recovered on the next invocation", async () => {
+  const extract = await import("../src/extract.js");
+  const { mkdir, readdir } = await import("node:fs/promises");
+  const bytes = gzipSync(rawTarEntry("inside.txt", "new content"));
+  const archivePath = join(scratch, "force-crash.tar.gz");
+  await writeFile(archivePath, bytes);
+  const room = await mkdtemp(join(scratch, "crash-room-"));
+  // Simulated crash state: the destination was moved to its unique backup
+  // and the process died before the staging rename.
+  const backupRoot = join(room, ".dest.fs-backup-abc123");
+  await mkdir(backupRoot);
+  await writeFile(join(backupRoot, "previous"), "old content");
+
+  // Without --force: recovery restores the old destination, then the
+  // ordinary exists-check refuses to replace it.
+  const refused = await (async () => {
+    try {
+      await extract.extractArchive(archivePath, join(room, "dest"), false);
+      return null;
+    } catch (error) {
+      return error as Error;
+    }
+  })();
+  assert.ok(refused);
+  assert.match(refused.message, /already exists/i);
+  assert.equal(await readFile(join(room, "dest"), "utf8"), "old content");
+  assert.deepEqual(await readdir(room), ["dest"]);
+
+  // With --force after another simulated crash: recovery restores, then the
+  // replacement proceeds and leaves no backup behind.
+  const backupRoot2 = join(room, ".dest.fs-backup-def456");
+  await mkdir(backupRoot2);
+  await rm(join(room, "dest"));
+  await writeFile(join(backupRoot2, "previous"), "old content");
+  await extract.extractArchive(archivePath, join(room, "dest"), true);
+  assert.equal(
+    await readFile(join(room, "dest", "inside.txt"), "utf8"),
+    "new content",
+  );
+  assert.deepEqual(await readdir(room), ["dest"]);
 });
 
 test("extraction fails cleanly on garbage bytes marked archive=tar.gz", async () => {

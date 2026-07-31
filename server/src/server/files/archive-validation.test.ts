@@ -199,19 +199,8 @@ describe("TarGzArchiveValidator", () => {
       ),
       /unsafe link target/u,
     );
-    // Global pax path / linkpath.
-    await rejectsInvalid(
-      gzipSync(
-        Buffer.concat([
-          tarEntry("GlobalHead", paxRecord("path", "e:relative.txt"), {
-            type: "g",
-          }),
-          tarEntry("inner.txt", "content"),
-          tarTrailer(),
-        ]),
-      ),
-      /unsafe entry path/u,
-    );
+    // Global pax linkpath (a global `path` is ignored by node-tar and by
+    // this policy; see the extractor-aligned semantics suite).
     await rejectsInvalid(
       gzipSync(
         Buffer.concat([
@@ -369,8 +358,10 @@ describe("TarGzArchiveValidator", () => {
 
     it("frames pax metadata records by their own header size, never a pending override", async () => {
       // If the pending global size (5) leaked into the x entry's framing its
-      // payload would misparse. Links and directories carry no content even
-      // under a pending size.
+      // payload would misparse. Directories carry no content even under a
+      // pending size (node-tar zeroes directory sizes); link entries under a
+      // pending non-zero size are rejected outright, so the global size is
+      // cleared before the link here.
       await validate(
         gzipSync(
           Buffer.concat([
@@ -379,9 +370,10 @@ describe("TarGzArchiveValidator", () => {
               type: "x",
             }),
             entryWithHeaderSize("placeholder", 0, "ggggg"),
+            entryWithHeaderSize("h.bin", 0, "hhhhh"),
+            tarEntry("GlobalHead", paxRecord("size", "0"), { type: "g" }),
             tarEntry("dir/", "", { type: "5" }),
             tarEntry("dir/link", "", { type: "2", linkname: "renamed.txt" }),
-            entryWithHeaderSize("h.bin", 0, "hhhhh"),
             tarTrailer(),
           ]),
         ),
@@ -664,32 +656,46 @@ describe("TarGzArchiveValidator", () => {
       }
     });
 
-    it("rejects empty and dot path segments outside the leading ./ compatibility prefix", async () => {
+    it("canonicalizes removable dot and empty segments instead of rejecting them", async () => {
+      // `.` and empty segments are lexical no-ops that the shipped extractor
+      // collapses; the same canonical form feeds the safety and manifest
+      // checks, so common ./ spellings stay valid.
       for (const name of ["dir//file.txt", "dir/./file.txt", "././file.txt"]) {
-        await rejectsInvalid(
+        await validate(
           gzipSync(Buffer.concat([tarEntry(name, "x"), tarTrailer()])),
-          /unsafe entry path/u,
         );
       }
+      // A file spelled with a trailing slash and content is still invalid.
       await rejectsInvalid(
         gzipSync(Buffer.concat([tarEntry("regular.txt/", "x"), tarTrailer()])),
         /unsafe entry path/u,
       );
+      // Canonicalization feeds the collision manifest: a dot-spelled alias
+      // of an existing path still conflicts.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("dir/x.txt", "a"),
+            tarEntry("dir/./x.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /conflicting entry paths/u,
+      );
 
-      for (const target of ["dir//name", "dir/./name"]) {
-        await rejectsInvalid(
+      for (const target of ["dir//name", "dir/./name", "./name"]) {
+        await validate(
           gzipSync(
             Buffer.concat([
               tarEntry("link", "", { type: "2", linkname: target }),
               tarTrailer(),
             ]),
           ),
-          /unsafe link target/u,
         );
       }
 
-      for (const target of ["a//file.txt", "a/./file.txt"]) {
-        await rejectsInvalid(
+      for (const target of ["a//file.txt", "a/./file.txt", "./a/file.txt"]) {
+        await validate(
           gzipSync(
             Buffer.concat([
               tarEntry("a/file.txt", "content"),
@@ -697,11 +703,10 @@ describe("TarGzArchiveValidator", () => {
               tarTrailer(),
             ]),
           ),
-          /unsafe link target/u,
         );
       }
 
-      await rejectsInvalid(
+      await validate(
         gzipSync(
           Buffer.concat([
             tarEntry("././@LongLink", "dir//gnu.txt\0", { type: "L" }),
@@ -709,9 +714,8 @@ describe("TarGzArchiveValidator", () => {
             tarTrailer(),
           ]),
         ),
-        /unsafe entry path/u,
       );
-      await rejectsInvalid(
+      await validate(
         gzipSync(
           Buffer.concat([
             tarEntry("PaxHeader/x", paxRecord("path", "dir/./pax.txt"), {
@@ -721,7 +725,73 @@ describe("TarGzArchiveValidator", () => {
             tarTrailer(),
           ]),
         ),
+      );
+    });
+
+    it("keeps the stock macOS/BSD tar dot-root spelling with hardlinks and symlinks", async () => {
+      // `tar -czf out.tgz .` emits `./`-prefixed members, hardlink targets
+      // like `./b.txt`, and symlink targets like `./target.txt`.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("./", "", { type: "5" }),
+            tarEntry("./b.txt", "content"),
+            tarEntry("./a.txt", "", { type: "1", linkname: "./b.txt" }),
+            tarEntry("./link.txt", "", { type: "2", linkname: "./b.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    it("still rejects traversal and portable-name violations under dot spellings", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("link", "", { type: "2", linkname: "./../../out" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target|outside the extraction root/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("a.txt", "content"),
+            tarEntry("hard", "", { type: "1", linkname: "./../a.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+      // A hardlink to the bare archive root can never be a regular file.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("a.txt", "content"),
+            tarEntry("hard", "", { type: "1", linkname: "./" }),
+            tarTrailer(),
+          ]),
+        ),
+        /link target/u,
+      );
+      // Trailing-dot segments are non-portable names, not no-ops.
+      await rejectsInvalid(
+        gzipSync(Buffer.concat([tarEntry("dot./file.txt", "x"), tarTrailer()])),
         /unsafe entry path/u,
+      );
+    });
+
+    it("keeps a symlink whose target is the bare dot", async () => {
+      // `link -> .` resolves to the entry's own directory — contained.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("dir/", "", { type: "5" }),
+            tarEntry("dir/self", "", { type: "2", linkname: "." }),
+            tarTrailer(),
+          ]),
+        ),
       );
     });
 
@@ -787,7 +857,9 @@ describe("TarGzArchiveValidator", () => {
         ),
         /unsafe entry path/u,
       );
-      await rejectsInvalid(
+      // A non-portable pax path in a GLOBAL header is ignored (node-tar
+      // never applies it), so the archive stays valid.
+      await validate(
         gzipSync(
           Buffer.concat([
             tarEntry("GlobalHead", paxRecord("path", "trailing. "), {
@@ -797,7 +869,6 @@ describe("TarGzArchiveValidator", () => {
             tarTrailer(),
           ]),
         ),
-        /unsafe entry path/u,
       );
     });
 
@@ -1134,5 +1205,356 @@ describe("TarGzArchiveValidator", () => {
       Buffer.alloc(512),
     ]);
     await rejectsInvalid(gzipSync(tarBytes), /truncated mid-entry/u);
+  });
+
+  describe("composed symlink containment", () => {
+    // Each link target is lexically contained in isolation, but resolving a
+    // target THROUGH an earlier symlink can leave the extraction root. The
+    // validator finalizes a virtual manifest and resolves every symlink
+    // through symlink components/chains before accepting the archive.
+    it("rejects the two-link composed escape (s1 -> .., s2 -> s1/../..)", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("d/", "", { type: "5" }),
+            tarEntry("d/s1", "", { type: "2", linkname: ".." }),
+            tarEntry("d/s2", "", { type: "2", linkname: "s1/../.." }),
+            tarTrailer(),
+          ]),
+        ),
+        /outside the extraction root/u,
+      );
+    });
+
+    it("rejects a longer composed escape through a chain of symlinks", async () => {
+      // s2 -> d/s1 resolves to the root; d/s3 -> ../s2/.. then escapes.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("d/", "", { type: "5" }),
+            tarEntry("d/s3", "", { type: "2", linkname: "../s2/.." }),
+            tarEntry("s2", "", { type: "2", linkname: "d/s1" }),
+            tarEntry("d/s1", "", { type: "2", linkname: ".." }),
+            tarTrailer(),
+          ]),
+        ),
+        /outside the extraction root/u,
+      );
+    });
+
+    it("keeps a symlink that resolves exactly to the extraction root", async () => {
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("d/", "", { type: "5" }),
+            tarEntry("d/s1", "", { type: "2", linkname: ".." }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    it("rejects symlink cycles, including self-loops", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("s", "", { type: "2", linkname: "s" }),
+            tarTrailer(),
+          ]),
+        ),
+        /symlink (cycle|chain)/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("a", "", { type: "2", linkname: "b" }),
+            tarEntry("b", "", { type: "2", linkname: "a" }),
+            tarTrailer(),
+          ]),
+        ),
+        /symlink (cycle|chain)/u,
+      );
+    });
+
+    it("rejects chains too deep for real resolvers", async () => {
+      const entries: Buffer[] = [];
+      // link0 -> link1 -> ... -> link44 -> real.txt, declared so that no
+      // link's target exists as a symlink before it (extractor-creatable).
+      for (let index = 0; index < 45; index += 1) {
+        entries.push(
+          tarEntry(`link${index}`, "", {
+            type: "2",
+            linkname: index === 44 ? "real.txt" : `link${index + 1}`,
+          }),
+        );
+      }
+      entries.push(tarEntry("real.txt", "content"), tarTrailer());
+      await rejectsInvalid(
+        gzipSync(Buffer.concat(entries)),
+        /symlink (cycle|chain)/u,
+      );
+    });
+
+    it("rejects symlinks resolving through a non-directory component", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("f.txt", "content"),
+            tarEntry("s", "", { type: "2", linkname: "f.txt/x" }),
+            tarTrailer(),
+          ]),
+        ),
+        /non-directory/u,
+      );
+    });
+
+    it("rejects chains node-tar cannot extract: target symlink declared earlier", async () => {
+      // node-tar lstats each component of a link target at creation time
+      // and fails on an existing symlink, so s2 -> s1 only extracts when s2
+      // precedes s1 in the archive.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "content"),
+            tarEntry("s1", "", { type: "2", linkname: "real.txt" }),
+            tarEntry("s2", "", { type: "2", linkname: "s1" }),
+            tarTrailer(),
+          ]),
+        ),
+        /cannot materialize/u,
+      );
+    });
+
+    it("keeps contained chains declared in extractor-creatable order", async () => {
+      // s2 precedes s1, so nothing s2's creation checks is a symlink yet.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "content"),
+            tarEntry("s2", "", { type: "2", linkname: "s1" }),
+            tarEntry("s1", "", { type: "2", linkname: "real.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    it("keeps a contained path through a directory symlink declared later", async () => {
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("e/", "", { type: "5" }),
+            tarEntry("d/", "", { type: "5" }),
+            tarEntry("t", "", { type: "2", linkname: "d/s/x" }),
+            tarEntry("d/s", "", { type: "2", linkname: "../e" }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+  });
+
+  describe("extractor-aligned pax path/linkpath semantics", () => {
+    // node-tar ignores the `path` key of a PAX global header entirely: the
+    // extractor publishes the raw header path (or the local override), so
+    // that is the value the policy must validate. A benign global path must
+    // never mask a hostile header path.
+    it("validates the real header path when a global pax path is present", async () => {
+      // The masking attack from the re-audit: global path=d/ hides CON.txt.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("d/", "", { type: "5" }),
+            tarEntry("GlobalHead", paxRecord("path", "d/"), { type: "g" }),
+            tarEntry("CON.txt", ""),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+      // Same masking with a traversal header path.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("GlobalHead", paxRecord("path", "benign.txt"), {
+              type: "g",
+            }),
+            tarEntry("../escape.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+      // Same masking with a collision alias hidden behind the global path.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("file.txt", "a"),
+            tarEntry("GlobalHead", paxRecord("path", "other.txt"), {
+              type: "g",
+            }),
+            tarEntry("File.txt", "b"),
+            tarTrailer(),
+          ]),
+        ),
+        /conflicting entry paths/u,
+      );
+    });
+
+    it("accepts a hostile global pax path over a benign header path, matching node-tar", async () => {
+      // node-tar never extracts the global path value, so it must not cause
+      // a rejection — and must not shadow the (validated) header path.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("GlobalHead", paxRecord("path", "../../outside"), {
+              type: "g",
+            }),
+            tarEntry("inner.txt", "content"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    it("still validates a local pax path override, which node-tar does extract", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "NUL.txt"), {
+              type: "x",
+            }),
+            tarEntry("benign.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    // node-tar slurps the local extended header first and the global one
+    // second, so a global `linkpath` OVERWRITES a local one. The published
+    // target is global ?? local ?? raw, and that value must be validated.
+    it("validates the global linkpath when it masks a benign local one", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "content"),
+            tarEntry("GlobalHead", paxRecord("linkpath", "NUL.txt"), {
+              type: "g",
+            }),
+            tarEntry("PaxHeader/link", paxRecord("linkpath", "safe.txt"), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "safe.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("accepts a benign global linkpath masking a hostile local one, matching node-tar", async () => {
+      // The local ../../outside value is never published by node-tar; the
+      // global safe.txt wins.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("safe.txt", "content"),
+            tarEntry("GlobalHead", paxRecord("linkpath", "safe.txt"), {
+              type: "g",
+            }),
+            tarEntry("PaxHeader/link", paxRecord("linkpath", "../../out"), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "raw.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    // node-tar's parser refuses link entries whose RAW header linkpath is
+    // empty ("linkpath required") even when a pax record supplies one, and
+    // refuses non-link entries carrying a raw linkpath ("linkpath
+    // forbidden"). Certifying either shape would store an archive the
+    // shipped extractor cannot materialize.
+    it("rejects symlink and hardlink entries with an empty raw link target", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([tarEntry("link", "", { type: "2" }), tarTrailer()]),
+        ),
+        /link target/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "content"),
+            tarEntry("PaxHeader/link", paxRecord("linkpath", "real.txt"), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2" }),
+            tarTrailer(),
+          ]),
+        ),
+        /link target/u,
+      );
+    });
+
+    it("rejects an empty effective symlink target arriving via pax", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/link", paxRecord("linkpath", ""), {
+              type: "x",
+            }),
+            tarEntry("link", "", { type: "2", linkname: "raw.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /link target/u,
+      );
+    });
+
+    it("rejects non-link entries carrying a raw linkpath", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("file.txt", "x", { linkname: "weird" }),
+            tarTrailer(),
+          ]),
+        ),
+        /link target/u,
+      );
+    });
+
+    it("keeps dangling symlink targets that stay inside the root", async () => {
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("link", "", { type: "2", linkname: "absent.txt" }),
+            tarEntry("deep", "", { type: "2", linkname: "missing/deeper" }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+
+    it("rejects link entries that declare content bytes", async () => {
+      // node-tar consumes the declared body of a link entry while this
+      // walker frames links at zero bytes; accepting one would desync the
+      // two interpretations of the same stream.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("target.txt", "content"),
+            tarHeader("link", 512, { type: "2", linkname: "target.txt" }),
+            Buffer.alloc(512),
+            tarTrailer(),
+          ]),
+        ),
+        /link/u,
+      );
+    });
   });
 });

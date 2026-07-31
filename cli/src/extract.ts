@@ -1,4 +1,12 @@
-import { lstat, mkdir, mkdtemp, rename, rm, stat } from "node:fs/promises";
+import {
+  lstat,
+  mkdir,
+  mkdtemp,
+  readdir,
+  rename,
+  rm,
+  stat,
+} from "node:fs/promises";
 import { basename, dirname, join, resolve } from "node:path";
 import * as tar from "tar";
 import { CliError, EXIT } from "./errors.js";
@@ -29,10 +37,19 @@ export function throwIfExtractionWarnings(warnings: string[]): void {
   );
 }
 
-// Second line of defense behind the strict pre-scan: every scanner-accepted
-// entry must actually exist in the staged tree before the destination is
-// published. A skipped entry (for any reason node-tar might choose) would
-// otherwise become a silently incomplete "successful" extraction.
+// Filesystems fold case and Unicode normalization differently, so staging
+// paths are compared under the same collision key the scanner uses.
+function comparisonKey(relativePath: string): string {
+  return relativePath
+    .split("/")
+    .map((segment) => segment.normalize("NFC").toLowerCase())
+    .join("/");
+}
+
+// Second line of defense behind the strict pre-scan: the staged tree must
+// match the scan manifest EXACTLY. Every scanner-accepted entry must exist,
+// and nothing the scanner never declared may exist — an extractor that
+// interpreted the stream differently than the scanner must never publish.
 export async function verifyExtractionCompleteness(
   root: string,
   entries: string[],
@@ -46,14 +63,78 @@ export async function verifyExtractionCompleteness(
       );
     }
   }
+  const expected = new Set<string>();
+  for (const entry of entries) {
+    const segments = entry.split("/");
+    for (let index = 1; index <= segments.length; index += 1) {
+      // Declared entries and their implicit parent directories.
+      expected.add(comparisonKey(segments.slice(0, index).join("/")));
+    }
+  }
+  const walk = async (directory: string, prefix: string): Promise<void> => {
+    for (const entry of await readdir(directory, { withFileTypes: true })) {
+      const relative = prefix === "" ? entry.name : `${prefix}/${entry.name}`;
+      if (!expected.has(comparisonKey(relative))) {
+        throw new CliError(
+          `Archive extraction produced an undeclared entry: ${relative}`,
+          EXIT.general,
+          "INCOMPLETE_EXTRACTION",
+        );
+      }
+      if (entry.isDirectory()) await walk(join(directory, entry.name), relative);
+    }
+  };
+  await walk(root, "");
+}
+
+// Replacement backups live beside the destination as
+// `.<name>.fs-backup-<unique>/previous`. The trailing dash keeps the prefix
+// disjoint from the `.<name>.fs-<unique>` staging spelling.
+const BACKUP_INFIX = ".fs-backup-";
+
+// Failure-injection seams for the publish steps; production always uses the
+// real fs operations.
+export interface PublishHooks {
+  publishRename?: (from: string, to: string) => Promise<void>;
+  removeBackup?: (backupRoot: string) => Promise<void>;
+}
+
+// Detect and resolve backups a crashed prior invocation left behind: if the
+// destination is missing, the backed-up destination is restored; either way
+// the leftover backup directory is removed. Runs before the exists-check so
+// a restored destination is treated like any other existing one.
+async function recoverLeftoverBackups(
+  parent: string,
+  destination: string,
+): Promise<void> {
+  const prefix = `.${basename(destination)}${BACKUP_INFIX}`;
+  let names: string[];
+  try {
+    names = await readdir(parent);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  for (const name of names) {
+    if (!name.startsWith(prefix)) continue;
+    const backupRoot = join(parent, name);
+    const previous = join(backupRoot, "previous");
+    if (!(await exists(destination)) && (await exists(previous))) {
+      await rename(previous, destination);
+    }
+    await rm(backupRoot, { recursive: true, force: true });
+  }
 }
 
 export async function extractArchive(
   archivePath: string,
   outputPath: string,
   force: boolean,
+  hooks: PublishHooks = {},
 ): Promise<void> {
   const destination = resolve(outputPath);
+  const parent = dirname(destination);
+  await recoverLeftoverBackups(parent, destination);
   if ((await exists(destination)) && !force) {
     throw new CliError(
       `Destination already exists: ${outputPath} (use --force to replace it)`,
@@ -70,7 +151,6 @@ export async function extractArchive(
   const compressedBytes = (await stat(archivePath)).size;
   const manifest = await scanTarGzArchive(archivePath, compressedBytes);
 
-  const parent = dirname(destination);
   await mkdir(parent, { recursive: true });
   const stagingRoot = await mkdtemp(
     join(parent, `.${basename(destination)}.fs-`),
@@ -93,8 +173,33 @@ export async function extractArchive(
     });
     throwIfExtractionWarnings(warnings);
     await verifyExtractionCompleteness(staging, manifest.entries);
-    if (force) await rm(destination, { recursive: true, force: true });
-    await rename(staging, destination);
+
+    // Rollback-safe replacement: the old destination is moved to a unique
+    // backup beside it, the staging tree is published, and only after a
+    // successful publish is the backup removed. An ordinary publish failure
+    // restores the old destination; a crash leaves a backup the next
+    // invocation recovers.
+    let backupRoot: string | null = null;
+    if (await exists(destination)) {
+      backupRoot = await mkdtemp(
+        join(parent, `.${basename(destination)}${BACKUP_INFIX}`),
+      );
+      await rename(destination, join(backupRoot, "previous"));
+    }
+    try {
+      if (hooks.publishRename) await hooks.publishRename(staging, destination);
+      else await rename(staging, destination);
+    } catch (error) {
+      if (backupRoot) {
+        await rename(join(backupRoot, "previous"), destination);
+        await rm(backupRoot, { recursive: true, force: true });
+      }
+      throw error;
+    }
+    if (backupRoot) {
+      if (hooks.removeBackup) await hooks.removeBackup(backupRoot);
+      else await rm(backupRoot, { recursive: true, force: true });
+    }
   } finally {
     await rm(stagingRoot, { recursive: true, force: true });
   }

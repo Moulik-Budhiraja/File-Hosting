@@ -266,9 +266,6 @@ describe("archive upload contract", { concurrency: false }, () => {
       Buffer.concat([tarEntry("dir/file:stream", "x"), tarTrailer()]),
       // Trailing dot segment.
       Buffer.concat([tarEntry("trailing.", "x"), tarTrailer()]),
-      // Empty and dot segments outside the conventional leading `./` prefix.
-      Buffer.concat([tarEntry("dir//file.txt", "x"), tarTrailer()]),
-      Buffer.concat([tarEntry("dir/./file.txt", "x"), tarTrailer()]),
       // Case-only collision.
       Buffer.concat([
         tarEntry("File.txt", "a"),
@@ -278,10 +275,6 @@ describe("archive upload contract", { concurrency: false }, () => {
       // Device basename as a symlink target.
       Buffer.concat([
         tarEntry("link", "", { type: "2", linkname: "NUL.txt" }),
-        tarTrailer(),
-      ]),
-      Buffer.concat([
-        tarEntry("link", "", { type: "2", linkname: "dir//target" }),
         tarTrailer(),
       ]),
     ];
@@ -303,33 +296,96 @@ describe("archive upload contract", { concurrency: false }, () => {
     }
   });
 
-  it("rejects empty and dot path segments with no persistence", async () => {
+  it("rejects a file spelled with a trailing slash, keeps canonicalizable dot spellings", async () => {
     const { tarTrailer } = await import("./tar-fixtures");
-    const fixtures = [
-      Buffer.concat([tarEntry("dir//file.txt", "x"), tarTrailer()]),
-      Buffer.concat([tarEntry("dir/./file.txt", "x"), tarTrailer()]),
-      Buffer.concat([tarEntry("regular.txt/", "x"), tarTrailer()]),
-      Buffer.concat([
-        tarEntry("link", "", { type: "2", linkname: "dir//target" }),
-        tarTrailer(),
-      ]),
-    ];
-    for (const [index, fixture] of fixtures.entries()) {
-      const beforeState = await storeState();
-      await assert.rejects(
-        service.upload(
-          stream(gzipSync(fixture)),
-          uploadOptions(`segment-${index}.tar.gz`),
+    const beforeState = await storeState();
+    await assert.rejects(
+      service.upload(
+        stream(
+          gzipSync(
+            Buffer.concat([tarEntry("regular.txt/", "x"), tarTrailer()]),
+          ),
         ),
-        (error: unknown) => {
-          assert.ok(error instanceof AppError);
-          assert.equal(error.status, 400);
-          assert.equal(error.code, "invalid_archive");
-          return true;
-        },
-      );
-      assert.deepEqual(await storeState(), beforeState);
-    }
+        uploadOptions("trailing-slash.tar.gz"),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.status, 400);
+        assert.equal(error.code, "invalid_archive");
+        return true;
+      },
+    );
+    assert.deepEqual(await storeState(), beforeState);
+
+    // Removable dot/empty segments are canonicalized, not rejected — the
+    // shipped recursive CLI and stock tar both emit such spellings.
+    const dotted = await service.upload(
+      stream(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("./", "", { type: "5" }),
+            tarEntry("./b.txt", "content"),
+            tarEntry("./a.txt", "", { type: "1", linkname: "./b.txt" }),
+            tarEntry("./link.txt", "", { type: "2", linkname: "./b.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+      ),
+      uploadOptions("dot-root.tar.gz"),
+    );
+    assert.equal(dotted.archive, "tar.gz");
+    await service.delete(dotted.id);
+  });
+
+  it("rejects a composed symlink escape with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const beforeState = await storeState();
+    await assert.rejects(
+      service.upload(
+        stream(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("d/", "", { type: "5" }),
+              tarEntry("d/s1", "", { type: "2", linkname: ".." }),
+              tarEntry("d/s2", "", { type: "2", linkname: "s1/../.." }),
+              tarTrailer(),
+            ]),
+          ),
+        ),
+        uploadOptions("composed-escape.tar.gz"),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.status, 400);
+        assert.equal(error.code, "invalid_archive");
+        assert.match(error.message, /outside the extraction root/u);
+        return true;
+      },
+    );
+    assert.deepEqual(await storeState(), beforeState);
+  });
+
+  it("rejects an empty symlink target with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const beforeState = await storeState();
+    await assert.rejects(
+      service.upload(
+        stream(
+          gzipSync(
+            Buffer.concat([tarEntry("link", "", { type: "2" }), tarTrailer()]),
+          ),
+        ),
+        uploadOptions("empty-symlink.tar.gz"),
+      ),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.status, 400);
+        assert.equal(error.code, "invalid_archive");
+        assert.match(error.message, /link target/u);
+        return true;
+      },
+    );
+    assert.deepEqual(await storeState(), beforeState);
   });
 
   it("rejects non-zero entry content padding with no persistence", async () => {

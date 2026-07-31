@@ -95,18 +95,13 @@ function normalizeEntryPath(path: string): string | null {
   const normalized = path.replaceAll("\\", "/");
   if (normalized.startsWith("/")) return null;
   if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
-  const segments = normalized.split("/");
-  // Preserve compatibility with the conventional tar `./name` prefix and
-  // directory trailing slash, but reject empty/dot segments everywhere else.
-  if (segments[0] === ".") segments.shift();
-  if (segments.at(-1) === "") segments.pop();
-  if (
-    segments.some(
-      (segment) => segment === "" || segment === "." || segment === "..",
-    )
-  ) {
-    return null;
-  }
+  // `.` and empty segments are lexical no-ops that the shipped extractor
+  // collapses; canonicalize them away so the same form feeds the safety and
+  // manifest checks. Any `..` still rejects outright.
+  const segments = normalized
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".");
+  if (segments.includes("..")) return null;
   return segments.join("/");
 }
 
@@ -125,14 +120,10 @@ function normalizeRootRelative(path: string): string | null {
   const normalized = path.replaceAll("\\", "/");
   if (normalized.startsWith("/")) return null;
   if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
-  const segments = normalized.split("/");
-  if (
-    segments.some(
-      (segment) => segment === "" || segment === "." || segment === "..",
-    )
-  ) {
-    return null;
-  }
+  const segments = normalized
+    .split("/")
+    .filter((segment) => segment !== "" && segment !== ".");
+  if (segments.includes("..")) return null;
   return segments.join("/");
 }
 
@@ -146,7 +137,8 @@ function isUnsafeLinkTarget(entryPath: string, linkTarget: string): boolean {
     normalizedEntry === "" ? [] : normalizedEntry.split("/").slice(0, -1);
   const segments = [...parent];
   for (const segment of normalizedTarget.split("/")) {
-    if (segment === "" || segment === ".") return true;
+    // `.` and empty segments are lexical no-ops on every consumer OS.
+    if (segment === "" || segment === ".") continue;
     if (segment === "..") {
       if (segments.length === 0) return true;
       segments.pop();
@@ -210,7 +202,6 @@ class TarWalker {
   private overridePath: string | null = null;
   private overrideLink: string | null = null;
   private overrideSize: number | null = null;
-  private globalPath: string | null = null;
   private globalLink: string | null = null;
   private globalSize: number | null = null;
   private entrySeen = false;
@@ -225,8 +216,15 @@ class TarWalker {
   // platforms, so any conflicting claim rejects deterministically here.
   private readonly manifest = new Map<
     string,
-    { kind: "file" | "hardlink" | "symlink" | "dir"; spelling: string }
+    {
+      kind: "file" | "hardlink" | "symlink" | "dir";
+      spelling: string;
+      target?: string;
+    }
   >();
+  // Symlinks in archive order, for the finish-time composed-resolution and
+  // extractor-compatibility passes over the final virtual manifest.
+  private readonly symlinks: { path: string; target: string }[] = [];
 
   private static collisionKey(normalizedPath: string): string {
     return normalizedPath
@@ -238,11 +236,12 @@ class TarWalker {
   private claimPath(
     spelling: string,
     kind: "file" | "hardlink" | "symlink" | "dir",
+    target?: string,
   ): void {
     const key = TarWalker.collisionKey(spelling);
     const existing = this.manifest.get(key);
     if (!existing) {
-      this.manifest.set(key, { kind, spelling });
+      this.manifest.set(key, { kind, spelling, target });
       return;
     }
     // Only an identically spelled directory redeclaration is idempotent
@@ -260,12 +259,16 @@ class TarWalker {
   private recordEntry(
     normalizedPath: string,
     kind: "file" | "hardlink" | "symlink" | "dir",
+    target?: string,
   ): void {
     const segments = normalizedPath.split("/");
     for (let index = 1; index < segments.length; index += 1) {
       this.claimPath(segments.slice(0, index).join("/"), "dir");
     }
-    this.claimPath(normalizedPath, kind);
+    this.claimPath(normalizedPath, kind, target);
+    if (kind === "symlink" && target !== undefined) {
+      this.symlinks.push({ path: normalizedPath, target });
+    }
   }
 
   // Largest decompressed size a single entry may declare. Derived from the
@@ -342,6 +345,100 @@ class TarWalker {
     if (!this.entrySeen && this.zeroBlocks >= 2) {
       // An empty archive (trailer only) is well-formed; nothing else to prove.
     }
+    this.verifySymlinkResolution();
+  }
+
+  // Composed-symlink containment over the FINAL virtual manifest. Each
+  // target was already checked lexically in isolation; here every symlink is
+  // resolved through symlink path components/chains (POSIX semantics:
+  // substitute a symlink component's target before applying later `..`),
+  // rejecting final escape, cycles, over-deep chains, and traversal through
+  // non-directory entries. Dangling components stay subject to the lexical
+  // containment rule.
+  private static readonly SYMLINK_DEPTH_LIMIT = 40;
+
+  private verifySymlinkResolution(): void {
+    // Extractor compatibility: node-tar lstats each component of a link
+    // target's lexically-collapsed path at creation time and fails fatally
+    // (in strict mode) on an existing symlink. A chain therefore only
+    // extracts when the referencing link precedes the symlink it traverses.
+    const declared = new Set<string>();
+    for (const link of this.symlinks) {
+      const parts = link.path.split("/").slice(0, -1);
+      for (const segment of link.target.replaceAll("\\", "/").split("/")) {
+        if (segment === "" || segment === ".") continue;
+        if (segment === "..") {
+          parts.pop();
+          continue;
+        }
+        parts.push(segment);
+      }
+      for (let index = 1; index <= parts.length; index += 1) {
+        const key = TarWalker.collisionKey(parts.slice(0, index).join("/"));
+        if (declared.has(key)) {
+          throw invalid(
+            "archive contains a symlink chain the extractor cannot materialize",
+          );
+        }
+      }
+      declared.add(TarWalker.collisionKey(link.path));
+    }
+    for (const link of this.symlinks) {
+      this.resolveVirtualTarget(
+        link.path.split("/").slice(0, -1),
+        link.target,
+        new Set([TarWalker.collisionKey(link.path)]),
+        0,
+      );
+    }
+  }
+
+  private resolveVirtualTarget(
+    base: readonly string[],
+    target: string,
+    active: Set<string>,
+    depth: number,
+  ): string[] {
+    if (depth > TarWalker.SYMLINK_DEPTH_LIMIT) {
+      throw invalid("archive contains a symlink chain that is too deep");
+    }
+    const stack = [...base];
+    const segments = target
+      .replaceAll("\\", "/")
+      .split("/")
+      .filter((segment) => segment !== "" && segment !== ".");
+    for (const [index, segment] of segments.entries()) {
+      if (segment === "..") {
+        if (stack.length === 0) {
+          throw invalid("archive symlinks resolve outside the extraction root");
+        }
+        stack.pop();
+        continue;
+      }
+      stack.push(segment);
+      const key = TarWalker.collisionKey(stack.join("/"));
+      const node = this.manifest.get(key);
+      if (!node) continue;
+      if (node.kind === "symlink") {
+        if (active.has(key)) {
+          throw invalid("archive contains a symlink cycle");
+        }
+        active.add(key);
+        stack.pop();
+        const resolved = this.resolveVirtualTarget(
+          stack,
+          node.target ?? "",
+          active,
+          depth + 1,
+        );
+        active.delete(key);
+        stack.length = 0;
+        stack.push(...resolved);
+      } else if (node.kind !== "dir" && index < segments.length - 1) {
+        throw invalid("archive symlinks resolve through a non-directory entry");
+      }
+    }
+    return stack;
   }
 
   private consumeHeaderBlock(block: Buffer): void {
@@ -400,12 +497,39 @@ class TarWalker {
         );
       }
       frameSize = this.overrideSize ?? this.globalSize ?? size;
-      const entryPath = this.overridePath ?? this.globalPath ?? headerPath;
+      // node-tar ignores the `path` key of PAX global headers: the extractor
+      // publishes the local override or the raw header path, so that exact
+      // value — never a global path — is what the policy validates.
+      const entryPath = this.overridePath ?? headerPath;
       if (entryPath === "" || isUnsafeArchivePath(entryPath)) {
         throw invalid("archive contains an unsafe entry path");
       }
       const headerLink = cString(block.subarray(157, 257));
-      const linkTarget = this.overrideLink ?? this.globalLink ?? headerLink;
+      const isLink = type === "1" || type === "2";
+      // node-tar's parser gates on the RAW header linkpath: link entries
+      // without one are invalid ("linkpath required") even when a pax record
+      // supplies a value, and non-link entries carrying one are invalid
+      // ("linkpath forbidden"). Mirror both so nothing certified here is
+      // unextractable by the shipped consumer.
+      if (isLink && headerLink === "") {
+        throw invalid("archive link entry has an empty link target");
+      }
+      if (!isLink && headerLink !== "") {
+        throw invalid("archive non-link entry carries a link target");
+      }
+      // node-tar slurps the local extended header first and the global one
+      // second, so a global linkpath OVERWRITES a local one; the published
+      // target is global ?? local ?? raw, and that value is validated.
+      const linkTarget = this.globalLink ?? this.overrideLink ?? headerLink;
+      if (isLink && linkTarget === "") {
+        throw invalid("archive link entry has an empty link target");
+      }
+      if (isLink && frameSize !== 0) {
+        // node-tar consumes a link entry's declared body while this walker
+        // frames links at zero bytes; accepting one would desync the two
+        // interpretations of the same stream.
+        throw invalid("archive link entry declares content bytes");
+      }
       if (type === "1") {
         // Hardlink targets resolve from the archive root, never from the
         // containing entry; any `..` component (or absolute/device form)
@@ -425,11 +549,7 @@ class TarWalker {
             "archive hardlink target is not an already-declared regular file",
           );
         }
-      } else if (
-        type === "2" &&
-        linkTarget &&
-        isUnsafeLinkTarget(entryPath, linkTarget)
-      ) {
+      } else if (type === "2" && isUnsafeLinkTarget(entryPath, linkTarget)) {
         throw invalid("archive contains an unsafe link target");
       }
       const trailingSeparator = entryPath.replaceAll("\\", "/").endsWith("/");
@@ -459,6 +579,7 @@ class TarWalker {
               : type === "2"
                 ? "symlink"
                 : "file",
+          !isDir && type === "2" ? linkTarget : undefined,
         );
         if (!isDir && (type === "0" || type === "1")) {
           this.materializable.add(normalizedPath);
@@ -502,7 +623,9 @@ class TarWalker {
       const size =
         sizeText === undefined ? undefined : this.parsePaxSize(sizeText);
       if (kind === "pax-global") {
-        if (path !== undefined) this.globalPath = path;
+        // A global `path` key is deliberately dropped: node-tar never
+        // applies it, so tracking it would validate a value the extractor
+        // does not publish (and mask the one it does).
         if (link !== undefined) this.globalLink = link;
         if (size !== undefined) this.globalSize = size;
       } else {

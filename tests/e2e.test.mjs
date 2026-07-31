@@ -4,6 +4,7 @@ import { once } from "node:events";
 import { constants as fsConstants } from "node:fs";
 import {
   access,
+  link,
   lstat,
   mkdir,
   mkdtemp,
@@ -420,6 +421,10 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     await writeFile(path.join(folder, "root.txt"), "root contents");
     await writeFile(path.join(folder, "nested", "value.bin"), Buffer.from([9, 8, 7, 0]));
     await symlink("nested/value.bin", path.join(folder, "value-link"));
+    // Conventional safe spellings stock tools emit: a `./`-prefixed symlink
+    // target and a hardlink pair (tar stores the second name as a hardlink).
+    await symlink("./root.txt", path.join(folder, "dot-link"));
+    await link(path.join(folder, "root.txt"), path.join(folder, "hard.txt"));
 
     const [archive] = await uploadJson(["up", "-r", folder, "--tag", "archive"]);
     assert.equal(archive.name, "folder-object.tar.gz");
@@ -432,6 +437,11 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     assert((await lstat(path.join(extraction, "empty-dir"))).isDirectory());
     assert((await lstat(path.join(extraction, "value-link"))).isSymbolicLink());
     assert.equal(await readlink(path.join(extraction, "value-link")), "nested/value.bin");
+    assert.equal(await readlink(path.join(extraction, "dot-link")), "./root.txt");
+    assert.equal(await readFile(path.join(extraction, "dot-link"), "utf8"), "root contents");
+    const hardStat = await lstat(path.join(extraction, "hard.txt"));
+    const rootStat = await lstat(path.join(extraction, "root.txt"));
+    assert.equal(hardStat.ino, rootStat.ino, "hardlink pair must share an inode");
   });
 
   await t.test("the server rejects traversal archives before any metadata or object commit", async () => {
