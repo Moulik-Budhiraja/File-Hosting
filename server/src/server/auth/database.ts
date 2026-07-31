@@ -69,6 +69,7 @@ CREATE TABLE IF NOT EXISTS login_failures (
   failures INTEGER NOT NULL,
   window_started_at TEXT NOT NULL
 );
+CREATE INDEX IF NOT EXISTS login_failures_window_idx ON login_failures(window_started_at);
 `;
 
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
@@ -315,6 +316,10 @@ export class AuthRepository {
       // Continue through the same bcrypt path to avoid username enumeration.
     }
     const throttleKey = digest(`${remoteAddress}\0${username}`);
+    await this.client.execute({
+      sql: "DELETE FROM login_failures WHERE window_started_at <= ?",
+      args: [new Date(now.getTime() - LOGIN_WINDOW_MS).toISOString()],
+    });
     const failure = await this.client.execute({
       sql: "SELECT failures, window_started_at FROM login_failures WHERE throttle_key = ?",
       args: [throttleKey],

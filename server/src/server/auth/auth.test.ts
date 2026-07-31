@@ -90,6 +90,48 @@ describe("user repository", () => {
     }
   });
 
+  it("purges expired login throttle records", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-throttle-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const repository = await AuthRepository.create(databaseUrl);
+    try {
+      const windowStart = new Date("2025-01-01T00:00:00.000Z");
+      await assert.rejects(
+        repository.authenticatePassword(
+          "missing.one",
+          WRONG_CREDENTIAL,
+          "192.0.2.1",
+          windowStart,
+        ),
+        /invalid username or password/iu,
+      );
+      await assert.rejects(
+        repository.authenticatePassword(
+          "missing.two",
+          WRONG_CREDENTIAL,
+          "192.0.2.2",
+          new Date(windowStart.getTime() + 16 * 60 * 1000),
+        ),
+        /invalid username or password/iu,
+      );
+
+      const inspection = createClient({ url: databaseUrl, intMode: "number" });
+      try {
+        const result = await inspection.execute(
+          "SELECT COUNT(*) AS count FROM login_failures",
+        );
+        assert.equal(Number(result.rows[0]?.count), 1);
+      } finally {
+        inspection.close();
+      }
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("creates normalized users and protects the last active admin", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "fs-auth-test-"));
     const databaseUrl = `file:${path.join(directory, "auth.db")}`;

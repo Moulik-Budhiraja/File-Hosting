@@ -48,5 +48,12 @@ src/server/auth/auth.test.ts` reported a missing rejection for 73-byte input.
      boundaries accepted, 73-byte forms rejected, and verification routed through
      the central validator to prevent bcrypt truncation-equivalent credentials.
 
+10. Expired login-throttle retention
+    - RED: `npx tsx --test --test-name-pattern='purges expired login throttle records'
+src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 1`).
+    - GREEN: the same focused test passed after authentication attempts removed
+      expired windows through an indexed timestamp cleanup before recording the
+      current failure.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
