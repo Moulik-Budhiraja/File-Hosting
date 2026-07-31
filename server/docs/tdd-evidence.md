@@ -210,5 +210,11 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: password lower bounds now count Unicode code points while retaining
       the independent 72-byte UTF-8 bcrypt ceiling.
 
+37. Administrator revalidation at user creation
+    - RED: an administrator disabled while bcrypt was in flight still created a
+      replacement active administrator.
+    - GREEN: non-legacy user creation now conditionally requires the initiating
+      actor to remain active and admin in the final insert statement.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

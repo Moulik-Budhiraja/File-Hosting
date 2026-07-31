@@ -165,22 +165,45 @@ export class AuthRepository {
     }
   }
 
-  async createUser(input: {
-    username: string;
-    password: string;
-    role: UserRole;
-  }): Promise<User> {
+  async createUser(
+    input: {
+      username: string;
+      password: string;
+      role: UserRole;
+    },
+    actorUserId?: string,
+  ): Promise<User> {
     const username = normalizeUsername(input.username);
     const passwordHash = await hashPassword(input.password);
     const id = randomUUID();
     const now = new Date().toISOString();
     try {
-      await this.client.execute({
+      const result = await this.client.execute({
         sql: `INSERT INTO users
           (id, username, password_hash, role, active, created_at, updated_at)
-          VALUES (?, ?, ?, ?, 1, ?, ?)`,
-        args: [id, username, passwordHash, input.role, now, now],
+          SELECT ?, ?, ?, ?, 1, ?, ?
+          WHERE ? IS NULL OR EXISTS (
+            SELECT 1 FROM users
+            WHERE id = ? AND role = 'admin' AND active = 1
+          )`,
+        args: [
+          id,
+          username,
+          passwordHash,
+          input.role,
+          now,
+          now,
+          actorUserId ?? null,
+          actorUserId ?? null,
+        ],
       });
+      if (result.rowsAffected === 0) {
+        throw new AppError(
+          403,
+          "admin_revoked",
+          "Administrator access is no longer valid",
+        );
+      }
     } catch (cause) {
       if (String(cause).toLocaleLowerCase("en-US").includes("unique")) {
         throw new AppError(409, "username_exists", "Username already exists", {

@@ -226,6 +226,51 @@ describe("user repository", () => {
     }
   });
 
+  it("does not let a disabled administrator finish creating a user", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-admin-create-race-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      await repository.createUser({
+        username: "guard.admin",
+        password: SECOND_ADMIN_CREDENTIAL,
+        role: "admin",
+      });
+      const actor = await repository.createUser({
+        username: "creating.admin",
+        password: ADMIN_CREDENTIAL,
+        role: "admin",
+      });
+      const creation = repository.createUser(
+        {
+          username: "replacement.admin",
+          password: OTHER_CREDENTIAL,
+          role: "admin",
+        },
+        actor.id,
+      );
+      await repository.setActive(actor.id, false);
+
+      await assert.rejects(
+        creation,
+        (error: unknown) =>
+          error instanceof AppError && error.code === "admin_revoked",
+      );
+      assert.equal(
+        (await repository.listUsers()).some(
+          (user) => user.username === "replacement.admin",
+        ),
+        false,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not complete a self-service password change after disablement", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-password-disable-race-test-"),

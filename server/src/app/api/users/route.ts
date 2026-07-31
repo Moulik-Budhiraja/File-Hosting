@@ -35,11 +35,16 @@ export async function POST(request: Request): Promise<Response> {
         "Username, password, and role are required",
       );
     }
-    const user = await service.auth.createUser({
-      username: body.username,
-      password: body.password,
-      role: body.role,
-    });
+    const user = await service.auth.createUser(
+      {
+        username: body.username,
+        password: body.password,
+        role: body.role,
+      },
+      principal.source === "legacy"
+        ? undefined
+        : (principal.userId ?? undefined),
+    );
     return json({ user: publicUser(user) }, { status: 201 });
   } catch (error) {
     return errorResponse(error);
