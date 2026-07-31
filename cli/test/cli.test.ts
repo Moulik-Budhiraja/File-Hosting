@@ -447,6 +447,75 @@ test("upload shorthand streams bytes and applies tags and visibility", async () 
   assert.equal(service.requests[0]?.authorization, "Bearer secret");
 });
 
+test("upload success waits for the API response after the body reaches EOF", async () => {
+  const path = join(scratch, "await-response.bin");
+  await writeFile(path, Buffer.alloc(256 * 1024));
+  const scheduler = new CliScheduler();
+  const stdout = new Capture();
+  const stderr = new Capture();
+  stderr.isTTY = true;
+  let bodyFinished!: () => void;
+  let releaseResponse!: () => void;
+  const bodyFinishedPromise = new Promise<void>((resolve) => { bodyFinished = resolve; });
+  const responsePromise = new Promise<void>((resolve) => { releaseResponse = resolve; });
+  const fetchAfterResponse: typeof fetch = async (_input, init) => {
+    let first = true;
+    for await (const _chunk of init!.body as unknown as Readable) {
+      if (first) {
+        first = false;
+        scheduler.advance(2_500);
+      }
+    }
+    bodyFinished();
+    await responsePromise;
+    return Response.json({
+      id: "Ab90002",
+      name: "await-response.bin",
+      size: 256 * 1024,
+      visibility: "public",
+      tags: [],
+      archive: null,
+    }, { status: 201 });
+  };
+
+  const running = run([path], {
+    env: { FS_URL: service.url, FS_TOKEN: "secret" },
+    streams: { stdin: Readable.from([]), stdout, stderr },
+    fetch: fetchAfterResponse,
+    progressScheduler: scheduler,
+  });
+  await bodyFinishedPromise;
+
+  assert.match(stderr.text, /Uploading await-response\.bin:/);
+  assert.doesNotMatch(stderr.text, /done\n/);
+
+  releaseResponse();
+  assert.equal(await running, 0);
+  assert.match(stderr.text, /done\n$/);
+});
+
+test("upload rejection after body EOF never renders success", async () => {
+  const path = join(scratch, "rejected-after-eof.bin");
+  await writeFile(path, Buffer.alloc(256 * 1024));
+  const scheduler = new CliScheduler();
+  const rejectAfterBody: typeof fetch = async (_input, init) => {
+    let first = true;
+    for await (const _chunk of init!.body as unknown as Readable) {
+      if (first) {
+        first = false;
+        scheduler.advance(2_500);
+      }
+    }
+    return Response.json({ error: { code: "STORE_FAILED", message: "storage failed" } }, { status: 500 });
+  };
+
+  const result = await cli([path], "", {}, { tty: true, scheduler, fetch: rejectAfterBody });
+
+  assert.notEqual(result.code, 0);
+  assert.doesNotMatch(result.stderr.text, /done\n/);
+  assert.match(result.stderr.text, /\r\x1b\[2Kfs: .*storage failed/);
+});
+
 test("upload progress is delayed and suppressed for structured output", async () => {
   const path = join(scratch, "slow-upload.bin");
   await writeFile(path, Buffer.alloc(256 * 1024));

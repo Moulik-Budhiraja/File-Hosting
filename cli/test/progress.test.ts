@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { once } from "node:events";
 import { Readable, Writable } from "node:stream";
 import { pipeline } from "node:stream/promises";
 import { test } from "node:test";
@@ -109,9 +110,13 @@ test("finalizes visible progress on completion and stops updates", () => {
   scheduler.advance(2_500);
   progress.add(500);
   progress.complete();
+  progress.complete();
+  progress.fail();
+  progress.cancel();
   const completed = stderr.text;
 
   assert.match(completed, /1000 B \/ 1000 B \(100%\).*done\n$/);
+  assert.equal(completed.match(/done\n/g)?.length, 1);
   scheduler.advance(1_000);
   assert.equal(stderr.text, completed);
 });
@@ -153,19 +158,35 @@ test("suppresses non-TTY and explicitly disabled progress", () => {
   }
 });
 
-test("clears progress and restores signal behavior before forwarding signals", () => {
-  const stderr = new TtyCapture();
-  const scheduler = new FakeScheduler();
-  const signals = new FakeSignals();
-  const progress = new TransferProgress({ label: "Downloading", name: "file.bin", stderr, scheduler, signals });
-  progress.add(50);
-  scheduler.advance(2_500);
+test("signals destroy active upload sources before forwarding", async () => {
+  for (const signal of ["SIGINT", "SIGTERM"] as const) {
+    const stderr = new TtyCapture();
+    const scheduler = new FakeScheduler();
+    const signals = new FakeSignals();
+    const progress = new TransferProgress({ label: "Uploading", name: "file.bin", stderr, scheduler, signals });
+    let destroyCount = 0;
+    const source = new Readable({
+      read() {},
+      destroy(error, callback) {
+        destroyCount += 1;
+        callback(error);
+      },
+    });
+    const tracked = progress.trackReadable(source);
+    const closed = once(tracked, "close");
+    progress.add(50);
+    scheduler.advance(2_500);
 
-  signals.emit("SIGINT");
+    signals.emit(signal);
+    signals.emit(signal);
+    await closed;
 
-  assert.match(stderr.text, /\r\x1b\[2K$/);
-  assert.deepEqual(signals.forwarded, ["SIGINT"]);
-  assert.equal(signals.listeners.size, 0);
+    assert.match(stderr.text, /\r\x1b\[2K$/);
+    assert.deepEqual(signals.forwarded, [signal]);
+    assert.equal(signals.listeners.size, 0);
+    assert.equal(source.destroyed, true);
+    assert.equal(destroyCount, 1);
+  }
 });
 
 test("tracks stream fixtures and handles unknown totals", async () => {
@@ -213,7 +234,87 @@ test("propagates upload source errors through the tracked stream", async () => {
   progress.fail();
 });
 
-test("finishes upload tracking when the source ends before the delay", async () => {
+test("cancellation destroys an active upload source idempotently", async () => {
+  const progress = new TransferProgress({
+    label: "Uploading",
+    name: "cancelled.bin",
+    stderr: new TtyCapture(),
+    scheduler: new FakeScheduler(),
+  });
+  let destroyCount = 0;
+  const source = new Readable({
+    read() {},
+    destroy(error, callback) {
+      destroyCount += 1;
+      callback(error);
+    },
+  });
+  const tracked = progress.trackReadable(source);
+  const closed = once(tracked, "close");
+  const sourceClosed = once(source, "close");
+
+  progress.cancel();
+  progress.cancel();
+  progress.complete();
+  await Promise.all([closed, sourceClosed]);
+
+  assert.equal(source.destroyed, true);
+  assert.equal(source.listenerCount("error"), 0);
+  assert.equal(destroyCount, 1);
+});
+
+test("failure destroys an active upload source idempotently", async () => {
+  const progress = new TransferProgress({
+    label: "Uploading",
+    name: "failed.bin",
+    stderr: new TtyCapture(),
+    scheduler: new FakeScheduler(),
+  });
+  let destroyCount = 0;
+  const source = new Readable({
+    read() {},
+    destroy(error, callback) {
+      destroyCount += 1;
+      callback(error);
+    },
+  });
+  const tracked = progress.trackReadable(source);
+  const closed = once(tracked, "close");
+
+  progress.fail();
+  progress.fail();
+  progress.cancel();
+  await closed;
+
+  assert.equal(source.destroyed, true);
+  assert.equal(destroyCount, 1);
+});
+
+test("destroying tracked upload stream destroys its upstream source exactly once", async () => {
+  const stderr = new TtyCapture();
+  const scheduler = new FakeScheduler();
+  const progress = new TransferProgress({ label: "Uploading", name: "cancelled.bin", stderr, scheduler });
+  let destroyCount = 0;
+  const source = new Readable({
+    read() { this.push(Buffer.alloc(1)); },
+    destroy(error, callback) {
+      destroyCount += 1;
+      callback(error);
+    },
+  });
+  const tracked = progress.trackReadable(source);
+  tracked.resume();
+  const closed = once(tracked, "close");
+
+  tracked.destroy();
+  tracked.destroy();
+  await closed;
+
+  assert.equal(source.destroyed, true);
+  assert.equal(destroyCount, 1);
+});
+
+test("keeps upload tracking active after source EOF until the caller completes it", async () => {
   const stderr = new TtyCapture();
   const scheduler = new FakeScheduler();
   const progress = new TransferProgress({ label: "Uploading", name: "fast.bin", total: 10, stderr, scheduler });
@@ -221,5 +322,8 @@ test("finishes upload tracking when the source ends before the delay", async () 
   for await (const _chunk of progress.trackReadable(Readable.from([Buffer.alloc(10)]))) { /* consume */ }
   scheduler.advance(2_500);
 
-  assert.equal(stderr.text, "");
+  assert.match(stderr.text, /Uploading fast\.bin:/);
+  assert.doesNotMatch(stderr.text, /done\n/);
+  progress.complete();
+  assert.match(stderr.text, /done\n$/);
 });

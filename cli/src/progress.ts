@@ -40,6 +40,7 @@ export class TransferProgress {
   private updates?: object;
   private readonly enabled: boolean;
   private readonly signalHandlers = new Map<NodeJS.Signals, () => void>();
+  private readonly tracked = new Set<Transform>();
   private visible = false;
   private finished = false;
 
@@ -88,22 +89,40 @@ export class TransferProgress {
 
   trackReadable(source: Readable): Readable {
     const tracker = this.track();
-    source.once("error", (error) => tracker.destroy(error));
-    tracker.once("end", () => this.complete());
+    this.tracked.add(tracker);
+    const onSourceError = (error: Error) => tracker.destroy(error);
+    source.once("error", onSourceError);
+    source.once("close", () => source.off("error", onSourceError));
+    tracker.once("close", () => {
+      this.tracked.delete(tracker);
+      if (!source.destroyed && !source.readableEnded) source.destroy(tracker.errored ?? undefined);
+      else source.off("error", onSourceError);
+    });
     tracker.once("error", () => this.fail());
     return source.pipe(tracker);
   }
 
   complete(): void {
+    this.abortTracked();
     if (this.finished) return;
     this.stopTimers();
     if (this.visible) this.render(" done\n");
     this.finished = true;
   }
 
-  fail(): void { this.clear(); }
+  fail(): void {
+    this.abortTracked();
+    this.clear();
+  }
 
-  cancel(): void { this.clear(); }
+  cancel(): void {
+    this.abortTracked();
+    this.clear();
+  }
+
+  private abortTracked(): void {
+    for (const tracker of this.tracked) tracker.destroy();
+  }
 
   private clear(): void {
     if (this.finished) return;
