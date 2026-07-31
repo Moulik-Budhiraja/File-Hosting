@@ -15,6 +15,10 @@ import {
   safeStorageRemove,
   safeStorageSet,
 } from "@/lib/safe-storage";
+import {
+  publishSessionChange,
+  subscribeSessionChange,
+} from "@/lib/session-signal";
 import type { MeResponse, PublicUser, Role } from "@/lib/types";
 
 export type UnauthenticatedReason = "signed-out" | "session-expired";
@@ -26,6 +30,12 @@ export const SESSION_MARKER_KEY = "fs.session-active";
 // Focus/visibility refreshes are best-effort; anything more frequent than
 // this is a request storm, not fresher identity.
 const BACKGROUND_REFRESH_MIN_INTERVAL_MS = 30_000;
+
+// Defensive fallback for cookie changes made outside any coordinated app
+// flow (no storage/broadcast signal to hear): a low-frequency bounded
+// poll while the tab is visible. Real transitions propagate immediately
+// via the session-change signal.
+const SESSION_POLL_INTERVAL_MS = 60_000;
 
 export function markSessionActive(): void {
   safeStorageSet(SESSION_MARKER_KEY, "1");
@@ -64,6 +74,8 @@ export function AuthProvider({
 }: AuthProviderProps) {
   const [me, setMe] = useState<MeResponse | null>(null);
   const [failed, setFailed] = useState(false);
+  const [stale, setStale] = useState(false);
+  const hasIdentityRef = useRef(false);
   const reportedRef = useRef(false);
   const mountedRef = useRef(true);
   const inflightRef = useRef<Promise<void> | null>(null);
@@ -99,11 +111,17 @@ export function AuthProvider({
           report("signed-out");
           return;
         }
+        hasIdentityRef.current = true;
         setMe(result);
+        setStale(false);
       } catch (error) {
         if (!mountedRef.current) return;
         if (isApiError(error) && error.status === 401) {
           report(hadSession() ? "session-expired" : "signed-out");
+        } else if (hasIdentityRef.current) {
+          // A failed BACKGROUND refresh must not tear down a working UI:
+          // keep the last known identity rendered and say it is stale.
+          setStale(true);
         } else {
           setFailed(true);
         }
@@ -125,6 +143,29 @@ export function AuthProvider({
   // Authoritative 403s mean the server disagrees with the rendered role —
   // refresh the identity before any further privileged rendering/fan-out.
   useEffect(() => onForbidden(() => void refresh()), [refresh]);
+
+  // Real cross-tab transitions (login, session replacement, logout)
+  // publish a changing session version through storage + BroadcastChannel.
+  // Refresh immediately — a "recent" identity read is exactly what a
+  // possible account switch invalidates, so no interval guard here.
+  useEffect(() => subscribeSessionChange(() => void refresh()), [refresh]);
+
+  // Low-frequency bounded poll: catches cookie changes that had no
+  // coordinated signal at all. Paused while hidden (the visibilitychange
+  // refresh catches up on return); interval-guarded against storms.
+  useEffect(() => {
+    const timer = setInterval(() => {
+      if (document.visibilityState === "hidden") return;
+      if (
+        Date.now() - lastRefreshRef.current <
+        BACKGROUND_REFRESH_MIN_INTERVAL_MS
+      ) {
+        return;
+      }
+      void refresh();
+    }, SESSION_POLL_INTERVAL_MS);
+    return () => clearInterval(timer);
+  }, [refresh]);
 
   // Identity can drift while this tab is inactive (role changes, another
   // account signing in from a second tab). Refresh on focus/visibility with
@@ -173,6 +214,8 @@ export function AuthProvider({
       // 401 = the session is verifiably dead; treat as signed out.
     }
     clearSessionMarker();
+    // Tell every other tab the session is gone.
+    publishSessionChange();
     report("signed-out");
     return { ok: true };
   }, [report]);
@@ -217,6 +260,19 @@ export function AuthProvider({
         refresh,
       }}
     >
+      {stale ? (
+        <p className="stale-banner" role="status">
+          Session info couldn&apos;t be refreshed — showing the last known
+          state.{" "}
+          <button
+            type="button"
+            className="link-button"
+            onClick={() => void refresh()}
+          >
+            Retry
+          </button>
+        </p>
+      ) : null}
       {children}
     </AuthContext.Provider>
   );

@@ -1,6 +1,13 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import Link from "next/link";
 
@@ -56,6 +63,15 @@ export function UsersDirectory() {
   const [sheetUser, setSheetUser] = useState<PublicUser | null>(null);
   const searchId = useId();
   const usernameId = useId();
+  const usernameErrorId = useId();
+  const usernameRef = useRef<HTMLInputElement>(null);
+
+  // Create errors belong to the username field: announce them, expose the
+  // relationship on the input, and return focus there.
+  function failCreate(message: string) {
+    setCreateError(message);
+    usernameRef.current?.focus();
+  }
 
   const { begin } = useLatest();
 
@@ -117,13 +133,11 @@ export function UsersDirectory() {
       void load();
     } catch (error) {
       if (isApiError(error) && error.code === "username_exists") {
-        setCreateError("That username is already taken.");
+        failCreate("That username is already taken.");
       } else if (isApiError(error)) {
-        setCreateError(`${error.message}.`);
+        failCreate(`${error.message}.`);
       } else {
-        setCreateError(
-          "The server couldn't create the user. Nothing was changed.",
-        );
+        failCreate("The server couldn't create the user. Nothing was changed.");
       }
     } finally {
       setBusy(false);
@@ -522,16 +536,22 @@ export function UsersDirectory() {
             <div className="field">
               <label htmlFor={usernameId}>Username</label>
               <input
+                ref={usernameRef}
                 id={usernameId}
                 type="text"
                 autoCapitalize="none"
                 spellCheck={false}
                 value={createUsername}
-                onChange={(event) => setCreateUsername(event.target.value)}
+                aria-invalid={createError ? true : undefined}
+                aria-describedby={createError ? usernameErrorId : undefined}
+                onChange={(event) => {
+                  setCreateUsername(event.target.value);
+                  setCreateError(null);
+                }}
               />
               <p className="field-hint">a–z 0–9 . - _ · 3–64 chars · unique</p>
               {createError ? (
-                <p className="field-error" role="alert">
+                <p id={usernameErrorId} className="field-error" role="alert">
                   {createError}
                 </p>
               ) : null}

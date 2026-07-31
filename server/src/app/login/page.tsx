@@ -4,6 +4,7 @@ import { useRouter, useSearchParams } from "next/navigation";
 import { Suspense, useEffect, useState } from "react";
 
 import { markSessionActive } from "@/lib/auth-context";
+import { publishSessionChange } from "@/lib/session-signal";
 import { sanitizeNextPath } from "@/lib/next-path";
 import { safeStorageGet, safeStorageSet } from "@/lib/safe-storage";
 import { RolloutTag } from "@/ui/RolloutTag";
@@ -48,6 +49,10 @@ function LoginScreen() {
           onSuccess={(user) => {
             safeStorageSet(LAST_USERNAME_KEY, user.username);
             markSessionActive();
+            // Every successful login (including replacing an existing
+            // session with another account) publishes a CHANGED version so
+            // other tabs refresh immediately.
+            publishSessionChange();
             router.replace(nextPath);
           }}
         />

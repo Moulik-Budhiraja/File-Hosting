@@ -3,6 +3,7 @@ import {
   request as playwrightRequest,
   type APIRequestContext,
   type BrowserContext,
+  type Page,
 } from "@playwright/test";
 
 export const ADMIN = {
@@ -70,6 +71,28 @@ export async function signInContext(
   await api.dispose();
 }
 
+/** Real login through the actual /login form — the flow under test for
+ * cross-tab propagation. Routes a unique synthetic address so the
+ * backend's per-address throttle never couples independent tests. */
+export async function uiLogin(
+  page: Page,
+  username: string,
+  password: string,
+): Promise<void> {
+  const address = nextAddress();
+  await page.route("**/api/auth/login", (route) =>
+    route.continue({
+      headers: { ...route.request().headers(), "x-real-ip": address },
+    }),
+  );
+  await page.goto("/login");
+  await page.getByLabel("Username").fill(username);
+  await page.getByLabel("Password").fill(password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL((url) => !url.pathname.startsWith("/login"));
+  await page.unroute("**/api/auth/login");
+}
+
 export interface SeededUser {
   id: string;
   username: string;
@@ -125,6 +148,47 @@ export async function createApiKeyFor(
   ).api_key.secret;
   await api.dispose();
   return secret;
+}
+
+// Idempotent >100-row aggregate key seed shared by the search/pager and
+// task-restoration specs: 12 owners × 9 keys plus one needle key created
+// last (newest → beyond the first aggregate page of 100).
+let aggregateSeeded = false;
+
+async function existingKeyNames(
+  baseURL: string,
+  userId: string,
+): Promise<Set<string>> {
+  const api = await apiContext(baseURL);
+  const listing = await api.get(`/api/api-keys?user_id=${userId}`, {
+    headers: { authorization: `Bearer ${LEGACY_TOKEN}` },
+  });
+  const names = new Set(
+    (
+      (await listing.json()) as { api_keys: Array<{ name: string }> }
+    ).api_keys.map((key) => key.name),
+  );
+  await api.dispose();
+  return names;
+}
+
+export async function seedAggregateKeys(baseURL: string): Promise<void> {
+  if (aggregateSeeded) return;
+  for (let owner = 0; owner < 12; owner += 1) {
+    const user = await ensureUser(baseURL, `pager-owner-${owner}`, "member");
+    const existing = await existingKeyNames(baseURL, user.id);
+    for (let key = 0; key < 9; key += 1) {
+      const name = `pager-noise-${owner}-${key}`;
+      if (existing.has(name)) continue;
+      await createApiKeyFor(baseURL, user.id, name);
+    }
+  }
+  const needleOwner = await ensureUser(baseURL, "needle-owner", "member");
+  const needleExisting = await existingKeyNames(baseURL, needleOwner.id);
+  if (!needleExisting.has("needle-buried-key")) {
+    await createApiKeyFor(baseURL, needleOwner.id, "needle-buried-key");
+  }
+  aggregateSeeded = true;
 }
 
 export async function uploadFile(

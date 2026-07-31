@@ -22,6 +22,8 @@ export interface PasswordAuthentication {
   passwordHash: string;
 }
 
+export type ApiKeyStatus = "pending" | "active";
+
 export interface ApiKeyMetadata {
   id: string;
   userId: string;
@@ -31,6 +33,25 @@ export interface ApiKeyMetadata {
   createdAt: string;
   lastUsedAt: string | null;
   revokedAt: string | null;
+  status: ApiKeyStatus;
+  pendingExpiresAt: string | null;
+}
+
+// Two-phase browser creation: phase 1 stores a PENDING, non-authenticating
+// key under a caller-supplied idempotency request id and returns the
+// show-once secret; phase 2 activates it only after the client confirms it
+// received that secret. A lost response therefore never leaves an ACTIVE
+// credential nobody can recover — at worst an inert pending row that is
+// truthfully listed, cancellable, and expires.
+export interface BeginApiKeyCreationResult {
+  /** False when this request id was already committed — the secret is
+   * intentionally NOT re-exposed on retries. */
+  created: boolean;
+  id: string;
+  name: string;
+  secret: string | null;
+  status: ApiKeyStatus;
+  pendingExpiresAt: string | null;
 }
 
 export interface OwnedApiKeyMetadata extends ApiKeyMetadata {
@@ -53,6 +74,11 @@ export interface ApiKeyCursor {
 // creation. This is bounded retention, not a durable audit log.
 export const REVOKED_KEY_RETENTION_COUNT = 20;
 export const REVOKED_KEY_RETENTION_DAYS = 90;
+
+// Pending (phase-1) keys are short-lived and bounded per user; expired
+// rows are pruned on the next key creation touch.
+export const PENDING_API_KEY_TTL_MS = 10 * 60 * 1000;
+export const MAX_PENDING_API_KEYS = 5;
 
 export function encodeApiKeyCursor(cursor: ApiKeyCursor): string {
   return Buffer.from(
@@ -116,7 +142,10 @@ CREATE TABLE IF NOT EXISTS api_keys (
   created_at TEXT NOT NULL,
   last_used_at TEXT,
   expires_at TEXT,
-  revoked_at TEXT
+  revoked_at TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('pending', 'active')),
+  request_id TEXT,
+  pending_expires_at TEXT
 );
 CREATE INDEX IF NOT EXISTS api_keys_user_active_idx ON api_keys(user_id, revoked_at);
 
@@ -164,6 +193,23 @@ export class AuthRepository {
     await client.execute("PRAGMA foreign_keys = ON");
     await client.execute("PRAGMA busy_timeout = 5000");
     await client.executeMultiple(AUTH_SCHEMA);
+    // Migrate databases created before the two-phase key columns existed.
+    // Legacy rows read as status='active' via the column default.
+    const columns = await client.execute("PRAGMA table_info(api_keys)");
+    const names = new Set(
+      columns.rows.map((row) => (typeof row.name === "string" ? row.name : "")),
+    );
+    if (!names.has("status")) {
+      await client.executeMultiple(`
+        ALTER TABLE api_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
+        ALTER TABLE api_keys ADD COLUMN request_id TEXT;
+        ALTER TABLE api_keys ADD COLUMN pending_expires_at TEXT;
+      `);
+    }
+    await client.execute(
+      `CREATE UNIQUE INDEX IF NOT EXISTS api_keys_request_idx
+        ON api_keys(request_id) WHERE request_id IS NOT NULL`,
+    );
     return new AuthRepository(client);
   }
 
@@ -557,11 +603,10 @@ export class AuthRepository {
     });
   }
 
-  async createApiKey(
+  private async validateKeyOwnerAndName(
     userId: string,
     nameInput: string,
-    now = new Date(),
-  ): Promise<{ id: string; secret: string }> {
+  ): Promise<string> {
     if (!(await this.getUser(userId))) {
       throw new AppError(404, "user_not_found", "User not found");
     }
@@ -573,10 +618,13 @@ export class AuthRepository {
         "API key name must be 1-100 UTF-8 bytes",
       );
     }
-    const secret = `fsk_${randomBytes(32).toString("base64url")}`;
-    const id = randomUUID();
-    // Prune only revoked records outside the documented retention bounds
-    // (age, then count); recent revoked context stays listed for audit.
+    return name;
+  }
+
+  // Prune only (a) revoked records outside the documented retention
+  // bounds (age, then count) for this owner and (b) expired pending rows
+  // globally; recent revoked context stays listed for audit.
+  private async pruneApiKeys(userId: string, now: Date): Promise<void> {
     const ageCutoff = new Date(
       now.getTime() - REVOKED_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000,
     ).toISOString();
@@ -593,12 +641,34 @@ export class AuthRepository {
         )`,
       args: [userId, ageCutoff, userId, REVOKED_KEY_RETENTION_COUNT],
     });
+    await this.client.execute({
+      sql: `DELETE FROM api_keys
+        WHERE status = 'pending' AND pending_expires_at <= ?`,
+      args: [now.toISOString()],
+    });
+  }
+
+  private newSecret(): { secret: string; id: string } {
+    return {
+      secret: `fsk_${randomBytes(32).toString("base64url")}`,
+      id: randomUUID(),
+    };
+  }
+
+  async createApiKey(
+    userId: string,
+    nameInput: string,
+    now = new Date(),
+  ): Promise<{ id: string; secret: string }> {
+    const name = await this.validateKeyOwnerAndName(userId, nameInput);
+    const { secret, id } = this.newSecret();
+    await this.pruneApiKeys(userId, now);
     const result = await this.client.execute({
       sql: `INSERT INTO api_keys
-        (id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at)
-        SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL
+        (id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at, status, request_id, pending_expires_at)
+        SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'active', NULL, NULL
         WHERE (SELECT COUNT(*) FROM api_keys
-          WHERE user_id = ? AND revoked_at IS NULL) < ?`,
+          WHERE user_id = ? AND revoked_at IS NULL AND status = 'active') < ?`,
       args: [
         id,
         userId,
@@ -621,11 +691,173 @@ export class AuthRepository {
     return { id, secret };
   }
 
+  private async findKeyByRequestId(
+    userId: string,
+    requestId: string,
+  ): Promise<BeginApiKeyCreationResult | null> {
+    const existing = await this.client.execute({
+      sql: `SELECT id, name, status, pending_expires_at FROM api_keys
+        WHERE user_id = ? AND request_id = ?`,
+      args: [userId, requestId],
+    });
+    const row = existing.rows[0];
+    if (!row) return null;
+    return {
+      created: false,
+      id: stringColumn(row, "id"),
+      name: stringColumn(row, "name"),
+      // Idempotent retries NEVER re-expose the plaintext secret.
+      secret: null,
+      status: stringColumn(row, "status") as ApiKeyStatus,
+      pendingExpiresAt:
+        typeof row.pending_expires_at === "string"
+          ? row.pending_expires_at
+          : null,
+    };
+  }
+
+  // Phase 1 of browser key creation: commit a PENDING, non-authenticating
+  // row under the caller's idempotency request id and return the
+  // show-once secret exactly once.
+  async beginApiKeyCreation(
+    userId: string,
+    nameInput: string,
+    requestId: string,
+    now = new Date(),
+  ): Promise<BeginApiKeyCreationResult> {
+    if (!requestId || requestId.length > 128) {
+      throw new AppError(
+        400,
+        "invalid_request_id",
+        "request_id must be 1-128 characters",
+      );
+    }
+    const name = await this.validateKeyOwnerAndName(userId, nameInput);
+    await this.pruneApiKeys(userId, now);
+    const existing = await this.findKeyByRequestId(userId, requestId);
+    if (existing) return existing;
+    const { secret, id } = this.newSecret();
+    const pendingExpiresAt = new Date(
+      now.getTime() + PENDING_API_KEY_TTL_MS,
+    ).toISOString();
+    let result;
+    try {
+      result = await this.client.execute({
+        sql: `INSERT INTO api_keys
+          (id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at, status, request_id, pending_expires_at)
+          SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL, 'pending', ?, ?
+          WHERE (SELECT COUNT(*) FROM api_keys
+            WHERE user_id = ? AND status = 'pending') < ?`,
+        args: [
+          id,
+          userId,
+          name,
+          digest(secret),
+          secret.slice(0, 12),
+          secret.slice(-4),
+          now.toISOString(),
+          requestId,
+          pendingExpiresAt,
+          userId,
+          MAX_PENDING_API_KEYS,
+        ],
+      });
+    } catch (cause) {
+      if (String(cause).toLocaleLowerCase("en-US").includes("unique")) {
+        // A concurrent duplicate begin won the insert; reconcile to its
+        // committed row without minting a second credential.
+        const raced = await this.findKeyByRequestId(userId, requestId);
+        if (raced) return raced;
+        throw new AppError(
+          409,
+          "request_id_conflict",
+          "request_id is already used by another key",
+          { cause },
+        );
+      }
+      throw cause;
+    }
+    if (result.rowsAffected === 0) {
+      throw new AppError(
+        409,
+        "pending_key_limit",
+        `A user can have at most ${MAX_PENDING_API_KEYS} pending API keys`,
+      );
+    }
+    return {
+      created: true,
+      id,
+      name,
+      secret,
+      status: "pending",
+      pendingExpiresAt,
+    };
+  }
+
+  // Phase 2: activate a pending key only after the client confirmed it
+  // received the secret. Idempotent — re-activating an active key
+  // reconciles a lost activation response.
+  async activateApiKey(
+    id: string,
+    actorUserId: string,
+    actorIsAdmin: boolean,
+    now = new Date(),
+  ): Promise<{ id: string; status: ApiKeyStatus }> {
+    const lookup = await this.client.execute({
+      sql: `SELECT id, user_id, status, revoked_at, pending_expires_at
+        FROM api_keys WHERE id = ?${actorIsAdmin ? "" : " AND user_id = ?"}`,
+      args: actorIsAdmin ? [id] : [id, actorUserId],
+    });
+    const row = lookup.rows[0];
+    if (!row) {
+      throw new AppError(404, "api_key_not_found", "API key not found");
+    }
+    if (typeof row.revoked_at === "string") {
+      throw new AppError(
+        409,
+        "api_key_revoked",
+        "This API key has been revoked",
+      );
+    }
+    if (stringColumn(row, "status") === "active") {
+      return { id, status: "active" };
+    }
+    const expiresAt =
+      typeof row.pending_expires_at === "string"
+        ? row.pending_expires_at
+        : null;
+    if (!expiresAt || expiresAt <= now.toISOString()) {
+      throw new AppError(
+        410,
+        "pending_expired",
+        "This pending API key has expired; create a new key",
+      );
+    }
+    const userId = stringColumn(row, "user_id");
+    const result = await this.client.execute({
+      sql: `UPDATE api_keys SET status = 'active', pending_expires_at = NULL
+        WHERE id = ? AND status = 'pending' AND revoked_at IS NULL
+          AND pending_expires_at > ?
+          AND (SELECT COUNT(*) FROM api_keys
+            WHERE user_id = ? AND revoked_at IS NULL AND status = 'active') < ?`,
+      args: [id, now.toISOString(), userId, MAX_ACTIVE_API_KEYS],
+    });
+    if (result.rowsAffected === 0) {
+      throw new AppError(
+        409,
+        "api_key_limit",
+        `A user can have at most ${MAX_ACTIVE_API_KEYS} active API keys`,
+      );
+    }
+    return { id, status: "active" };
+  }
+
   async resolveApiKey(secret: string, now = new Date()): Promise<User | null> {
     const result = await this.client.execute({
       sql: `SELECT k.id AS key_id, u.id, u.username, u.role, u.active, u.created_at, u.updated_at
         FROM api_keys k JOIN users u ON u.id = k.user_id
         WHERE k.key_digest = ? AND k.revoked_at IS NULL
+          AND k.status = 'active'
           AND (k.expires_at IS NULL OR k.expires_at > ?) AND u.active = 1`,
       args: [digest(secret), now.toISOString()],
     });
@@ -640,7 +872,7 @@ export class AuthRepository {
 
   async listApiKeys(userId?: string): Promise<ApiKeyMetadata[]> {
     const result = await this.client.execute({
-      sql: `SELECT id, user_id, name, key_prefix, last_four, created_at, last_used_at, revoked_at
+      sql: `SELECT id, user_id, name, key_prefix, last_four, created_at, last_used_at, revoked_at, status, pending_expires_at
         FROM api_keys ${userId ? "WHERE user_id = ?" : ""} ORDER BY created_at, id`,
       args: userId ? [userId] : [],
     });
@@ -654,31 +886,53 @@ export class AuthRepository {
       lastUsedAt:
         typeof row.last_used_at === "string" ? row.last_used_at : null,
       revokedAt: typeof row.revoked_at === "string" ? row.revoked_at : null,
+      status: stringColumn(row, "status") as ApiKeyStatus,
+      pendingExpiresAt:
+        typeof row.pending_expires_at === "string"
+          ? row.pending_expires_at
+          : null,
     }));
   }
 
   // Single-query aggregate for the admin key view: every user's keys with
   // owner identity, keyset-paginated in SQL. Replaces the O(users) client
-  // fan-out and cannot be poisoned by one owner's failure.
+  // fan-out and cannot be poisoned by one owner's failure. The optional
+  // search is applied in SQL before pagination, so an empty result is a
+  // truthful global claim, never a page-local one.
   async listAllApiKeys(options: {
     limit: number;
     cursor?: ApiKeyCursor;
+    q?: string;
   }): Promise<ApiKeyPage> {
     const limit = Math.min(Math.max(options.limit, 1), 200);
-    const where = options.cursor
-      ? "WHERE (k.created_at > ? OR (k.created_at = ? AND k.id > ?))"
-      : "";
-    const args: (string | number)[] = options.cursor
-      ? [
-          options.cursor.createdAt,
-          options.cursor.createdAt,
-          options.cursor.id,
-          limit + 1,
-        ]
-      : [limit + 1];
+    const clauses: string[] = [];
+    const args: (string | number)[] = [];
+    const query = options.q?.trim();
+    if (query) {
+      // Parameterized case-insensitive contains-match on key name and
+      // owner username; LIKE wildcards in the query are escaped so they
+      // match literally.
+      const escaped = query.replace(/([\\%_])/gu, "\\$1");
+      const pattern = `%${escaped}%`;
+      clauses.push(
+        "(k.name LIKE ? ESCAPE '\\' OR u.username LIKE ? ESCAPE '\\')",
+      );
+      args.push(pattern, pattern);
+    }
+    if (options.cursor) {
+      clauses.push("(k.created_at > ? OR (k.created_at = ? AND k.id > ?))");
+      args.push(
+        options.cursor.createdAt,
+        options.cursor.createdAt,
+        options.cursor.id,
+      );
+    }
+    const where = clauses.length ? `WHERE ${clauses.join(" AND ")}` : "";
+    args.push(limit + 1);
     const result = await this.client.execute({
       sql: `SELECT k.id, k.user_id, k.name, k.key_prefix, k.last_four,
-          k.created_at, k.last_used_at, k.revoked_at,
+          k.created_at, k.last_used_at, k.revoked_at, k.status,
+          k.pending_expires_at,
           u.username AS owner_username
         FROM api_keys k JOIN users u ON u.id = k.user_id
         ${where}
@@ -698,6 +952,11 @@ export class AuthRepository {
       lastUsedAt:
         typeof row.last_used_at === "string" ? row.last_used_at : null,
       revokedAt: typeof row.revoked_at === "string" ? row.revoked_at : null,
+      status: stringColumn(row, "status") as ApiKeyStatus,
+      pendingExpiresAt:
+        typeof row.pending_expires_at === "string"
+          ? row.pending_expires_at
+          : null,
       ownerUsername: stringColumn(row, "owner_username"),
     }));
     const last = apiKeys.at(-1);
@@ -716,6 +975,14 @@ export class AuthRepository {
     actorIsAdmin: boolean,
     now = new Date(),
   ): Promise<void> {
+    // Cancelling a pending (never-active) key removes the row entirely —
+    // there is no credential history worth auditing.
+    const cancelled = await this.client.execute({
+      sql: `DELETE FROM api_keys
+        WHERE id = ? AND status = 'pending' ${actorIsAdmin ? "" : "AND user_id = ?"}`,
+      args: actorIsAdmin ? [id] : [id, actorUserId],
+    });
+    if (cancelled.rowsAffected > 0) return;
     const result = await this.client.execute({
       sql: `UPDATE api_keys SET revoked_at = ?
         WHERE id = ? AND revoked_at IS NULL ${actorIsAdmin ? "" : "AND user_id = ?"}`,

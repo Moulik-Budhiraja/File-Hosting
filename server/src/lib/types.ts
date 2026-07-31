@@ -18,6 +18,10 @@ export interface ApiKeyMetadata {
   created_at: string;
   last_used_at: string | null;
   revoked_at: string | null;
+  /** "pending" keys were created by phase 1 of the browser flow and never
+   * authenticate; absent (legacy serializations) means active. */
+  status?: "pending" | "active";
+  pending_expires_at?: string | null;
 }
 
 export type Visibility = "public" | "protected" | "private";

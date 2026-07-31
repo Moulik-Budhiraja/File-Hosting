@@ -699,12 +699,35 @@ main.landing code {
   display: flex;
   justify-content: space-between;
   align-items: center;
+  /* Long copy (the retention sentence) wraps to its own line instead of
+   * squeezing the pager into a one-character-wide column. */
+  flex-wrap: wrap;
   gap: var(--space-2);
 }
 
 .pager {
   display: inline-flex;
   gap: var(--space-2);
+  /* Never cede width to wrapping copy in the same footline. */
+  flex-shrink: 0;
+}
+
+.pager .button {
+  /* Control labels are exempt from the anywhere-wrapping applied to
+   * user-controlled footline text: "← prev" must stay one line. */
+  white-space: nowrap;
+  overflow-wrap: normal;
+}
+
+/* Non-blocking notice: a background identity refresh failed; the last
+ * known state stays rendered instead of a full-page fallback. */
+.stale-banner {
+  margin: 0;
+  padding: var(--space-2) var(--space-4);
+  font-family: var(--font-mono);
+  font-size: var(--text-xs);
+  color: var(--color-warning, #b58900);
+  border-bottom: 1px solid var(--color-hairline);
 }
 
 .table-fallback {
@@ -1197,6 +1220,12 @@ main.landing code {
     display: inline-flex;
     align-items: center;
     justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Issue #6: enabled pager controls are real touch targets on mobile. */
+  .pager .button {
     min-width: 44px;
     min-height: 44px;
   }

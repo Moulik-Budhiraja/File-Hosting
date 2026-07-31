@@ -208,6 +208,39 @@ test("a taken username surfaces the server conflict inline", async () => {
   ).toBeTruthy();
 });
 
+test("username errors are programmatically associated with the field and refocus it", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        post: () =>
+          json(409, {
+            error: {
+              code: "username_exists",
+              message: "Username already exists",
+            },
+          }),
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  await userEvent.click(screen.getByRole("button", { name: "New user" }));
+  const input = screen.getByLabelText("Username") as HTMLInputElement;
+  await userEvent.type(input, "sam-ops");
+  await userEvent.click(screen.getByRole("button", { name: "Create user" }));
+  const error = await screen.findByText("That username is already taken.");
+  // Screen readers must find the error from the field itself, and focus
+  // must return to the field owning the conflict.
+  expect(error.id).toBeTruthy();
+  await waitFor(() => expect(input.getAttribute("aria-invalid")).toBe("true"));
+  expect(input.getAttribute("aria-describedby")).toContain(error.id);
+  await waitFor(() => expect(document.activeElement).toBe(input));
+  // Editing the username clears the invalid state.
+  await userEvent.type(input, "-2");
+  expect(input.getAttribute("aria-invalid")).toBeNull();
+});
+
 test("disabling a user states the consequences and patches active=false", async () => {
   const record: Recorded[] = [];
   vi.stubGlobal("fetch", vi.fn(routes({ record })));

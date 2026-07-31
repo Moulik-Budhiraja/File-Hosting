@@ -1,9 +1,22 @@
 "use client";
 
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import { apiFetch, isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import {
+  boundPrevCursors,
+  decodePrevCursors,
+  encodePrevCursors,
+  readTaskParam,
+} from "@/lib/task-url";
 import { useLatest } from "@/lib/use-latest";
 import { formatDate, formatDateTime } from "@/lib/format";
 import type { ApiKeyMetadata } from "@/lib/types";
@@ -25,12 +38,26 @@ type ListState =
   | { kind: "ready"; keys: KeyRow[]; nextCursor: string | null };
 
 interface SecretState {
+  keyId: string;
   name: string;
   secret: string;
   acked: boolean;
   copied: boolean;
   copyFailed: boolean;
   closeWarned: boolean;
+  /** Phase-2 progress: the key is only a live credential once "active". */
+  activation: "activating" | "active" | "failed";
+}
+
+interface CreatedKeyResponse {
+  api_key: {
+    id: string;
+    name?: string;
+    secret: string | null;
+    status?: "pending" | "active";
+    pending_expires_at?: string | null;
+    created?: boolean;
+  };
 }
 
 export function maskKey(prefix: string, lastFour: string): string {
@@ -40,8 +67,20 @@ export function maskKey(prefix: string, lastFour: string): string {
 export function ApiKeysView() {
   const { user, isAdmin } = useAuth();
   const [state, setState] = useState<ListState>({ kind: "loading" });
-  const [search, setSearch] = useState("");
-  const [scope, setScope] = useState<"all" | "mine">(isAdmin ? "all" : "mine");
+  // Search/cursor task state lives in the URL (never secrets) so session
+  // expiry + reauth restores the exact page and query.
+  const [search, setSearch] = useState(() => readTaskParam("q") ?? "");
+  // Debounced server query for the aggregate view. The member/mine list
+  // is unpaginated, so its client-side filter is complete; the aggregate
+  // is paginated, so search must happen in SQL before pagination.
+  const [query, setQuery] = useState(() => readTaskParam("q")?.trim() ?? "");
+  // Sanitized: only the two known values, and only for admins (members
+  // are always scoped to their own keys).
+  const [scope, setScope] = useState<"all" | "mine">(() => {
+    const fromUrl = readTaskParam("scope");
+    if (isAdmin && (fromUrl === "all" || fromUrl === "mine")) return fromUrl;
+    return isAdmin ? "all" : "mine";
+  });
   const [createOpen, setCreateOpen] = useState(false);
   const [createName, setCreateName] = useState("");
   const [createError, setCreateError] = useState<string | null>(null);
@@ -50,9 +89,34 @@ export function ApiKeysView() {
   const [revokeTarget, setRevokeTarget] = useState<KeyRow | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState(false);
-  const [cursor, setCursor] = useState<string | null>(null);
-  const [prevCursors, setPrevCursors] = useState<Array<string | null>>([]);
+  // Reauth reconcile for a pending key whose show-once dialog was
+  // interrupted: only safe metadata survives — never the secret.
+  const [reconcileTarget, setReconcileTarget] = useState<KeyRow | null>(null);
+  const [reconcileError, setReconcileError] = useState<string | null>(null);
+  const [reconciling, setReconciling] = useState(false);
+  // Selection/pending ids restored from the URL exactly once, after the
+  // first list load (stale ids simply find no row and degrade).
+  const restoreSelRef = useRef(readTaskParam("sel"));
+  const restorePendRef = useRef(readTaskParam("pend"));
+  // Flipped once restoration has been attempted so the URL reflect effect
+  // re-runs and drops stale ids that matched no row.
+  const [, setRestoreDone] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(() =>
+    readTaskParam("cursor"),
+  );
+  const [prevCursors, setPrevCursors] = useState<Array<string | null>>(() =>
+    decodePrevCursors(readTaskParam("prev")),
+  );
   const nameId = useId();
+  const nameErrorId = useId();
+  const nameRef = useRef<HTMLInputElement>(null);
+
+  // Validation/server errors belong to the name field: announce them,
+  // expose the relationship on the input, and return focus there.
+  function failCreate(message: string) {
+    setCreateError(message);
+    nameRef.current?.focus();
+  }
 
   const { begin } = useLatest();
 
@@ -66,6 +130,7 @@ export function ApiKeysView() {
         const params = new URLSearchParams();
         params.set("scope", "all");
         params.set("limit", String(AGGREGATE_PAGE_LIMIT));
+        if (query) params.set("q", query);
         if (cursor) params.set("cursor", cursor);
         const page = await apiFetch<{
           api_keys: AggregateKey[];
@@ -94,61 +159,197 @@ export function ApiKeysView() {
       }
     } catch (error) {
       if (!ticket.current()) return;
+      if (isApiError(error) && error.code === "invalid_cursor" && cursor) {
+        // A restored cursor can be stale or foreign. Degrade to the first
+        // page of the same task instead of an error screen or a loop.
+        setCursor(null);
+        setPrevCursors([]);
+        return;
+      }
       setState({
         kind: "error",
         status: isApiError(error) ? error.status : 0,
       });
     }
-  }, [begin, isAdmin, scope, cursor, user.username]);
+  }, [begin, isAdmin, scope, cursor, query, user.username]);
 
   useEffect(() => {
     void load();
   }, [load]);
 
+  // Restore selection / pending-reconcile state once the list is loaded.
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    const pendId = restorePendRef.current;
+    const selId = restoreSelRef.current;
+    if (!pendId && !selId) return;
+    restorePendRef.current = null;
+    restoreSelRef.current = null;
+    setRestoreDone(true);
+    if (pendId) {
+      const key = state.keys.find(
+        (row) =>
+          row.id === pendId && row.status === "pending" && !row.revoked_at,
+      );
+      if (key) {
+        setReconcileTarget(key);
+        return;
+      }
+    }
+    if (selId) {
+      const key = state.keys.find((row) => row.id === selId && !row.revoked_at);
+      if (key) setRevokeTarget(key);
+    }
+  }, [state]);
+
+  // Reflect restorable task state into the URL (replace, not push).
+  // Only opaque non-secret values: query text, cursors, scope, key ids.
+  const pendId =
+    (secret && secret.activation !== "active" ? secret.keyId : null) ??
+    reconcileTarget?.id ??
+    restorePendRef.current;
+  const selId = revokeTarget?.id ?? restoreSelRef.current;
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const setOrDelete = (name: string, value: string | null) => {
+      if (value) params.set(name, value);
+      else params.delete(name);
+    };
+    setOrDelete("q", query || null);
+    setOrDelete("cursor", cursor);
+    setOrDelete("prev", encodePrevCursors(prevCursors));
+    setOrDelete("scope", isAdmin && scope === "mine" ? "mine" : null);
+    setOrDelete("sel", selId);
+    setOrDelete("pend", pendId);
+    const encoded = params.toString();
+    const target = `${window.location.pathname}${encoded ? `?${encoded}` : ""}`;
+    if (target !== `${window.location.pathname}${window.location.search}`) {
+      window.history.replaceState(null, "", target);
+    }
+  }, [query, cursor, prevCursors, isAdmin, scope, selId, pendId]);
+
+  // Debounce typed search into the server query and restart pagination
+  // from the first page of the new result set.
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      const next = search.trim();
+      setQuery((current) => {
+        if (current === next) return current;
+        setCursor(null);
+        setPrevCursors([]);
+        return next;
+      });
+    }, 300);
+    return () => clearTimeout(timer);
+  }, [search]);
+
+  const aggregate = isAdmin && scope === "all";
   const visible = useMemo(() => {
     if (state.kind !== "ready") return [];
-    const query = search.trim().toLocaleLowerCase("en-US");
+    // Aggregate rows are already searched server-side; filtering them
+    // again per page would reintroduce false empties.
+    if (aggregate) return state.keys;
+    const needle = search.trim().toLocaleLowerCase("en-US");
     return state.keys.filter(
-      (key) => !query || key.name.toLocaleLowerCase("en-US").includes(query),
+      (key) => !needle || key.name.toLocaleLowerCase("en-US").includes(needle),
     );
-  }, [state, search]);
+  }, [state, search, aggregate]);
 
   const activeCount =
     state.kind === "ready"
-      ? state.keys.filter((key) => !key.revoked_at).length
+      ? state.keys.filter((key) => !key.revoked_at && key.status !== "pending")
+          .length
       : 0;
+  const pendingCount =
+    state.kind === "ready"
+      ? state.keys.filter((key) => !key.revoked_at && key.status === "pending")
+          .length
+      : 0;
+
+  // Phase 2: activate only after this client has the secret in hand.
+  // Idempotent server-side, so a lost activation response is retried
+  // safely from the dialog.
+  async function activateKey(keyId: string) {
+    const mark = (activation: SecretState["activation"]) => {
+      setSecret((current) =>
+        current?.keyId === keyId ? { ...current, activation } : current,
+      );
+    };
+    mark("activating");
+    try {
+      await apiFetch(`/api/api-keys/${encodeURIComponent(keyId)}/activate`, {
+        method: "POST",
+      });
+      mark("active");
+      void load();
+    } catch {
+      mark("failed");
+    }
+  }
 
   async function submitCreate(event: React.FormEvent) {
     event.preventDefault();
     if (creating) return;
     const name = createName.trim();
     if (!name) {
-      setCreateError("Name the machine or job this key is for.");
+      failCreate("Name the machine or job this key is for.");
       return;
     }
     setCreating(true);
     setCreateError(null);
+    // Idempotency id: a lost response can be reconciled without ever
+    // re-exposing the plaintext secret.
+    const requestId = crypto.randomUUID();
+    const create = () =>
+      apiFetch<CreatedKeyResponse>("/api/api-keys", {
+        method: "POST",
+        body: { name, request_id: requestId },
+      });
     try {
-      const created = await apiFetch<{
-        api_key: { id: string; secret: string };
-      }>("/api/api-keys", { method: "POST", body: { name } });
+      let created: CreatedKeyResponse;
+      try {
+        created = await create();
+      } catch (error) {
+        if (isApiError(error)) {
+          failCreate(`${error.message}.`);
+          return;
+        }
+        // The response was lost — the server may or may not have
+        // committed. Probe with the SAME request id for a truthful answer.
+        try {
+          created = await create();
+        } catch {
+          failCreate(
+            "The request may not have reached the server. Reload to check — a half-created key appears in the list as pending, is never usable for authentication, and expires automatically.",
+          );
+          return;
+        }
+      }
+      if (!created.api_key.secret) {
+        // The server committed on the lost first attempt; the secret is
+        // gone in transit but the key was NEVER activated.
+        failCreate(
+          "The key was created but its secret was lost in transit. It stays pending — never usable for authentication — and expires automatically. Cancel it in the list and create a new key.",
+        );
+        void load();
+        return;
+      }
       setCreateOpen(false);
       setCreateName("");
+      const keyId = created.api_key.id;
+      const pending = created.api_key.status === "pending";
       setSecret({
+        keyId,
         name,
         secret: created.api_key.secret,
         acked: false,
         copied: false,
         copyFailed: false,
         closeWarned: false,
+        activation: pending ? "activating" : "active",
       });
       void load();
-    } catch (error) {
-      setCreateError(
-        isApiError(error)
-          ? `${error.message}.`
-          : "The server couldn't create the key. Nothing was changed.",
-      );
+      if (pending) void activateKey(keyId);
     } finally {
       setCreating(false);
     }
@@ -194,14 +395,71 @@ export function ApiKeysView() {
     }
   }
 
+  // Reconcile an interrupted pending key after reauth. The secret is not
+  // recoverable; the user either confirms they stored it (activate) or
+  // cancels the never-active row.
+  async function reconcileActivate() {
+    if (!reconcileTarget || reconciling) return;
+    setReconciling(true);
+    setReconcileError(null);
+    try {
+      await apiFetch(
+        `/api/api-keys/${encodeURIComponent(reconcileTarget.id)}/activate`,
+        { method: "POST" },
+      );
+      setReconcileTarget(null);
+      void load();
+    } catch (error) {
+      setReconcileError(
+        isApiError(error) && error.code === "pending_expired"
+          ? "This pending key has expired — cancel it and create a new one."
+          : "Activation didn't complete. The key stays pending and never authenticates; try again or cancel it.",
+      );
+    } finally {
+      setReconciling(false);
+    }
+  }
+
+  async function reconcileCancel() {
+    if (!reconcileTarget || reconciling) return;
+    setReconciling(true);
+    setReconcileError(null);
+    try {
+      await apiFetch(
+        `/api/api-keys/${encodeURIComponent(reconcileTarget.id)}`,
+        {
+          method: "DELETE",
+        },
+      );
+      setReconcileTarget(null);
+      void load();
+    } catch (error) {
+      if (isApiError(error) && error.status === 404) {
+        // Already gone (expired and pruned) — that is the desired end state.
+        setReconcileTarget(null);
+        void load();
+        return;
+      }
+      setReconcileError(
+        "The server couldn't cancel the key. It stays pending and never authenticates.",
+      );
+    } finally {
+      setReconciling(false);
+    }
+  }
+
   return (
     <section aria-label="API keys">
       <div className="toolbar">
         <input
           type="search"
           className="toolbar-search"
-          placeholder="search key name"
-          aria-label="Search key name"
+          placeholder={
+            aggregate ? "search key name or owner" : "search key name"
+          }
+          aria-label={
+            aggregate ? "Search key name or owner" : "Search key name"
+          }
           value={search}
           onChange={(event) => setSearch(event.target.value)}
         />
@@ -269,7 +527,17 @@ export function ApiKeysView() {
         </div>
       ) : null}
 
-      {state.kind === "ready" && state.keys.length === 0 ? (
+      {state.kind === "ready" &&
+      state.keys.length === 0 &&
+      (aggregate ? query : search.trim()) ? (
+        <div className="table-fallback">
+          <p className="muted">no keys match the current filters</p>
+        </div>
+      ) : null}
+
+      {state.kind === "ready" &&
+      state.keys.length === 0 &&
+      !(aggregate ? query : search.trim()) ? (
         <div className="table-fallback">
           <p className="empty-title">No API keys yet</p>
           <p className="muted">
@@ -324,7 +592,11 @@ export function ApiKeysView() {
                     {key.name}
                     <span className="row-sub" aria-hidden="true">
                       {maskKey(key.prefix, key.last_four)} ·{" "}
-                      {key.revoked_at ? "revoked" : "active"}
+                      {key.revoked_at
+                        ? "revoked"
+                        : key.status === "pending"
+                          ? "pending"
+                          : "active"}
                     </span>
                   </td>
                   {isAdmin ? (
@@ -342,7 +614,11 @@ export function ApiKeysView() {
                   <td className="cell-mono col-desktop">
                     {key.revoked_at
                       ? `revoked · ${formatDate(key.revoked_at)}`
-                      : "active"}
+                      : key.status === "pending"
+                        ? `pending · never authenticates · expires ${formatDateTime(
+                            key.pending_expires_at ?? null,
+                          )}`
+                        : "active"}
                   </td>
                   <td className="col-actions">
                     {key.revoked_at ? (
@@ -356,7 +632,7 @@ export function ApiKeysView() {
                           setRevokeTarget(key);
                         }}
                       >
-                        Revoke
+                        {key.status === "pending" ? "Cancel" : "Revoke"}
                         <span className="visually-hidden"> {key.name}</span>
                       </button>
                     )}
@@ -375,8 +651,10 @@ export function ApiKeysView() {
           <div className="table-footline table-footline-split">
             <span>
               {state.keys.length} {state.keys.length === 1 ? "key" : "keys"} ·{" "}
-              {activeCount} active · recent revoked keys stay listed — records
-              older than 90 days or beyond the last 20 may be pruned
+              {activeCount} active
+              {pendingCount > 0 ? ` · ${pendingCount} pending` : ""} · recent
+              revoked keys stay listed — records older than 90 days or beyond
+              the last 20 may be pruned
             </span>
             {isAdmin && scope === "all" ? (
               <span className="pager">
@@ -398,7 +676,7 @@ export function ApiKeysView() {
                   className="button button-small"
                   disabled={state.nextCursor === null}
                   onClick={() => {
-                    setPrevCursors([...prevCursors, cursor]);
+                    setPrevCursors(boundPrevCursors([...prevCursors, cursor]));
                     setCursor(state.nextCursor);
                   }}
                 >
@@ -430,17 +708,23 @@ export function ApiKeysView() {
             <div className="field">
               <label htmlFor={nameId}>Name — where will this key live?</label>
               <input
+                ref={nameRef}
                 id={nameId}
                 type="text"
                 value={createName}
-                onChange={(event) => setCreateName(event.target.value)}
+                aria-invalid={createError ? true : undefined}
+                aria-describedby={createError ? nameErrorId : undefined}
+                onChange={(event) => {
+                  setCreateName(event.target.value);
+                  setCreateError(null);
+                }}
               />
               <p className="field-hint">
                 e.g. laptop-mbp · ci-runner · ingest-pipeline — one key per
                 machine or job
               </p>
               {createError ? (
-                <p className="field-error" role="alert">
+                <p id={nameErrorId} className="field-error" role="alert">
                   {createError}
                 </p>
               ) : null}
@@ -501,6 +785,27 @@ export function ApiKeysView() {
             USE IT · $ fs auth set — paste when prompted, stored in the OS
             keychain
           </p>
+          {secret.activation === "activating" ? (
+            <p className="muted" role="status">
+              activating key…
+            </p>
+          ) : secret.activation === "active" ? (
+            <p className="muted" role="status">
+              key active — ready to use
+            </p>
+          ) : (
+            <p className="field-error" role="alert">
+              This key is NOT active yet — the activation didn&apos;t complete.
+              It cannot authenticate until activated.{" "}
+              <button
+                type="button"
+                className="link-button"
+                onClick={() => void activateKey(secret.keyId)}
+              >
+                Retry activation
+              </button>
+            </p>
+          )}
           <label className="check-row">
             <input
               type="checkbox"
@@ -534,17 +839,78 @@ export function ApiKeysView() {
         </Dialog>
       ) : null}
 
+      {reconcileTarget ? (
+        <Dialog
+          title={`Pending key ${reconcileTarget.name}`}
+          busy={reconciling}
+          onClose={() => setReconcileTarget(null)}
+        >
+          <p>
+            This key was created but never activated. Its secret was shown only
+            once and cannot be shown again.
+          </p>
+          <p className="muted">
+            If you stored the secret, activate the key now. If not, cancel it
+            and create a new one — a pending key never authenticates and expires{" "}
+            {formatDateTime(reconcileTarget.pending_expires_at ?? null)}.
+          </p>
+          {reconcileError ? (
+            <p className="field-error" role="alert">
+              {reconcileError}
+            </p>
+          ) : null}
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="button"
+              disabled={reconciling}
+              onClick={() => setReconcileTarget(null)}
+            >
+              Close
+            </button>
+            <button
+              type="button"
+              className="button button-danger"
+              disabled={reconciling}
+              onClick={() => void reconcileCancel()}
+            >
+              {reconciling ? "Working…" : "Cancel key"}
+            </button>
+            <button
+              type="button"
+              className="button button-primary"
+              disabled={reconciling}
+              onClick={() => void reconcileActivate()}
+            >
+              Activate — I stored it
+            </button>
+          </div>
+        </Dialog>
+      ) : null}
+
       {revokeTarget ? (
         <Dialog
-          title={`Revoke ${revokeTarget.name}?`}
+          title={
+            revokeTarget.status === "pending"
+              ? `Cancel pending key ${revokeTarget.name}?`
+              : `Revoke ${revokeTarget.name}?`
+          }
           tone="danger"
           busy={revoking}
           onClose={() => setRevokeTarget(null)}
         >
-          <p>
-            CLI calls using this key start failing immediately (exit 3). This
-            cannot be undone — create a new key to restore access.
-          </p>
+          {revokeTarget.status === "pending" ? (
+            <p>
+              This key was never activated and cannot authenticate. Cancelling
+              removes the pending record; nothing that works today stops
+              working.
+            </p>
+          ) : (
+            <p>
+              CLI calls using this key start failing immediately (exit 3). This
+              cannot be undone — create a new key to restore access.
+            </p>
+          )}
           <p className="muted cell-mono">
             {maskKey(revokeTarget.prefix, revokeTarget.last_four)}
             {isAdmin && revokeTarget.ownerName
@@ -572,7 +938,13 @@ export function ApiKeysView() {
               disabled={revoking}
               onClick={() => void confirmRevoke()}
             >
-              {revoking ? "Revoking…" : "Revoke key"}
+              {revokeTarget.status === "pending"
+                ? revoking
+                  ? "Cancelling…"
+                  : "Cancel key"
+                : revoking
+                  ? "Revoking…"
+                  : "Revoke key"}
             </button>
           </div>
         </Dialog>

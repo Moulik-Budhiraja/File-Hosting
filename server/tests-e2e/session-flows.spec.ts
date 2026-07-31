@@ -6,6 +6,7 @@ import {
   ensureUser,
   nextAddress,
   signInContext,
+  uiLogin,
   uploadFile,
 } from "./helpers";
 
@@ -74,48 +75,107 @@ test("a 401 during a streamed upload routes through session reauth without beare
   await expect(page.getByText(/bearer token/i)).toHaveCount(0);
 });
 
-test("cross-tab identity replacement removes admin-only rendering", async ({
+test("a real different-account login in tab B replaces tab A's identity without focus or injection", async ({
   context,
   page,
   baseURL,
 }) => {
-  const driftAdmin = await ensureUser(baseURL!, "drift-admin", "admin");
-  await signInContext(
-    context,
-    baseURL!,
-    driftAdmin.username,
-    driftAdmin.password,
-  );
+  const tabAdmin = await ensureUser(baseURL!, "twotab-admin", "admin");
+  const tabMember = await ensureUser(baseURL!, "twotab-member", "member");
+
+  // Tab A: a real login through the real form, then the admin console.
+  await uiLogin(page, tabAdmin.username, tabAdmin.password);
   await page.goto("/files");
   await expect(page.getByRole("link", { name: "Users" })).toBeVisible();
 
-  // Demote out of band (another tab / another admin).
+  // Track whether tab A keeps issuing admin fetches after the switch.
+  const adminRequests: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/users") {
+      adminRequests.push(request.url());
+    }
+  });
+
+  // Tab B: the same browser performs a REAL login as a different account.
+  // No storage events are dispatched manually and tab A is never focused.
+  const tabB = await context.newPage();
+  await uiLogin(tabB, tabMember.username, tabMember.password);
+
+  // Tab A must drop the admin shell on the published session change alone.
+  await expect(page.getByRole("link", { name: "Users" })).toHaveCount(0, {
+    timeout: 10_000,
+  });
+  await expect(page.getByText("twotab-member · member")).toBeVisible();
+
+  // And no further admin fetches fire from tab A.
+  const requestsAtFlip = adminRequests.length;
+  await page.waitForTimeout(1000);
+  expect(adminRequests.length).toBe(requestsAtFlip);
+  await tabB.close();
+});
+
+test("a real admin→member demotion reaches an unfocused tab via bounded polling", async ({
+  page,
+  baseURL,
+}) => {
+  const demoted = await ensureUser(baseURL!, "poll-demoted-admin", "admin");
+  // Install a controllable clock BEFORE the app loads so the low-frequency
+  // poll can be advanced without focus, storage, or broadcast events.
+  await page.clock.install();
+  await uiLogin(page, demoted.username, demoted.password);
+  await page.goto("/files");
+  await expect(page.getByRole("link", { name: "Users" })).toBeVisible();
+
+  // Demote out of band — no coordinated app flow publishes any signal.
   const api = await (await import("./helpers")).apiContext(baseURL!);
-  const demote = await api.patch(`/api/users/${driftAdmin.id}`, {
+  const demote = await api.patch(`/api/users/${demoted.id}`, {
     data: { role: "member" },
-    headers: {
-      authorization: `Bearer ${"e2e-synthetic-service-token"}`,
-    },
+    headers: { authorization: `Bearer ${"e2e-synthetic-service-token"}` },
   });
   expect(demote.status()).toBe(200);
   await api.dispose();
 
-  // A cross-tab session-marker write triggers an identity refresh.
-  await page.evaluate(() => {
-    window.dispatchEvent(
-      new StorageEvent("storage", { key: "fs.session-active", newValue: "1" }),
-    );
+  // One poll interval later the stale admin shell is gone.
+  await page.clock.fastForward(65_000);
+  await expect(page.getByRole("link", { name: "Users" })).toHaveCount(0, {
+    timeout: 10_000,
   });
-  await expect(page.getByRole("link", { name: "Users" })).toHaveCount(0);
-  await expect(page.getByText("drift-admin · member")).toBeVisible();
+  await expect(page.getByText("poll-demoted-admin · member")).toBeVisible();
 
-  // Restore the fixture for other tests.
+  // Restore the fixture for reruns.
   const restore = await (await import("./helpers")).apiContext(baseURL!);
-  await restore.patch(`/api/users/${driftAdmin.id}`, {
+  await restore.patch(`/api/users/${demoted.id}`, {
     data: { role: "admin" },
     headers: { authorization: `Bearer ${"e2e-synthetic-service-token"}` },
   });
   await restore.dispose();
+});
+
+test("a failed background identity refresh keeps the UI with a stale notice instead of a fallback", async ({
+  page,
+  baseURL,
+}) => {
+  const staleMember = await ensureUser(baseURL!, "stale-member", "member");
+  await page.clock.install();
+  await uiLogin(page, staleMember.username, staleMember.password);
+  await page.goto("/files");
+  await expect(page.getByText("stale-member · member")).toBeVisible();
+
+  // Break only the identity endpoint, then force a background poll.
+  await page.route("**/api/auth/me", (route) => route.abort());
+  await page.clock.fastForward(65_000);
+
+  await expect(page.getByText(/couldn't be refreshed/i)).toBeVisible({
+    timeout: 10_000,
+  });
+  // The working UI is retained — no full-page fallback.
+  await expect(page.getByText("stale-member · member")).toBeVisible();
+  await expect(page.getByText(/couldn't load your session/i)).toHaveCount(0);
+
+  // Retry restores a clean state.
+  await page.unroute("**/api/auth/me");
+  await page.getByRole("button", { name: "Retry" }).click();
+  await expect(page.getByText(/couldn't be refreshed/i)).toHaveCount(0);
 });
 
 test("a stale slow list response never overwrites a newer filter", async ({
@@ -239,7 +299,7 @@ test("password change routes to the truthful changed state and the new password 
   ).toBeVisible();
 });
 
-test("restricted storage still renders the expired login form", async ({
+test("restricted storage and a missing BroadcastChannel degrade without breaking login", async ({
   browser,
   baseURL,
 }) => {
@@ -251,6 +311,8 @@ test("restricted storage still renders the expired login form", async ({
     Storage.prototype.getItem = deny;
     Storage.prototype.setItem = deny;
     Storage.prototype.removeItem = deny;
+    // Some environments ship no BroadcastChannel at all.
+    (window as unknown as Record<string, unknown>).BroadcastChannel = undefined;
   });
   const page = await context.newPage();
   const errors: string[] = [];
@@ -260,6 +322,12 @@ test("restricted storage still renders the expired login form", async ({
   await expect(
     page.getByText("Session expired — sign in again to continue."),
   ).toBeVisible();
+
+  // A full real login still works: the session-change publish degrades
+  // silently instead of crashing the success path.
+  await uiLogin(page, ADMIN.username, ADMIN.password);
+  await page.goto(`${baseURL}/files`);
+  await expect(page.getByText(`${ADMIN.username} · admin`)).toBeVisible();
   expect(errors).toEqual([]);
   await context.close();
 });

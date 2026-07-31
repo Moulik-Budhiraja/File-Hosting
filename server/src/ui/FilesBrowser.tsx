@@ -12,6 +12,12 @@ import {
 import { apiFetch, isApiError, notifyUnauthorized } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { formatDateTime, formatSize } from "@/lib/format";
+import {
+  boundPrevCursors,
+  decodePrevCursors,
+  encodePrevCursors,
+  readTaskParam,
+} from "@/lib/task-url";
 import { useLatest } from "@/lib/use-latest";
 import type { FileMetadata, PublicUser, Visibility } from "@/lib/types";
 import { Dialog } from "./Dialog";
@@ -27,12 +33,7 @@ type VisibilityFilter = "all" | Visibility;
 const PAGE_LIMIT = 50;
 
 // Task state lives in the URL so session expiry + reauth can return to
-// the exact filter/search/page the user was on.
-function readTaskParam(name: string): string | null {
-  if (typeof window === "undefined") return null;
-  return new URLSearchParams(window.location.search).get(name);
-}
-
+// the exact filter/search/page/selection the user was on.
 function initialVisibility(): VisibilityFilter {
   const value = readTaskParam("visibility");
   return value === "public" || value === "protected" || value === "private"
@@ -57,9 +58,13 @@ export function FilesBrowser() {
   const [cursor, setCursor] = useState<string | null>(() =>
     readTaskParam("cursor"),
   );
-  const [prevCursors, setPrevCursors] = useState<Array<string | null>>([]);
+  const [prevCursors, setPrevCursors] = useState<Array<string | null>>(() =>
+    decodePrevCursors(readTaskParam("prev")),
+  );
   const [owners, setOwners] = useState<Map<string, string> | null>(null);
-  const [selectedId, setSelectedId] = useState<string | null>(null);
+  const [selectedId, setSelectedId] = useState<string | null>(() =>
+    readTaskParam("sel"),
+  );
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
@@ -102,6 +107,13 @@ export function FilesBrowser() {
       });
     } catch (error) {
       if (!ticket.current()) return;
+      if (isApiError(error) && error.code === "invalid_cursor" && cursor) {
+        // A restored cursor can be stale or foreign. Degrade to the first
+        // page of the same task instead of an error screen or a loop.
+        setCursor(null);
+        setPrevCursors([]);
+        return;
+      }
       setState({ kind: "error", status: isApiError(error) ? error.status : 0 });
     }
   }, [begin, query, visibility, scope, cursor]);
@@ -122,12 +134,14 @@ export function FilesBrowser() {
     setOrDelete("visibility", visibility === "all" ? null : visibility);
     setOrDelete("scope", scope === "everyone" ? null : scope);
     setOrDelete("cursor", cursor);
+    setOrDelete("prev", encodePrevCursors(prevCursors));
+    setOrDelete("sel", selectedId);
     const search = params.toString();
     const target = `${window.location.pathname}${search ? `?${search}` : ""}`;
     if (target !== `${window.location.pathname}${window.location.search}`) {
       window.history.replaceState(null, "", target);
     }
-  }, [query, visibility, scope, cursor]);
+  }, [query, visibility, scope, cursor, prevCursors, selectedId]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -479,7 +493,7 @@ export function FilesBrowser() {
                 className="button button-small"
                 disabled={state.nextCursor === null}
                 onClick={() => {
-                  setPrevCursors([...prevCursors, cursor]);
+                  setPrevCursors(boundPrevCursors([...prevCursors, cursor]));
                   setCursor(state.nextCursor);
                 }}
               >

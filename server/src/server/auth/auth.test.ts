@@ -11,6 +11,8 @@ import { AppError } from "../files/errors";
 import {
   AuthRepository,
   decodeApiKeyCursor,
+  MAX_PENDING_API_KEYS,
+  PENDING_API_KEY_TTL_MS,
   REVOKED_KEY_RETENTION_COUNT,
   REVOKED_KEY_RETENTION_DAYS,
 } from "./database";
@@ -534,6 +536,412 @@ describe("user repository", () => {
       );
     } finally {
       await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("searches the aggregate by key name and owner username before pagination", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-api-key-search-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const base = new Date("2026-07-01T00:00:00.000Z");
+      // 12 owners × 9 keys = 108 noise rows, so an unfiltered page of 100
+      // cannot contain the needle placed at the very end.
+      for (let index = 0; index < 12; index += 1) {
+        const owner = await repository.createUser({
+          username: `noise.owner.${index}`,
+          password: MEMBER_CREDENTIAL,
+          role: "member",
+        });
+        for (let key = 0; key < 9; key += 1) {
+          await repository.createApiKey(
+            owner.id,
+            `noise-${index}-${key}`,
+            new Date(base.getTime() + (index * 9 + key) * 1000),
+          );
+        }
+      }
+      const needleOwner = await repository.createUser({
+        username: "needle.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      await repository.createApiKey(
+        needleOwner.id,
+        "NEEDLE-Laptop",
+        new Date(base.getTime() + 3600_000),
+      );
+      await repository.createApiKey(
+        needleOwner.id,
+        "progress 100%_done",
+        new Date(base.getTime() + 3601_000),
+      );
+
+      // The needle sits beyond the first unfiltered page…
+      const unfiltered = await repository.listAllApiKeys({ limit: 100 });
+      assert.equal(
+        unfiltered.apiKeys.some((key) => key.name === "NEEDLE-Laptop"),
+        false,
+      );
+      // …but a filtered search finds it on page 1, case-insensitively.
+      const byName = await repository.listAllApiKeys({
+        limit: 100,
+        q: "needle-lap",
+      });
+      assert.equal(byName.apiKeys.length, 1);
+      assert.equal(byName.apiKeys[0]?.name, "NEEDLE-Laptop");
+      assert.equal(byName.nextCursor, null);
+
+      // Owner-username matching covers all of that owner's keys.
+      const byOwner = await repository.listAllApiKeys({
+        limit: 100,
+        q: "needle.owner",
+      });
+      assert.equal(byOwner.apiKeys.length, 2);
+
+      // LIKE wildcards in the query are literals, not patterns.
+      const percent = await repository.listAllApiKeys({
+        limit: 100,
+        q: "0%_d",
+      });
+      assert.deepEqual(
+        percent.apiKeys.map((key) => key.name),
+        ["progress 100%_done"],
+      );
+      const underscore = await repository.listAllApiKeys({
+        limit: 100,
+        q: "%",
+      });
+      assert.deepEqual(
+        underscore.apiKeys.map((key) => key.name),
+        ["progress 100%_done"],
+      );
+
+      // Cursor semantics stay deterministic under a search: small pages
+      // are disjoint and complete.
+      const collected = [];
+      let cursor;
+      for (;;) {
+        const page = await repository.listAllApiKeys({
+          limit: 5,
+          cursor,
+          q: "noise-3-",
+        });
+        collected.push(...page.apiKeys);
+        if (!page.nextCursor) break;
+        cursor = decodeApiKeyCursor(page.nextCursor);
+      }
+      assert.equal(collected.length, 9);
+      assert.equal(new Set(collected.map((key) => key.id)).size, 9);
+      for (const key of collected) {
+        assert.match(key.name, /^noise-3-/u);
+      }
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("two-phase creation: pending keys never authenticate until activated", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-two-phase-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const owner = await repository.createUser({
+        username: "twophase.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const begun = await repository.beginApiKeyCreation(
+        owner.id,
+        "browser-key",
+        "req-11111111-1111-4111-8111-111111111111",
+      );
+      assert.equal(begun.created, true);
+      assert.equal(begun.status, "pending");
+      assert.match(begun.secret!, /^fsk_/u);
+      assert.ok(begun.pendingExpiresAt);
+
+      // The invariant: a pending key is NEVER a live credential.
+      assert.equal(await repository.resolveApiKey(begun.secret!), null);
+
+      // Activation flips it live, idempotently.
+      const activated = await repository.activateApiKey(
+        begun.id,
+        owner.id,
+        false,
+      );
+      assert.equal(activated.status, "active");
+      const again = await repository.activateApiKey(begun.id, owner.id, false);
+      assert.equal(again.status, "active");
+      const resolved = await repository.resolveApiKey(begun.secret!);
+      assert.equal(resolved?.id, owner.id);
+
+      // The plaintext secret is never at rest: only its SHA-256 digest.
+      const client = createClient({
+        url: `file:${path.join(directory, "auth.db")}`,
+      });
+      const rows = await client.execute("SELECT * FROM api_keys");
+      for (const row of rows.rows) {
+        for (const value of Object.values(row)) {
+          assert.ok(
+            typeof value !== "string" || !value.includes(begun.secret!),
+          );
+        }
+      }
+      client.close();
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("retrying a create with the same request id is idempotent and never re-exposes the secret", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-idempotent-create-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const owner = await repository.createUser({
+        username: "retry.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const requestId = "req-22222222-2222-4222-8222-222222222222";
+      const first = await repository.beginApiKeyCreation(
+        owner.id,
+        "lost-response-key",
+        requestId,
+      );
+      assert.equal(first.created, true);
+      assert.ok(first.secret);
+
+      // The retry after a lost response: truthful metadata, no plaintext.
+      const retry = await repository.beginApiKeyCreation(
+        owner.id,
+        "lost-response-key",
+        requestId,
+      );
+      assert.equal(retry.created, false);
+      assert.equal(retry.id, first.id);
+      assert.equal(retry.secret, null);
+      assert.equal(retry.status, "pending");
+      assert.ok(retry.pendingExpiresAt);
+
+      // Concurrent duplicate begins cannot mint two rows.
+      const results = await Promise.all([
+        repository.beginApiKeyCreation(owner.id, "dup", "req-dup-1"),
+        repository.beginApiKeyCreation(owner.id, "dup", "req-dup-1"),
+      ]);
+      const createdCount = results.filter((result) => result.created).length;
+      assert.equal(createdCount, 1);
+      assert.equal(new Set(results.map((result) => result.id)).size, 1);
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("pending keys expire, are pruned, cancellable, and bounded", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-pending-bounds-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const owner = await repository.createUser({
+        username: "pending.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const start = new Date("2026-07-01T00:00:00.000Z");
+      const expired = new Date(start.getTime() + PENDING_API_KEY_TTL_MS + 1000);
+
+      // Expiry: an aged pending key can no longer be activated.
+      const stale = await repository.beginApiKeyCreation(
+        owner.id,
+        "stale-pending",
+        "req-stale",
+        start,
+      );
+      await assert.rejects(
+        repository.activateApiKey(stale.id, owner.id, false, expired),
+        (error) =>
+          error instanceof AppError && error.code === "pending_expired",
+      );
+      // …and its secret still never authenticates.
+      assert.equal(
+        await repository.resolveApiKey(stale.secret!, expired),
+        null,
+      );
+
+      // Pruning: the next begin clears expired pending rows.
+      await repository.beginApiKeyCreation(
+        owner.id,
+        "fresh-pending",
+        "req-fresh",
+        expired,
+      );
+      const listed = await repository.listApiKeys(owner.id);
+      assert.equal(
+        listed.some((key) => key.name === "stale-pending"),
+        false,
+      );
+
+      // Cancel: revoking a pending key removes the never-active row.
+      const fresh = listed.find((key) => key.name === "fresh-pending");
+      const freshRow = await repository.listApiKeys(owner.id);
+      assert.equal(freshRow.length >= 1 || fresh !== undefined, true);
+      const cancelTarget = (await repository.listApiKeys(owner.id)).find(
+        (key) => key.name === "fresh-pending",
+      )!;
+      await repository.revokeApiKey(cancelTarget.id, owner.id, false, expired);
+      assert.equal(
+        (await repository.listApiKeys(owner.id)).some(
+          (key) => key.name === "fresh-pending",
+        ),
+        false,
+      );
+
+      // Bound: at most MAX_PENDING_API_KEYS pending rows per user.
+      for (let index = 0; index < MAX_PENDING_API_KEYS; index += 1) {
+        await repository.beginApiKeyCreation(
+          owner.id,
+          `pending-${index}`,
+          `req-cap-${index}`,
+          expired,
+        );
+      }
+      await assert.rejects(
+        repository.beginApiKeyCreation(
+          owner.id,
+          "one-too-many",
+          "req-cap-overflow",
+          expired,
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "pending_key_limit",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("activation enforces the active-key limit and ownership", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-activation-limits-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const owner = await repository.createUser({
+        username: "capped.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const other = await repository.createUser({
+        username: "other.member",
+        password: OTHER_CREDENTIAL,
+        role: "member",
+      });
+      for (let index = 0; index < 10; index += 1) {
+        await repository.createApiKey(owner.id, `active-${index}`);
+      }
+      // One-step creation still enforces the active cap…
+      await assert.rejects(
+        repository.createApiKey(owner.id, "over-active-cap"),
+        (error) => error instanceof AppError && error.code === "api_key_limit",
+      );
+      // …pending creation is allowed (it holds no live credential)…
+      const pending = await repository.beginApiKeyCreation(
+        owner.id,
+        "pending-at-cap",
+        "req-at-cap",
+      );
+      assert.equal(pending.status, "pending");
+      // …but activation at the cap must fail, leaving the key pending.
+      await assert.rejects(
+        repository.activateApiKey(pending.id, owner.id, false),
+        (error) => error instanceof AppError && error.code === "api_key_limit",
+      );
+      assert.equal(await repository.resolveApiKey(pending.secret!), null);
+
+      // A different member cannot activate or cancel someone else's key.
+      await assert.rejects(
+        repository.activateApiKey(pending.id, other.id, false),
+        (error) =>
+          error instanceof AppError && error.code === "api_key_not_found",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("migrates an existing api_keys table to the two-phase schema", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-migration-test-"),
+    );
+    const url = `file:${path.join(directory, "auth.db")}`;
+    try {
+      // Simulate a database created before the two-phase columns existed.
+      const legacy = createClient({ url });
+      await legacy.executeMultiple(`
+        CREATE TABLE users (
+          id TEXT PRIMARY KEY NOT NULL,
+          username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+          password_hash TEXT NOT NULL,
+          role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
+          active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+          created_at TEXT NOT NULL,
+          updated_at TEXT NOT NULL
+        );
+        CREATE TABLE api_keys (
+          id TEXT PRIMARY KEY NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+          key_prefix TEXT NOT NULL,
+          last_four TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          expires_at TEXT,
+          revoked_at TEXT
+        );
+        INSERT INTO users VALUES ('legacy-user', 'legacy.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        INSERT INTO api_keys VALUES ('legacy-key', 'legacy-user', 'legacy-cli', '${"a".repeat(64)}', 'fsk_legacy00', 'zzzz', '2026-01-01T00:00:00.000Z', NULL, NULL, NULL);
+      `);
+      legacy.close();
+
+      const repository = await AuthRepository.create(url);
+      try {
+        // Existing rows read as active credentials.
+        const listed = await repository.listApiKeys("legacy-user");
+        assert.equal(listed.length, 1);
+        assert.equal(listed[0]?.status, "active");
+        // And the two-phase flow works on the migrated table.
+        const begun = await repository.beginApiKeyCreation(
+          "legacy-user",
+          "migrated-pending",
+          "req-migrated",
+        );
+        assert.equal(begun.status, "pending");
+      } finally {
+        await repository.close();
+      }
+    } finally {
       await rm(directory, { recursive: true, force: true });
     }
   });

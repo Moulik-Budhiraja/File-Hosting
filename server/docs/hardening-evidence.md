@@ -162,11 +162,190 @@ and remain documented there.
   standalone path it copies is now self-contained.
 - The forced-colors production test uses Chromium's forced-colors
   emulation, not Windows High Contrast itself.
-- Cross-tab identity refresh relies on `storage` events plus
-  focus/visibility polling (30s guard); a tab that never regains focus and
-  receives no storage event refreshes only on its next 401/403.
-- Admin aggregate key search filters the loaded page client-side (the
-  page size is 100; server-side search can follow if key counts grow).
 - The backend's per-address login throttle counts successful attempts as
   well (PR #7 behavior, unchanged here); tests use synthetic
   `x-real-ip` values to stay independent of it.
+
+---
+
+# Re-repair pass over `06400d0` (Sol re-audit: 5 P2 · 2 P3 · Fable: 3 P3)
+
+Driven by `audits/sol-reaudit-06400d0.md` (FAIL — 5 P2, 2 P3) and
+`audits/fable-reaudit-06400d0.md` (PASS — 3 P3). Every slice was built
+strictly test-first; RED was observed before any production change. Two
+earlier claims in this document were untruthful and are superseded below:
+the cross-tab limitation bullet (the marker signal could not fire on a
+real same-value account replacement) and the page-local admin key search
+bullet (it produced false global empties).
+
+## RED → GREEN log (per slice)
+
+| Slice                                                | Test command                                                                                                     | RED observation                                                                                                                                                                | GREEN                                                                                                                                                                                                                                                                                                                                                     |
+| ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Console-clean tests + act() fix (Sol P3-2)           | `npx vitest run` with new `vitest.setup.ts` (console.error/warn now fail tests)                                  | 1 failed: `auth-context.test.tsx > an authoritative 403 triggers…` — 4× `The current testing environment is not configured to support act(...)` captured by the new harness    | 141/141 after setting `IS_REACT_ACT_ENVIRONMENT` in the setup file; any future unexpected console output fails CI                                                                                                                                                                                                                                         |
+| Field-error association (Sol P2-5)                   | `npx vitest run src/ui/ApiKeys.test.tsx src/ui/UsersDirectory.test.tsx`                                          | 2 failed: error nodes had no id; inputs had `aria-invalid`/`aria-describedby` null; focus never returned                                                                       | pass — stable error ids, `aria-invalid`, `aria-describedby`, refocus on validation and real 409; production assertions in `tests-e2e/field-errors.spec.ts`                                                                                                                                                                                                |
+| Server-side aggregate key search (Sol P2-2)          | `npx tsx --test src/server/auth/auth.test.ts` (repo) and `http.test.ts` (route)                                  | repo: needle behind 108 noise rows not returned for `q`; route: `q` ignored — noise keys returned alongside the needle                                                         | 28/28 + 10/10 — `q` applied in SQL before keyset pagination on key name + owner username, LIKE-escaped (`%`, `_`, `\` literal), case-insensitive, cursor pages disjoint/complete under `q`                                                                                                                                                                |
+| Search UI (debounce, latest-wins, truthful empty)    | `npx vitest run src/ui/ApiKeys.test.tsx`                                                                         | 2 failed: no `q` request left the client (page-local filter); stale slow query could land                                                                                      | pass — 300 ms debounce, one request per settled query, `useLatest` abort/stale-suppression, aggregate rows never re-filtered per page; production `tests-e2e/keys-search-pager.spec.ts` finds a page-2 needle live and shows a truthful server-backed empty (the false "No API keys yet" empty for a searched miss was caught by that spec RED and fixed) |
+| Cross-tab session signal (Sol P2-1, Fable P3-B)      | `npx vitest run src/lib/session-signal.test.tsx src/lib/auth-context.test.tsx`                                   | session-signal module missing (file-level fail); 4 failed auth-context tests: version storage event ignored, BroadcastChannel ignored, background 5xx tore down UI, no polling | pass — every login/session replacement/logout publishes a CHANGING non-secret version via guarded localStorage + BroadcastChannel; subscribers refresh immediately with no interval guard; 60 s visible-tab bounded poll as fallback; background failure keeps UI + stale notice (Fable P3-A)                                                             |
+| Real two-tab production proof                        | `npx playwright test tests-e2e/session-flows.spec.ts`                                                            | (pre-fix behavior per Sol: stale admin shell; the old spec manufactured a `StorageEvent` — deleted)                                                                            | pass — tab B performs a REAL form login as a different member account; tab A drops admin nav/content without focus or any injected event and issues no further admin fetches; real out-of-band demotion reaches a never-focused tab via the poll (`page.clock`); restricted storage + deleted `BroadcastChannel` still logs in cleanly                    |
+| Two-phase lost-response-safe key creation (Sol P2-3) | `npx tsx --test src/server/auth/auth.test.ts` / `http.test.ts`                                                   | file-level fail (`beginApiKeyCreation`, `activateApiKey`, `MAX_PENDING_API_KEYS`, `PENDING_API_KEY_TTL_MS` absent); route test fail (`request_id` ignored, no activate route)  | pass — protocol + migration below; route 10/10, repo 28/28                                                                                                                                                                                                                                                                                                |
+| Two-phase UI protocol                                | `npx vitest run src/ui/ApiKeys.test.tsx`                                                                         | 5 failed: no request id sent, lost create claimed "Nothing was changed", no activation phase/retry, pending rows not listed/cancellable                                        | 21/21 pass                                                                                                                                                                                                                                                                                                                                                |
+| Two-phase production proof                           | `npx playwright test tests-e2e/keys-two-phase.spec.ts`                                                           | (pre-fix behavior per Sol: committed 201 + "nothing changed" + active unrecoverable secret)                                                                                    | 3/3 pass — phase-1 response really dropped after `route.fetch()` commit: truthful pending outcome, server shows exactly one PENDING row, bearer auth 401, cancellable; phase-2 response dropped: dialog says NOT active, retry reconciles idempotently, secret then authenticates, exactly one active key                                                 |
+| Mobile keys pager geometry (Sol P2-4, Fable P3-C)    | `npx playwright test tests-e2e/keys-search-pager.spec.ts` against the real standalone build with 109 seeded keys | `← prev width @360: expected >= 44, received 25.234375` (the exact audit measurement)                                                                                          | pass at 360/390/430 — both pager buttons ≥44×44, single-line labels (height ≤64, aspect >0.9), no document overflow with the long retention copy                                                                                                                                                                                                          |
+| Reauth task restoration — Files (Sol P3-1)           | `npx vitest run src/ui/FilesBrowser.test.tsx src/ui/ApiKeys.test.tsx`                                            | 5 failed: `prev`/`sel` not read from or written to the URL; invalid restored cursor produced an error screen                                                                   | pass — Files stores cursor + bounded (8) backward history + selection + q/visibility/scope; Keys stores q + cursor + bounded history; never secrets; `invalid_cursor` degrades to page 1 without loops; production `tests-e2e/task-restore.spec.ts` proves page-2+selection restoration through a real expiry/relogin and stale-cursor degradation        |
+
+## Two-phase API-key creation — protocol, migration, invariants
+
+**Migration** (`AuthRepository.create`): `api_keys` gains
+`status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('pending','active'))`,
+`request_id TEXT` (partial unique index), `pending_expires_at TEXT`.
+Existing databases are ALTERed in place (tested against a pre-migration
+schema fixture); legacy rows read as `active` via the column default.
+
+**Protocol**
+
+1. Phase 1 — `POST /api/api-keys` with `request_id` (browser flow only):
+   commits a `pending` row (10-minute TTL, per-user cap 5) and returns the
+   server-generated 256-bit `fsk_` secret exactly once (SHA-256 digest at
+   rest, plaintext never stored/logged — asserted by scanning every column
+   of every row). Retrying the same `request_id` returns 200 with truthful
+   metadata (`created:false`, `status`, expiry) and **never** the secret.
+   Concurrent duplicate begins reconcile to one row via the unique index.
+2. Phase 2 — `POST /api/api-keys/{id}/activate` (authenticated,
+   same-origin CSRF via the existing `assertCsrf` origin check — foreign
+   origin 403 tested at route and curl level): flips `pending → active`
+   only while unexpired and under the 10-active cap; idempotent, so a lost
+   activation response reconciles on retry. Members activate only their
+   own keys (foreign id → 404).
+3. Cancel — `DELETE /api/api-keys/{id}` deletes a pending row outright
+   (never-active, nothing to audit); revoke semantics for active keys are
+   unchanged. Expired pending rows are pruned on the next key-creation
+   touch.
+
+**Threat invariants** (each test-enforced): a pending key NEVER
+authenticates (`resolveApiKey` requires `status='active'`; repo, route,
+and live-curl 401 proofs); a lost create response can leave at worst an
+inert pending row — truthfully surfaced, reconcilable, cancellable,
+expiring — never an active unrecoverable credential; retries never
+re-expose plaintext; active-cap, pending-cap, revoked-retention,
+show-once, and 256-bit randomness all preserved.
+
+**Who may use which path.** The one-step (no `request_id`) create is
+reserved for non-browser **bearer** principals — the CLI and the legacy
+service credential — and is byte-compatible for them. A cookie-**session**
+principal that omits `request_id` is rejected with
+`400 request_id_required`, so the browser cannot fall back to a path where
+a lost response mints an active unrecoverable secret. Both halves are
+route-tested (session one-step → 400; bearer one-step → 201 with a usable
+secret).
+
+## Finding dispositions (this pass)
+
+| Finding                                             | Disposition                                                                                                                                                                                                                                                                                                                         |
+| --------------------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Sol P2-1 real cross-tab replacement                 | **Fixed.** Changing session-version signal (storage + BroadcastChannel) published by login/replacement/logout; immediate refresh, no same-value suppression; real two-tab production test with zero synthetic events; bounded visible-tab polling fallback for uncoordinated cookie changes.                                        |
+| Sol P2-2 page-local key search                      | **Fixed.** `q` in aggregate SQL before keyset pagination (name + owner username, escaped, parameterized, case-insensitive, deterministic cursors); UI debounces, aborts, latest-wins; member/mine search filters a complete unpaginated list; empty claims now truthful in both modes.                                              |
+| Sol P2-3 lost-response key creation                 | **Fixed.** Two-phase idempotent protocol above; both lost-response phases reproduced against the production build with real committed requests.                                                                                                                                                                                     |
+| Sol P2-4 25 px mobile pager                         | **Fixed.** Footline wraps; pager `flex-shrink:0`, nowrap labels, 44×44 mobile minimums; computed-geometry assertions at 360/390/430 with a real >100-row aggregate.                                                                                                                                                                 |
+| Sol P2-5 unassociated field errors                  | **Fixed.** Stable ids + `aria-invalid` + `aria-describedby` + refocus on New User and New API Key; component + production assertions (empty-name validation and a real 409 conflict).                                                                                                                                               |
+| Sol P3-1 partial task restoration                   | **Fixed.** Files: cursor + bounded (8) backward history + selection + q/visibility/scope. Keys: q + cursor + bounded history + sanitized admin scope + selected key id + safe pending key id. Only opaque non-secret values are stored. Stale ids and cursors degrade silently; production expiry/relogin proofs for both surfaces. |
+| Sol P3-2 act() warning                              | **Fixed.** Warning eliminated; unexpected console output now fails every UI test in CI.                                                                                                                                                                                                                                             |
+| Fable P3-A full-page fallback on background failure | **Fixed.** Background refresh failure keeps the rendered identity with a non-blocking stale/Retry notice; only the initial load uses the full fallback.                                                                                                                                                                             |
+| Fable P3-B cross-tab latency                        | **Fixed** via Sol P2-1 (immediate signal + bounded poll).                                                                                                                                                                                                                                                                           |
+| Fable P3-C pager letter-wrap                        | **Fixed** via Sol P2-4.                                                                                                                                                                                                                                                                                                             |
+
+## Endpoint contract changes (this pass)
+
+- `GET /api/api-keys?scope=all&q=…` — new optional search, applied in SQL
+  before keyset pagination over key name and owner username. Omitting `q`
+  is unchanged behavior.
+- `POST /api/api-keys` — new optional `request_id` selects the two-phase
+  flow (201 on first commit with a show-once secret; 200 on an idempotent
+  retry with metadata only). **Breaking for cookie-session callers only:**
+  a session principal that omits `request_id` now gets
+  `400 request_id_required`. Bearer principals (CLI, legacy service
+  credential) keep the unchanged one-step 201 contract.
+- `POST /api/api-keys/{id}/activate` — new authenticated, CSRF-protected,
+  idempotent phase-2 endpoint.
+- `DELETE /api/api-keys/{id}` — unchanged for active keys; for a pending
+  key it deletes the never-active row instead of marking it revoked.
+- Key metadata responses gain `status` and `pending_expires_at`. Existing
+  fields are unchanged; older clients ignoring the new fields see legacy
+  rows as `status: "active"`.
+
+## Follow-up pass — API-key task restoration and the browser create gate
+
+Two requirements were still incomplete after the pass above; both are now
+closed test-first. Counts in the battery below supersede the earlier ones.
+
+| Slice                                                   | Test command                                         | RED observation                                                                                                                                                                    | GREEN                                                                                                                                                                                      |
+| ------------------------------------------------------- | ---------------------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| Browser callers must use the two-phase path             | `npx tsx --test src/server/auth/http.test.ts`        | 1 failed: a cookie-session `POST /api/api-keys` without `request_id` returned **201 with an active key and its secret** — the exact shape the two-phase protocol exists to prevent | 10/10 — session one-step → `400 request_id_required`; bearer one-step still → 201 with a usable secret (both asserted in the same test)                                                    |
+| Keys URL state: sanitized scope, selection, pending id  | `npx vitest run src/ui/ApiKeys.test.tsx`             | 4 failed: `scope`/`sel`/`pend` were neither read from nor written to the URL; an interrupted show-once flow left no reconcilable state                                             | 25/25 — admin scope (only `all`/`mine`, admins only), selected key id, and pending key id round-trip; stale ids degrade silently and drop from the URL; the URL never contains secret text |
+| Interrupted show-once → truthful reconcile after reauth | same command                                         | no reconcile UI existed                                                                                                                                                            | a pending key restores a dialog that says the secret **cannot be shown again** and offers Activate (idempotent) or Cancel — it never implies the secret is recoverable                     |
+| Production proof of the above                           | `npx playwright test tests-e2e/task-restore.spec.ts` | new coverage (previous suite proved Files only)                                                                                                                                    | 5/5 — Keys page 2 + back-history + selected-key dialog restored through real expiry/relogin; admin scope + search restored; interrupted pending flow reconciled and cancelled              |
+
+**Tracked caller updated.** `tests/e2e.test.mjs` was the one tracked
+cookie-session one-step caller; the gate correctly broke it (root E2E went
+17/17 → 15/17, `request_id_required`). It now exercises the browser
+contract end to end — one-step refused, two-phase create, pending key
+rejected as a bearer credential (401), activate, then the CLI uses the
+activated key — and is back to 17/17. No CLI or legacy bearer call sites
+changed (CLI 52/52 unchanged).
+
+**Sanitization.** `scope` accepts only `all`/`mine` and only for admins;
+`sel`/`pend` are opaque server-generated key ids that carry no secret
+material and are only honored when they match a row the reauthenticated
+user can already see (`pend` additionally requires `status === "pending"`).
+Everything else is dropped from the URL. A test asserts the URL contains
+no `fsk_`/secret text while the show-once dialog is open.
+
+**Test-harness note (not a product defect).** While adding these,
+`/api/auth/me` after reauth intermittently never left the browser when the
+reauth navigation itself was under a Playwright `page.route` interception;
+an in-page `fetch` to the same URL returned 200 in 3–9 ms and the server
+answered `/healthz` in 8 ms at that moment, so the app and server were
+healthy. The specs now set the synthetic throttle address with
+`context.setExtraHTTPHeaders` instead of intercepting the reauth, and
+resume the task in a fresh tab (what a returning user does anyway). Three
+consecutive full suite runs are green.
+
+## Validation battery (final, executed at this state)
+
+| Check                                                                    | Result                                                                                                                                                                                                                                                                                                                                    |
+| ------------------------------------------------------------------------ | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| Clean `npm ci` (server)                                                  | pass; lockfile unchanged (`git status` clean for `package-lock.json`)                                                                                                                                                                                                                                                                     |
+| `npm run check` (lint, typecheck, backend, UI)                           | lint/typecheck clean; backend **62/62**; UI **170/170** (console-warning-clean enforced)                                                                                                                                                                                                                                                  |
+| `npm run format:check`                                                   | clean                                                                                                                                                                                                                                                                                                                                     |
+| Clean `rm -rf .next && npm run build` + standalone packaging             | pass                                                                                                                                                                                                                                                                                                                                      |
+| `npx playwright test` (production standalone, Chromium)                  | **42/42** across 14 specs, three consecutive green runs; incl. real two-tab login/demotion, lost create/activate, 360/390/430 pager geometry, Files **and** Keys task restoration, forced-colors, all previous widths/suites                                                                                                              |
+| CLI clean `npm ci` + typecheck + tests + build                           | pass; **52/52**                                                                                                                                                                                                                                                                                                                           |
+| Root `node --test tests/e2e.test.mjs`                                    | **17/17** (updated for the browser two-phase contract; see above)                                                                                                                                                                                                                                                                         |
+| `npm audit --omit=dev` (server) / CLI `npm audit`                        | 0 vulnerabilities                                                                                                                                                                                                                                                                                                                         |
+| Full server `npm audit`                                                  | 1 high — transitive dev-only `brace-expansion` via the ESLint toolchain; production audit is clean                                                                                                                                                                                                                                        |
+| `git diff --check`                                                       | clean                                                                                                                                                                                                                                                                                                                                     |
+| Tracked + new-file secret/home-path scan                                 | no findings across **148** tracked + new files; no tracked `.log`/HAR/trace artifacts                                                                                                                                                                                                                                                     |
+| Standalone curl probes (fresh synthetic server, port 3967, then stopped) | app CSP/XFO/nosniff/referrer/permissions present; API `default-src 'none'`; branded 404 byte-identical across missing×3 and a real private file (`8cebec4f…`, status 404); two-phase probe: pending secret 401 → retry returns no plaintext → activate wrong-origin 403 → activate 200 → bearer 200; `q` search returns exactly the match |
+| Capture regeneration                                                     | all 33 PNGs regenerated via `scripts/capture-screens.mjs` against the fresh standalone build into the existing `implementation-pass/` set; `mobile-keys-390x844.png` now shows an unwrapped pager and the widened search field; design exports and Paper untouched (no Paper tools invoked)                                               |
+
+## Limitations (this pass)
+
+- Docker image build and native Windows High Contrast remain unavailable
+  on this host (unchanged); forced-colors verified via Chromium emulation
+  in the tracked suite.
+- The demotion-propagation production test advances the poll with
+  Playwright's `page.clock`; the interval itself (60 s, visible tabs,
+  30 s min-interval guard) is asserted in unit tests.
+- Admin key search matches key name and owner username only (the fields
+  the view renders); prefix/mask search is not claimed by the UI.
+- New truthful UI state not present on the Paper boards: pending keys
+  (status wording, expiry, Cancel), the activation status line in the
+  secret dialog, and the pending-key reconcile dialog — additive,
+  backend-truthful deviations in the spirit of the documented ones.
+- Keys restoration covers the selected key's confirm dialog and the
+  pending-key reconcile dialog. There is no separate key detail pane to
+  restore, and the create dialog's in-progress name is deliberately not
+  persisted (it is unsubmitted input, not committed task state).
+- All 33 existing capture states were regenerated after the follow-up pass.
+  The capture script does not stage the two new restore/reconcile dialogs;
+  those states are proven by component and production-browser tests instead.

@@ -259,15 +259,38 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
     assert(cookie, "login should set the session cookie");
 
+    // Browser (cookie-session) callers use the two-phase flow: a one-step
+    // create is refused so a lost response can never leave an active key
+    // whose secret nobody has. Bearer/CLI callers keep the one-step path.
+    const oneStep = await fetch(`${baseUrl}/api/api-keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: baseUrl },
+      body: JSON.stringify({ name: "e2e-cli-one-step" }),
+    });
+    assert.equal(oneStep.status, 400);
+    assert.equal((await oneStep.json()).error.code, "request_id_required");
+
     const created = await fetch(`${baseUrl}/api/api-keys`, {
       method: "POST",
       headers: { "content-type": "application/json", cookie, origin: baseUrl },
-      body: JSON.stringify({ name: "e2e-cli" }),
+      body: JSON.stringify({ name: "e2e-cli", request_id: "e2e-cli-request-1" }),
     });
     assert.equal(created.status, 201);
     const createdBody = await created.json();
     const apiKey = createdBody.api_key.secret;
     assert.match(apiKey, /^fsk_[A-Za-z0-9_-]{43}$/);
+    assert.equal(createdBody.api_key.status, "pending");
+
+    // A pending key never authenticates until phase 2 completes.
+    assert.equal(
+      (await fetch(`${baseUrl}/api/files`, { headers: { authorization: `Bearer ${apiKey}` } })).status,
+      401,
+    );
+    const activated = await fetch(`${baseUrl}/api/api-keys/${createdBody.api_key.id}/activate`, {
+      method: "POST",
+      headers: { cookie, origin: baseUrl },
+    });
+    assert.equal(activated.status, 200);
 
     const protectedPath = path.join(fixtureDir, "protected-e2e.txt");
     await writeFile(protectedPath, "authenticated only");

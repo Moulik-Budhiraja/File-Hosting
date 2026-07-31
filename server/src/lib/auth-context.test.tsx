@@ -5,6 +5,10 @@ import { afterEach, expect, test, vi } from "vitest";
 
 import { apiFetch } from "@/lib/api";
 import { AuthProvider, SESSION_MARKER_KEY, useAuth } from "@/lib/auth-context";
+import {
+  publishSessionChange,
+  SESSION_VERSION_KEY,
+} from "@/lib/session-signal";
 import { ConsoleNav } from "@/ui/ConsoleShell";
 
 afterEach(() => {
@@ -198,6 +202,168 @@ test("cross-tab storage changes to the session marker replace the identity", asy
     expect(screen.queryByRole("link", { name: "Users" })).toBeNull(),
   );
   expect(screen.getByText(/jordan/)).toBeTruthy();
+});
+
+test("a cross-tab session-version storage write replaces the identity immediately", async () => {
+  let currentRole: "admin" | "member" = "admin";
+  let currentName = "ops-admin";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") return meResponse(currentRole, currentName);
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <ConsoleNav active="files" />
+    </AuthProvider>,
+  );
+  expect(await screen.findByRole("link", { name: "Users" })).toBeTruthy();
+
+  // Another tab publishes a changed session version (different account
+  // signed in). No focus, no marker event — the version signal alone must
+  // refresh, even though the last read was recent.
+  currentRole = "member";
+  currentName = "casey";
+  act(() => {
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SESSION_VERSION_KEY,
+        newValue: "fresh-version-from-tab-b",
+      }),
+    );
+  });
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: "Users" })).toBeNull(),
+  );
+  expect(screen.getByText(/casey/)).toBeTruthy();
+});
+
+test("a BroadcastChannel session publish replaces the identity without storage", async () => {
+  let currentRole: "admin" | "member" = "admin";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") return meResponse(currentRole, "ops-admin");
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <ConsoleNav active="files" />
+    </AuthProvider>,
+  );
+  expect(await screen.findByRole("link", { name: "Users" })).toBeTruthy();
+
+  currentRole = "member";
+  // Simulates the real login/logout path in another same-origin context.
+  act(() => {
+    publishSessionChange();
+  });
+  await waitFor(() =>
+    expect(screen.queryByRole("link", { name: "Users" })).toBeNull(),
+  );
+});
+
+test("a failed background refresh keeps the rendered identity with a stale notice", async () => {
+  let failing = false;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") {
+        if (failing) return errorResponse(500, "internal_error");
+        return meResponse("admin", "ops-admin");
+      }
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <ConsoleNav active="files" />
+    </AuthProvider>,
+  );
+  expect(await screen.findByRole("link", { name: "Users" })).toBeTruthy();
+
+  // A background refresh 5xx must NOT tear down the working UI…
+  failing = true;
+  act(() => {
+    window.dispatchEvent(
+      new StorageEvent("storage", {
+        key: SESSION_VERSION_KEY,
+        newValue: "v2",
+      }),
+    );
+  });
+  await screen.findByText(/couldn't be refreshed/i);
+  expect(screen.getByRole("link", { name: "Users" })).toBeTruthy();
+  expect(screen.queryByText(/couldn't load your session/i)).toBeNull();
+
+  // …and a successful retry clears the stale notice.
+  failing = false;
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  await waitFor(() =>
+    expect(screen.queryByText(/couldn't be refreshed/i)).toBeNull(),
+  );
+  expect(screen.getByRole("link", { name: "Users" })).toBeTruthy();
+});
+
+test("an initial load failure still shows the full recoverable fallback", async () => {
+  let failing = true;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") {
+        if (failing) return errorResponse(500, "internal_error");
+        return meResponse("admin", "ops-admin");
+      }
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <ConsoleNav active="files" />
+    </AuthProvider>,
+  );
+  await screen.findByText(/couldn't load your session/i);
+  failing = false;
+  await userEvent.click(screen.getByRole("button", { name: "Retry" }));
+  expect(await screen.findByRole("link", { name: "Users" })).toBeTruthy();
+});
+
+test("bounded background polling catches cookie drift without any events", async () => {
+  let role: "admin" | "member" = "admin";
+  const fetchMock = vi.fn(async (url: string) => {
+    if (url === "/api/auth/me") return meResponse(role, "ops-admin");
+    throw new Error(`unexpected ${url}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  // Fake only the interval clock so RTL's own waiting keeps working.
+  vi.useFakeTimers({ toFake: ["setInterval", "clearInterval", "Date"] });
+  try {
+    render(
+      <AuthProvider onUnauthenticated={vi.fn()}>
+        <ConsoleNav active="files" />
+      </AuthProvider>,
+    );
+    await screen.findByRole("link", { name: "Users" });
+    const callsAfterMount = fetchMock.mock.calls.length;
+
+    // The session was replaced outside any coordinated app flow (cookie
+    // change only). No focus, storage, or broadcast events fire — the
+    // low-frequency poll is the safety net.
+    role = "member";
+    act(() => {
+      vi.advanceTimersByTime(61_000);
+    });
+    await waitFor(() =>
+      expect(screen.queryByRole("link", { name: "Users" })).toBeNull(),
+    );
+    // Bounded: one poll fired in that window, not a storm.
+    expect(fetchMock.mock.calls.length).toBe(callsAfterMount + 1);
+  } finally {
+    vi.useRealTimers();
+  }
 });
 
 test("window focus refreshes the identity, but not more than once per interval", async () => {

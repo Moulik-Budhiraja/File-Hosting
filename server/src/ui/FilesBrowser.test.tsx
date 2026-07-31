@@ -485,6 +485,140 @@ test("filters initialize from the URL so reauth returns to the actual task", asy
   window.history.replaceState(null, "", "/files");
 });
 
+test("cursor, backward history, and selection initialize from the URL", async () => {
+  window.history.replaceState(null, "", "/files?cursor=c2&prev=~,c1&sel=deep1");
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        requests.push(input);
+        const url = new URL(input, "http://localhost");
+        if (url.searchParams.get("cursor") === "c1") {
+          return json(200, {
+            items: [file({ id: "mid1", name: "middle-page.txt" })],
+            next_cursor: "c2",
+          });
+        }
+        return json(200, {
+          items: [file({ id: "deep1", name: "deep-page.txt" })],
+          next_cursor: null,
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  renderFiles();
+  await screen.findByRole("button", { name: /deep-page\.txt/ });
+  // The restored page requested the URL cursor…
+  expect(
+    new URL(requests[0]!, "http://localhost").searchParams.get("cursor"),
+  ).toBe("c2");
+  // …the selected record is restored…
+  expect(
+    await screen.findByRole("heading", { name: /deep-page\.txt/ }),
+  ).toBeTruthy();
+  // …and backward navigation still works after restoration.
+  const prev = screen.getByRole("button", { name: /prev/ });
+  expect((prev as HTMLButtonElement).disabled).toBe(false);
+  await userEvent.click(prev);
+  await screen.findByRole("button", { name: /middle-page\.txt/ });
+  const lastUrl = new URL(requests[requests.length - 1]!, "http://localhost");
+  expect(lastUrl.searchParams.get("cursor")).toBe("c1");
+  // Stepping back again reaches the unpaginated first page.
+  await userEvent.click(screen.getByRole("button", { name: /prev/ }));
+  await waitFor(() => {
+    const url = new URL(requests[requests.length - 1]!, "http://localhost");
+    expect(url.searchParams.get("cursor")).toBeNull();
+  });
+  window.history.replaceState(null, "", "/files");
+});
+
+test("paging and selection write restorable state into the URL", async () => {
+  window.history.replaceState(null, "", "/files");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        const url = new URL(input, "http://localhost");
+        if (url.searchParams.get("cursor") === "c2") {
+          return json(200, {
+            items: [file({ id: "deep1", name: "deep-page.txt" })],
+            next_cursor: null,
+          });
+        }
+        return json(200, {
+          items: [file(), publicFile],
+          next_cursor: "c2",
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  renderFiles();
+  await screen.findByRole("button", { name: /telemetry/ });
+  await userEvent.click(screen.getByRole("button", { name: /next/ }));
+  await screen.findByRole("button", { name: /deep-page\.txt/ });
+  await waitFor(() => {
+    expect(window.location.search).toContain("cursor=c2");
+    expect(window.location.search).toContain("prev=");
+  });
+  await userEvent.click(screen.getByRole("button", { name: /deep-page\.txt/ }));
+  await waitFor(() => expect(window.location.search).toContain("sel=deep1"));
+  window.history.replaceState(null, "", "/files");
+});
+
+test("an invalid restored cursor degrades to the first page without loops", async () => {
+  window.history.replaceState(null, "", "/files?cursor=stale-cursor");
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        requests.push(input);
+        const url = new URL(input, "http://localhost");
+        if (url.searchParams.get("cursor")) {
+          return json(400, {
+            error: { code: "invalid_cursor", message: "Cursor is invalid" },
+          });
+        }
+        return json(200, { items: [file(), publicFile], next_cursor: null });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  renderFiles();
+  // Degrades to page 1 instead of a dead error screen or a retry loop.
+  await screen.findByRole("button", { name: /telemetry/ });
+  expect(requests.length).toBe(2);
+  expect(window.location.search).not.toContain("cursor=");
+  window.history.replaceState(null, "", "/files");
+});
+
 test("changing filters writes the task state into the URL", async () => {
   window.history.replaceState(null, "", "/files");
   vi.stubGlobal(
