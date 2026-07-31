@@ -4,12 +4,128 @@ import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
 
-import { createClient } from "@libsql/client";
+import { createClient, type Client } from "@libsql/client";
 
 import { AuthRepository } from "../auth/database";
 import { FileRepository } from "./database";
 
 describe("file schema migration and access filtering", () => {
+  it("serializes concurrent legacy migrations before accepting owned files", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-concurrent-migration-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "legacy.db")}`;
+    const auth = await AuthRepository.create(databaseUrl);
+    const owner = await auth.createUser({
+      username: "migration.owner",
+      password: "a sufficiently long migration password",
+      role: "member",
+    });
+    const legacy = createClient({ url: databaseUrl, intMode: "number" });
+    await legacy.executeMultiple(`
+      CREATE TABLE files (
+        id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7), name TEXT NOT NULL,
+        size INTEGER NOT NULL, mime_type TEXT NOT NULL, sha256 TEXT NOT NULL,
+        visibility TEXT NOT NULL CHECK(visibility IN ('public', 'private')),
+        storage_key TEXT NOT NULL UNIQUE, archive TEXT, created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE tags (name TEXT PRIMARY KEY COLLATE NOCASE, created_at TEXT NOT NULL);
+      CREATE TABLE file_tags (
+        file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+        tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
+        PRIMARY KEY (file_id, tag_name)
+      );
+    `);
+    legacy.close();
+
+    let checked = 0;
+    let releaseChecks!: () => void;
+    const checksComplete = new Promise<void>((resolve) => {
+      releaseChecks = resolve;
+    });
+    let releaseSecondMigration!: () => void;
+    const secondMigrationReleased = new Promise<void>((resolve) => {
+      releaseSecondMigration = resolve;
+    });
+    const wrappedClient = (client: Client, delayBatch: boolean): Client =>
+      new Proxy(client, {
+        get(target, property) {
+          if (property === "execute") {
+            return async (statement: Parameters<Client["execute"]>[0]) => {
+              const result = await target.execute(statement);
+              const sql =
+                typeof statement === "string" ? statement : statement.sql;
+              if (
+                sql.includes("sqlite_master") &&
+                sql.includes("name = 'files'")
+              ) {
+                checked += 1;
+                if (checked === 2) releaseChecks();
+                await checksComplete;
+              }
+              return result;
+            };
+          }
+          if (property === "batch" && delayBatch) {
+            return async (...args: Parameters<Client["batch"]>) => {
+              await secondMigrationReleased;
+              return target.batch(...args);
+            };
+          }
+          const value = Reflect.get(target, property, target) as unknown;
+          return typeof value === "function"
+            ? (...args: unknown[]) =>
+                Reflect.apply(
+                  value as (...parameters: unknown[]) => unknown,
+                  target,
+                  args,
+                )
+            : value;
+        },
+      });
+
+    const first = new FileRepository(
+      wrappedClient(
+        createClient({ url: databaseUrl, intMode: "number" }),
+        false,
+      ),
+    );
+    const second = new FileRepository(
+      wrappedClient(
+        createClient({ url: databaseUrl, intMode: "number" }),
+        true,
+      ),
+    );
+    try {
+      await first.ensureReady();
+      await first.insert(
+        {
+          id: "OWNED01",
+          name: "owned.txt",
+          size: 1,
+          mimeType: "text/plain",
+          sha256: "d".repeat(64),
+          visibility: "private",
+          ownerId: owner.id,
+          storageKey: "OWNED01",
+          archive: null,
+          createdAt: "2026-01-04T00:00:00.000Z",
+          updatedAt: "2026-01-04T00:00:00.000Z",
+        },
+        [],
+      );
+      releaseSecondMigration();
+      await second.ensureReady();
+      assert.equal((await first.get("OWNED01"))?.ownerId, owner.id);
+    } finally {
+      releaseSecondMigration();
+      await Promise.allSettled([first.close(), second.close()]);
+      await auth.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("preserves legacy public rows and keeps ownerless private rows admin-only", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-migration-test-"),

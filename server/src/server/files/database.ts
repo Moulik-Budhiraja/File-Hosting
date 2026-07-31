@@ -3,6 +3,7 @@ import {
   type Client,
   type InValue,
   type Row,
+  type Transaction,
 } from "@libsql/client";
 
 import { prepareLocalDatabaseDirectory } from "./database-url";
@@ -85,6 +86,14 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/gu, "\\$&");
 }
 
+function isDatabaseBusy(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as Error & { code?: string }).code === "SQLITE_BUSY"
+  );
+}
+
 export function encodeCursor(cursor: {
   createdAt: string;
   id: string;
@@ -132,23 +141,40 @@ export class FileRepository {
     return repository;
   }
 
-  private async migrateLegacyFiles(): Promise<void> {
-    const existing = await this.client.execute(
-      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",
-    );
-    const definition = existing.rows[0]?.sql;
-    if (
-      typeof definition !== "string" ||
-      (definition.includes("owner_id") && definition.includes("'protected'"))
-    ) {
-      return;
+  private async acquireMigrationTransaction(): Promise<Transaction> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      try {
+        return await this.client.transaction("write");
+      } catch (error) {
+        if (!isDatabaseBusy(error) || Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
     }
+  }
 
+  private async migrateLegacyFiles(): Promise<void> {
     await this.client.execute("PRAGMA foreign_keys = OFF");
+    await this.client.execute("PRAGMA busy_timeout = 0");
+    let migrated = false;
+    let transaction: Transaction | null = null;
     try {
-      await this.client.batch(
-        [
-          `CREATE TABLE files_v2 (
+      transaction = await this.acquireMigrationTransaction();
+      const existing = await transaction.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",
+      );
+      const definition = existing.rows[0]?.sql;
+      const needsMigration =
+        typeof definition === "string" &&
+        (!definition.includes("owner_id") ||
+          !definition.includes("'protected'"));
+      if (!needsMigration) {
+        transaction.close();
+        transaction = null;
+        return;
+      }
+      await transaction.batch([
+        `CREATE TABLE files_v2 (
             id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
             name TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0),
             mime_type TEXT NOT NULL, sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
@@ -158,25 +184,31 @@ export class FileRepository {
             archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
             created_at TEXT NOT NULL, updated_at TEXT NOT NULL
           )`,
-          `INSERT INTO files_v2
+        `INSERT INTO files_v2
             (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
             SELECT id, name, size, mime_type, sha256, visibility, NULL, storage_key, archive, created_at, updated_at FROM files`,
-          `CREATE TABLE file_tags_v2 (
+        `CREATE TABLE file_tags_v2 (
             file_id TEXT NOT NULL REFERENCES files_v2(id) ON DELETE CASCADE,
             tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
             PRIMARY KEY (file_id, tag_name)
           )`,
-          "INSERT INTO file_tags_v2 SELECT file_id, tag_name FROM file_tags",
-          "DROP TABLE file_tags",
-          "DROP TABLE files",
-          "ALTER TABLE files_v2 RENAME TO files",
-          "ALTER TABLE file_tags_v2 RENAME TO file_tags",
-        ],
-        "write",
-      );
+        "INSERT INTO file_tags_v2 SELECT file_id, tag_name FROM file_tags",
+        "DROP TABLE file_tags",
+        "DROP TABLE files",
+        "ALTER TABLE files_v2 RENAME TO files",
+        "ALTER TABLE file_tags_v2 RENAME TO file_tags",
+      ]);
+      migrated = true;
+      await transaction.commit();
+    } catch (error) {
+      if (transaction) await transaction.rollback();
+      throw error;
     } finally {
+      transaction?.close();
+      await this.client.execute("PRAGMA busy_timeout = 5000");
       await this.client.execute("PRAGMA foreign_keys = ON");
     }
+    if (!migrated) return;
     const violations = await this.client.execute("PRAGMA foreign_key_check");
     if (violations.rows.length > 0) {
       throw new AppError(

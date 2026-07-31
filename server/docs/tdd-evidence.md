@@ -118,5 +118,13 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       resolve, while still requiring the canonical CSRF origin for unauthenticated
       cookie requests and preserving 401 for requests with no credentials.
 
+22. Concurrent legacy migration serialization
+    - RED: the deterministic two-client migration regression reproduced owner loss:
+      a member-owned private row inserted after the first startup was recopied with
+      `owner_id = NULL` by the delayed second migration.
+    - GREEN: migration startup now retries nonblocking acquisition of a write
+      transaction, rechecks the live schema under that lock, and only rebuilds a
+      still-legacy table; the delayed second startup preserves the owner.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
