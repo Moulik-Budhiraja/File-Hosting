@@ -92,5 +92,13 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: list/find now expose `--protected`, send `visibility=protected`, and
       reject every conflicting visibility-flag combination.
 
+18. Compose bootstrap forwarding
+    - RED: `node --test tests/compose.test.mjs` could not find either bootstrap
+      variable in the service environment.
+    - GREEN: Compose now forwards both optional values from repository `.env`, the
+      example documents their one-time use, and the focused test passes. Local
+      `docker compose config --quiet` validation was unavailable because Docker is
+      not installed in this runner.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
