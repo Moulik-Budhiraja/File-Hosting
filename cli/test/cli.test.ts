@@ -1066,6 +1066,443 @@ test("extraction honors pax size overrides for framing, like the server", async 
   await assert.rejects(readFile(bigDestination), { code: "ENOENT" });
 });
 
+function rawPaxRecord(key: string, value: string): string {
+  let length = key.length + value.length + 3;
+  for (;;) {
+    const next = String(length).length + key.length + value.length + 3;
+    if (next === length) return `${length} ${key}=${value}\n`;
+    length = next;
+  }
+}
+
+test("extraction rejects nested .. hardlink targets in all override variants", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "hard-regular.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          rawTarEntry("dir/link", "", { type: "1", linkname: "../outside" }),
+        ]),
+      ),
+    },
+    {
+      name: "hard-gnu.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          stripMarker(
+            rawTarEntry("././@LongLink", "../outside\0", { type: "K" }),
+          ),
+          rawTarEntry("dir/link", "", { type: "1", linkname: "placeholder" }),
+        ]),
+      ),
+    },
+    {
+      name: "hard-pax-local.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          stripMarker(
+            rawTarEntry(
+              "PaxHeader/link",
+              rawPaxRecord("linkpath", "../outside"),
+              { type: "x" },
+            ),
+          ),
+          rawTarEntry("dir/link", "", { type: "1", linkname: "placeholder" }),
+        ]),
+      ),
+    },
+    {
+      name: "hard-pax-global.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("linkpath", "../outside"), {
+              type: "g",
+            }),
+          ),
+          rawTarEntry("dir/link", "", { type: "1", linkname: "placeholder" }),
+        ]),
+      ),
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /unsafe link/i, fixture.name);
+    // Never a partial destination: the pre-fix behavior published safe.txt
+    // and silently dropped the hardlink.
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+    await assert.rejects(readFile(join(scratch, "outside")), {
+      code: "ENOENT",
+    });
+  }
+});
+
+test("extraction rejects unmaterializable hardlink targets", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "hard-missing.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("safe.txt", "safe")),
+          rawTarEntry("link", "", { type: "1", linkname: "absent.txt" }),
+        ]),
+      ),
+    },
+    {
+      name: "hard-forward.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(
+            rawTarEntry("link", "", { type: "1", linkname: "later.txt" }),
+          ),
+          rawTarEntry("later.txt", "content"),
+        ]),
+      ),
+    },
+    {
+      name: "hard-cycle.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("l1", "", { type: "1", linkname: "l2" })),
+          rawTarEntry("l2", "", { type: "1", linkname: "l1" }),
+        ]),
+      ),
+    },
+    {
+      name: "hard-dir.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("d/", "", { type: "5" })),
+          rawTarEntry("link", "", { type: "1", linkname: "d" }),
+        ]),
+      ),
+    },
+    {
+      name: "hard-symlink.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "content")),
+          stripMarker(
+            rawTarEntry("s", "", { type: "2", linkname: "real.txt" }),
+          ),
+          rawTarEntry("link", "", { type: "1", linkname: "s" }),
+        ]),
+      ),
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /hardlink target/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+test("extraction preserves an existing destination when a hardlink is rejected under --force", async () => {
+  const destination = join(scratch, "keep-hardlink");
+  await writeFile(destination, "existing content");
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("safe.txt", "safe")),
+      rawTarEntry("dir/link", "", { type: "1", linkname: "../outside" }),
+    ]),
+  );
+  const item = service.seed(
+    { name: "hard-force.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const result = await cli([
+    "down",
+    item.id,
+    "--extract",
+    "-o",
+    destination,
+    "--force",
+  ]);
+  assert.equal(result.code, 1);
+  assert.equal(await readFile(destination, "utf8"), "existing content");
+});
+
+test("a valid hardlink extracts completely, including chains", async () => {
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("a.txt", "content")),
+      stripMarker(rawTarEntry("hard1", "", { type: "1", linkname: "a.txt" })),
+      rawTarEntry("hard2", "", { type: "1", linkname: "hard1" }),
+    ]),
+  );
+  const item = service.seed(
+    { name: "hard-ok.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const destination = join(scratch, "hard-ok-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  // Every accepted entry must be materialized — no silent partial success.
+  assert.equal(await readFile(join(destination, "a.txt"), "utf8"), "content");
+  assert.equal(await readFile(join(destination, "hard1"), "utf8"), "content");
+  assert.equal(await readFile(join(destination, "hard2"), "utf8"), "content");
+});
+
+test("extraction rejects non-portable Windows names and destination aliases", async () => {
+  const unsafePaths: Array<{ name: string; entry: string }> = [
+    { name: "device-plain.tar.gz", entry: "CON" },
+    { name: "device-ext.tar.gz", entry: "nul.txt" },
+    { name: "device-nested.tar.gz", entry: "dir/COM1.log" },
+    { name: "device-super.tar.gz", entry: "com¹" },
+    { name: "device-clock.tar.gz", entry: "CLOCK$" },
+    { name: "ads.tar.gz", entry: "file:stream" },
+    { name: "trailing-dot.tar.gz", entry: "name." },
+    { name: "trailing-space.tar.gz", entry: "dir/trailing " },
+    { name: "control.tar.gz", entry: "ctrl\u0007.txt" },
+  ];
+  for (const fixture of unsafePaths) {
+    const bytes = gzipSync(rawTarEntry(fixture.entry, "x"));
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: bytes.length },
+      bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /unsafe path/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+
+  // Device basename as a link target.
+  const linkBytes = gzipSync(
+    rawTarEntry("link", "", { type: "2", linkname: "NUL.txt" }),
+  );
+  const linkItem = service.seed(
+    { name: "device-link.tar.gz", archive: "tar.gz", size: linkBytes.length },
+    linkBytes,
+  );
+  const linkResult = await cli([
+    "down",
+    linkItem.id,
+    "--extract",
+    "-o",
+    join(scratch, "device-link-out"),
+  ]);
+  assert.equal(linkResult.code, 1);
+  assert.match(linkResult.stderr.text, /unsafe link/i);
+
+  const collisions: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "case-collision.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("File.txt", "a")),
+          rawTarEntry("file.txt", "b"),
+        ]),
+      ),
+    },
+    {
+      name: "nfc-nfd-collision.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("caf\u00e9.txt", "nfc")),
+          rawTarEntry("cafe\u0301.txt", "nfd"),
+        ]),
+      ),
+    },
+    {
+      name: "file-vs-parent.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("a", "file")),
+          rawTarEntry("a/b.txt", "child"),
+        ]),
+      ),
+    },
+  ];
+  for (const fixture of collisions) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /conflicting/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+test("extraction keeps ordinary Unicode and device look-alike names", async () => {
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(rawTarEntry("résumé.txt", "unicode")),
+      stripMarker(rawTarEntry("COM10.log", "not a device")),
+      rawTarEntry("console.log", "fine"),
+    ]),
+  );
+  const item = service.seed(
+    { name: "ordinary.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const destination = join(scratch, "ordinary-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  assert.equal(
+    await readFile(join(destination, "résumé.txt"), "utf8"),
+    "unicode",
+  );
+  assert.equal(
+    await readFile(join(destination, "COM10.log"), "utf8"),
+    "not a device",
+  );
+});
+
+test("extraction rejects empty and dot path segments without publishing", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "empty-entry-segment.tar.gz",
+      bytes: gzipSync(rawTarEntry("dir//file.txt", "x")),
+    },
+    {
+      name: "dot-entry-segment.tar.gz",
+      bytes: gzipSync(rawTarEntry("dir/./file.txt", "x")),
+    },
+    {
+      name: "regular-trailing-separator.tar.gz",
+      bytes: gzipSync(rawTarEntry("regular.txt/", "x")),
+    },
+    {
+      name: "empty-symlink-segment.tar.gz",
+      bytes: gzipSync(
+        rawTarEntry("link", "", { type: "2", linkname: "dir//name" }),
+      ),
+    },
+    {
+      name: "dot-hardlink-segment.tar.gz",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("a/file.txt", "content")),
+          rawTarEntry("hard", "", { type: "1", linkname: "a/./file.txt" }),
+        ]),
+      ),
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      Buffer.from(fixture.bytes),
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /unsafe (?:path|link)/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+
+  const existing = join(scratch, "keep-empty-segment");
+  await writeFile(existing, "existing content");
+  const first = fixtures[0]!;
+  const item = service.seed(
+    { name: first.name, archive: "tar.gz", size: first.bytes.length },
+    Buffer.from(first.bytes),
+  );
+  const forced = await cli([
+    "down",
+    item.id,
+    "--extract",
+    "-o",
+    existing,
+    "--force",
+  ]);
+  assert.equal(forced.code, 1);
+  assert.equal(await readFile(existing, "utf8"), "existing content");
+});
+
+test("extraction rejects non-zero entry content padding without touching destinations", async () => {
+  // 1 content byte, hostile 0x41 fill through the remaining 511 padding
+  // bytes of the content record.
+  const entry = stripMarker(rawTarEntry("pad.txt", "A"));
+  entry.fill(0x41, 513);
+  const bytes = gzipSync(Buffer.concat([entry, Buffer.alloc(1024)]));
+  const item = service.seed(
+    { name: "nonzero-padding.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const fresh = join(scratch, "nonzero-padding-out");
+  const result = await cli(["down", item.id, "--extract", "-o", fresh]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr.text, /entry padding/i);
+  await assert.rejects(readFile(fresh), { code: "ENOENT" });
+
+  const existing = join(scratch, "keep-padding");
+  await writeFile(existing, "existing content");
+  const forced = await cli([
+    "down",
+    item.id,
+    "--extract",
+    "-o",
+    existing,
+    "--force",
+  ]);
+  assert.equal(forced.code, 1);
+  assert.equal(await readFile(existing, "utf8"), "existing content");
+});
+
+// Second line of defense behind the strict scan: extraction publishes only
+// when every scanner-accepted entry actually materialized. node-tar runs in
+// strict mode with warnings made fatal, and the staged tree is verified
+// against the scan manifest before the atomic rename.
+test("the extraction warning guard makes every node-tar warning fatal", async () => {
+  const extract = await import("../src/extract.js");
+  const candidate = (extract as unknown as Record<string, unknown>)[
+    "throwIfExtractionWarnings"
+  ];
+  assert.equal(typeof candidate, "function");
+  const guard = candidate as (warnings: string[]) => void;
+  assert.throws(
+    () => guard(["TAR_ENTRY_ERROR: skipped hardlink"]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /reported warnings/i);
+      assert.match(error.message, /TAR_ENTRY_ERROR/);
+      return true;
+    },
+  );
+  guard([]);
+});
+
+test("the extraction completeness guard rejects a staging tree missing a manifest entry", async () => {
+  const extract = await import("../src/extract.js");
+  assert.equal(typeof extract.verifyExtractionCompleteness, "function");
+  const staging = await mkdtemp(join(scratch, "completeness-"));
+  await writeFile(join(staging, "present.txt"), "x");
+  await extract.verifyExtractionCompleteness(staging, ["present.txt"]);
+  await assert.rejects(
+    extract.verifyExtractionCompleteness(staging, [
+      "present.txt",
+      "missing/entry.txt",
+    ]),
+    (error: unknown) => {
+      assert.ok(error instanceof Error);
+      assert.match(error.message, /missing\/entry\.txt/);
+      return true;
+    },
+  );
+});
+
 test("extraction fails cleanly on garbage bytes marked archive=tar.gz", async () => {
   const item = service.seed(
     { name: "garbage.tar.gz", archive: "tar.gz", size: 24 },

@@ -1,8 +1,9 @@
 // Streaming structural validation for uploads marked archive=tar.gz. The
 // stored object is the original compressed bytes; validation only proves the
 // contract (gzip stream containing a complete, safe tar) before any
-// metadata/object commit. Nothing is extracted to the filesystem and memory
-// stays O(1): decompressed content is discarded after header inspection.
+// metadata/object commit. Nothing is extracted to the filesystem; content is
+// discarded after header inspection, so memory is O(entries) for the path
+// index that hardlink-target validation needs, never O(content).
 //
 // A hand-rolled header walker is used instead of node-tar's parser because
 // node-tar (strict mode) accepts archives whose end-of-archive trailer is
@@ -16,6 +17,7 @@ const BLOCK = 512;
 // Metadata entries (pax headers, GNU long names) legitimately carry small
 // path payloads; anything larger is hostile or corrupt.
 const METADATA_ENTRY_LIMIT = 1024 * 1024;
+const DEFAULT_MAX_ENTRIES = 100_000;
 // Decompression-bomb guard: output may not exceed maxRatio × input (with a
 // small floor so tiny archives are never false-rejected). gzip/DEFLATE tops
 // out near 1030:1, so 2048 never rejects a legitimate archive.
@@ -71,25 +73,87 @@ function checksumMatches(block: Buffer): boolean {
 // (C:x) forms.
 const WINDOWS_DRIVE_PREFIX = /^[A-Za-z]:/u;
 
+// Portable per-segment policy: a segment must denote the same ordinary
+// file on every consumer OS. Windows reserves DOS device basenames (even
+// with extensions, and with the superscript-digit spellings it recognizes),
+// treats `:` as an alternate-data-stream separator, strips trailing dots and
+// spaces, and forbids control characters — so all of these reject on every
+// host.
+const RESERVED_DEVICE_BASENAMES =
+  /^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9¹²³]|LPT[1-9¹²³])$/iu;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
+
+function isUnsafePortableSegment(segment: string): boolean {
+  if (segment.includes(":")) return true;
+  if (CONTROL_CHARS.test(segment)) return true;
+  if (segment.endsWith(".") || segment.endsWith(" ")) return true;
+  const base = segment.split(".", 1)[0]!.replace(/[. ]+$/u, "");
+  return RESERVED_DEVICE_BASENAMES.test(base);
+}
+
+function normalizeEntryPath(path: string): string | null {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.startsWith("/")) return null;
+  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
+  const segments = normalized.split("/");
+  // Preserve compatibility with the conventional tar `./name` prefix and
+  // directory trailing slash, but reject empty/dot segments everywhere else.
+  if (segments[0] === ".") segments.shift();
+  if (segments.at(-1) === "") segments.pop();
+  if (
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    return null;
+  }
+  return segments.join("/");
+}
+
 export function isUnsafeArchivePath(entryPath: string): boolean {
-  const normalized = entryPath.replaceAll("\\", "/");
-  if (normalized.startsWith("/")) return true;
-  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return true;
-  return normalized.split("/").includes("..");
+  const normalized = normalizeEntryPath(entryPath);
+  if (normalized === null) return true;
+  return normalized.split("/").filter(Boolean).some(isUnsafePortableSegment);
+}
+
+// Tar hardlink linknames are archive-root-relative (unlike symlinks, which
+// resolve from the entry's parent directory). Returns the normalized
+// root-relative path — `.` and empty segments dropped, matching how the
+// shipped extractor normalizes paths — or null when the target is absolute,
+// drive/device-formed, or contains any `..` component.
+function normalizeRootRelative(path: string): string | null {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.startsWith("/")) return null;
+  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
+  const segments = normalized.split("/");
+  if (
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    return null;
+  }
+  return segments.join("/");
 }
 
 function isUnsafeLinkTarget(entryPath: string, linkTarget: string): boolean {
   const normalizedTarget = linkTarget.replaceAll("\\", "/");
   if (normalizedTarget.startsWith("/")) return true;
   if (WINDOWS_DRIVE_PREFIX.test(normalizedTarget)) return true;
-  const parent = entryPath.replaceAll("\\", "/").split("/").slice(0, -1);
+  const normalizedEntry = normalizeEntryPath(entryPath);
+  if (normalizedEntry === null) return true;
+  const parent =
+    normalizedEntry === "" ? [] : normalizedEntry.split("/").slice(0, -1);
   const segments = [...parent];
   for (const segment of normalizedTarget.split("/")) {
-    if (segment === "" || segment === ".") continue;
+    if (segment === "" || segment === ".") return true;
     if (segment === "..") {
       if (segments.length === 0) return true;
       segments.pop();
     } else {
+      // `..`/`.` are traversal syntax judged by containment above; every
+      // named segment must additionally be portable on its own.
+      if (isUnsafePortableSegment(segment)) return true;
       segments.push(segment);
     }
   }
@@ -150,11 +214,67 @@ class TarWalker {
   private globalLink: string | null = null;
   private globalSize: number | null = null;
   private entrySeen = false;
+  private entryCount = 0;
+  // Normalized root-relative paths a hardlink may legally target: regular
+  // files and previously accepted hardlinks (which chain back to one).
+  // Backward-only references make cycles impossible by construction.
+  private readonly materializable = new Set<string>();
+  // Destination manifest keyed by the collision key (NFC + lowercase per
+  // segment): paths that alias under Windows/macOS case or Unicode
+  // normalization rules would extract nondeterministically across
+  // platforms, so any conflicting claim rejects deterministically here.
+  private readonly manifest = new Map<
+    string,
+    { kind: "file" | "hardlink" | "symlink" | "dir"; spelling: string }
+  >();
+
+  private static collisionKey(normalizedPath: string): string {
+    return normalizedPath
+      .split("/")
+      .map((segment) => segment.normalize("NFC").toLowerCase())
+      .join("/");
+  }
+
+  private claimPath(
+    spelling: string,
+    kind: "file" | "hardlink" | "symlink" | "dir",
+  ): void {
+    const key = TarWalker.collisionKey(spelling);
+    const existing = this.manifest.get(key);
+    if (!existing) {
+      this.manifest.set(key, { kind, spelling });
+      return;
+    }
+    // Only an identically spelled directory redeclaration is idempotent
+    // (implicit parents, or explicit dir entries before/after children).
+    if (
+      existing.kind === "dir" &&
+      kind === "dir" &&
+      existing.spelling === spelling
+    ) {
+      return;
+    }
+    throw invalid("archive contains conflicting entry paths");
+  }
+
+  private recordEntry(
+    normalizedPath: string,
+    kind: "file" | "hardlink" | "symlink" | "dir",
+  ): void {
+    const segments = normalizedPath.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      this.claimPath(segments.slice(0, index).join("/"), "dir");
+    }
+    this.claimPath(normalizedPath, kind);
+  }
 
   // Largest decompressed size a single entry may declare. Derived from the
   // configured upload maximum × the gzip ratio ceiling; Infinity when no
   // maximum is configured.
-  constructor(private readonly maxEntryBytes = Infinity) {}
+  constructor(
+    private readonly maxEntryBytes = Infinity,
+    private readonly maxEntries = DEFAULT_MAX_ENTRIES,
+  ) {}
 
   push(data: Buffer): void {
     let offset = 0;
@@ -187,6 +307,13 @@ class TarWalker {
       }
       if (this.paddingRemaining > 0) {
         const take = Math.min(this.paddingRemaining, data.length - offset);
+        // Tar specifies unused record bytes as NUL-filled; non-zero bytes
+        // hidden in content padding are not verifiable structure.
+        for (let index = offset; index < offset + take; index += 1) {
+          if (data[index] !== 0) {
+            throw invalid("archive entry padding contains non-zero bytes");
+          }
+        }
         this.paddingRemaining -= take;
         offset += take;
         continue;
@@ -266,6 +393,12 @@ class TarWalker {
         throw invalid(`unsupported archive entry type ${JSON.stringify(type)}`);
       }
       this.entrySeen = true;
+      this.entryCount += 1;
+      if (this.entryCount > this.maxEntries) {
+        throw invalid(
+          `archive exceeds the ${this.maxEntries.toLocaleString("en-US")} entry safety limit`,
+        );
+      }
       frameSize = this.overrideSize ?? this.globalSize ?? size;
       const entryPath = this.overridePath ?? this.globalPath ?? headerPath;
       if (entryPath === "" || isUnsafeArchivePath(entryPath)) {
@@ -273,12 +406,63 @@ class TarWalker {
       }
       const headerLink = cString(block.subarray(157, 257));
       const linkTarget = this.overrideLink ?? this.globalLink ?? headerLink;
-      if (
-        (type === "1" || type === "2") &&
+      if (type === "1") {
+        // Hardlink targets resolve from the archive root, never from the
+        // containing entry; any `..` component (or absolute/device form)
+        // therefore rejects outright, and the target must already be
+        // declared as a materializable regular file so the extractor is
+        // guaranteed to produce it.
+        const target = linkTarget ? normalizeRootRelative(linkTarget) : null;
+        if (
+          target === null ||
+          target === "" ||
+          target.split("/").some(isUnsafePortableSegment)
+        ) {
+          throw invalid("archive contains an unsafe link target");
+        }
+        if (!this.materializable.has(target)) {
+          throw invalid(
+            "archive hardlink target is not an already-declared regular file",
+          );
+        }
+      } else if (
+        type === "2" &&
         linkTarget &&
         isUnsafeLinkTarget(entryPath, linkTarget)
       ) {
         throw invalid("archive contains an unsafe link target");
+      }
+      const trailingSeparator = entryPath.replaceAll("\\", "/").endsWith("/");
+      if (
+        trailingSeparator &&
+        type !== "5" &&
+        !(type === "0" && frameSize === 0)
+      ) {
+        throw invalid("archive contains an unsafe entry path");
+      }
+      const normalizedPath = normalizeEntryPath(entryPath) ?? "";
+      // Pre-ustar tars spell directories as regular entries with a trailing
+      // slash; the shipped extractor coerces those to directories, so the
+      // manifest must agree.
+      const isDir = type === "5" || trailingSeparator;
+      if (normalizedPath === "") {
+        // Only the archive root itself ("./" or ".") may normalize to
+        // nothing, and only as a directory.
+        if (!isDir) throw invalid("archive contains an unsafe entry path");
+      } else {
+        this.recordEntry(
+          normalizedPath,
+          isDir
+            ? "dir"
+            : type === "1"
+              ? "hardlink"
+              : type === "2"
+                ? "symlink"
+                : "file",
+        );
+        if (!isDir && (type === "0" || type === "1")) {
+          this.materializable.add(normalizedPath);
+        }
       }
       this.overridePath = null;
       this.overrideLink = null;
@@ -361,7 +545,13 @@ export class TarGzArchiveValidator {
   private decompressedBytes = 0;
   private failure: AppError | null = null;
 
-  constructor(options: { maxRatio?: number; maxUploadBytes?: number } = {}) {
+  constructor(
+    options: {
+      maxRatio?: number;
+      maxUploadBytes?: number;
+      maxEntries?: number;
+    } = {},
+  ) {
     this.maxRatio = options.maxRatio ?? DEFAULT_MAX_RATIO;
     // With a configured upload maximum, no entry can decompress beyond
     // maxRatio × that maximum — declared sizes above it are impossible and
@@ -370,6 +560,7 @@ export class TarGzArchiveValidator {
       options.maxUploadBytes && options.maxUploadBytes > 0
         ? options.maxUploadBytes * this.maxRatio
         : Infinity,
+      options.maxEntries ?? DEFAULT_MAX_ENTRIES,
     );
     this.gunzip = createGunzip();
     this.gunzip.on("data", (chunk: Buffer) => {

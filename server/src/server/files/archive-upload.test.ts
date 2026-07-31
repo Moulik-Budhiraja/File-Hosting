@@ -189,6 +189,189 @@ describe("archive upload contract", { concurrency: false }, () => {
     );
   });
 
+  it("rejects nested .. hardlink targets with no persistence, in all override variants", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    function paxRecord(key: string, value: string): string {
+      let length = key.length + value.length + 3;
+      for (;;) {
+        const next = String(length).length + key.length + value.length + 3;
+        if (next === length) return `${length} ${key}=${value}\n`;
+        length = next;
+      }
+    }
+    const fixtures = [
+      // Regular header linkname.
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry("dir/", "", { type: "5" }),
+        tarEntry("dir/link", "", { type: "1", linkname: "../outside" }),
+        tarTrailer(),
+      ]),
+      // GNU longlink override.
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry("././@LongLink", "../outside\0", { type: "K" }),
+        tarEntry("dir/link", "", { type: "1", linkname: "placeholder" }),
+        tarTrailer(),
+      ]),
+      // Local pax linkpath override.
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry("PaxHeader/link", paxRecord("linkpath", "../outside"), {
+          type: "x",
+        }),
+        tarEntry("dir/link", "", { type: "1", linkname: "placeholder" }),
+        tarTrailer(),
+      ]),
+      // Global pax linkpath override.
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry("GlobalHead", paxRecord("linkpath", "../outside"), {
+          type: "g",
+        }),
+        tarEntry("dir/link", "", { type: "1", linkname: "placeholder" }),
+        tarTrailer(),
+      ]),
+      // Missing target (unmaterializable even without traversal).
+      Buffer.concat([
+        tarEntry("safe.txt", "safe"),
+        tarEntry("link", "", { type: "1", linkname: "absent.txt" }),
+        tarTrailer(),
+      ]),
+    ];
+    for (const [index, fixture] of fixtures.entries()) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`hardlink-${index}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
+  it("rejects non-portable Windows names and collision aliases with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const fixtures = [
+      // DOS device basename with extension.
+      Buffer.concat([tarEntry("dir/CON.txt", "x"), tarTrailer()]),
+      // Alternate data stream colon.
+      Buffer.concat([tarEntry("dir/file:stream", "x"), tarTrailer()]),
+      // Trailing dot segment.
+      Buffer.concat([tarEntry("trailing.", "x"), tarTrailer()]),
+      // Empty and dot segments outside the conventional leading `./` prefix.
+      Buffer.concat([tarEntry("dir//file.txt", "x"), tarTrailer()]),
+      Buffer.concat([tarEntry("dir/./file.txt", "x"), tarTrailer()]),
+      // Case-only collision.
+      Buffer.concat([
+        tarEntry("File.txt", "a"),
+        tarEntry("file.txt", "b"),
+        tarTrailer(),
+      ]),
+      // Device basename as a symlink target.
+      Buffer.concat([
+        tarEntry("link", "", { type: "2", linkname: "NUL.txt" }),
+        tarTrailer(),
+      ]),
+      Buffer.concat([
+        tarEntry("link", "", { type: "2", linkname: "dir//target" }),
+        tarTrailer(),
+      ]),
+    ];
+    for (const [index, fixture] of fixtures.entries()) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`portable-${index}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
+  it("rejects empty and dot path segments with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const fixtures = [
+      Buffer.concat([tarEntry("dir//file.txt", "x"), tarTrailer()]),
+      Buffer.concat([tarEntry("dir/./file.txt", "x"), tarTrailer()]),
+      Buffer.concat([tarEntry("regular.txt/", "x"), tarTrailer()]),
+      Buffer.concat([
+        tarEntry("link", "", { type: "2", linkname: "dir//target" }),
+        tarTrailer(),
+      ]),
+    ];
+    for (const [index, fixture] of fixtures.entries()) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`segment-${index}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
+  it("rejects non-zero entry content padding with no persistence", async () => {
+    const { tarHeader, tarTrailer } = await import("./tar-fixtures");
+    const bytes = gzipSync(
+      Buffer.concat([
+        tarHeader("pad.txt", 1),
+        Buffer.alloc(512, 0x41),
+        tarTrailer(),
+      ]),
+    );
+    const beforeState = await storeState();
+    await assert.rejects(
+      service.upload(stream(bytes), uploadOptions("nonzero-padding.tar.gz")),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.status, 400);
+        assert.equal(error.code, "invalid_archive");
+        assert.match(error.message, /entry padding/u);
+        return true;
+      },
+    );
+    assert.deepEqual(await storeState(), beforeState);
+  });
+
+  it("accepts and stores an archive with a valid materializable hardlink", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const bytes = gzipSync(
+      Buffer.concat([
+        tarEntry("a.txt", "content"),
+        tarEntry("b", "", { type: "1", linkname: "a.txt" }),
+        tarTrailer(),
+      ]),
+    );
+    const file = await service.upload(
+      stream(bytes),
+      uploadOptions("hardlink-ok.tar.gz"),
+    );
+    assert.equal(file.archive, "tar.gz");
+    await service.delete(file.id);
+  });
+
   it("accepts a structurally valid tar.gz and stores the original bytes", async () => {
     const bytes = validTarGz();
     const file = await service.upload(

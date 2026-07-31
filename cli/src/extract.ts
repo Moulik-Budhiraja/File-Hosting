@@ -20,6 +20,34 @@ async function exists(path: string): Promise<boolean> {
   }
 }
 
+export function throwIfExtractionWarnings(warnings: string[]): void {
+  if (warnings.length === 0) return;
+  throw new CliError(
+    `Archive extraction reported warnings: ${warnings.join("; ")}`,
+    EXIT.general,
+    "EXTRACT_FAILED",
+  );
+}
+
+// Second line of defense behind the strict pre-scan: every scanner-accepted
+// entry must actually exist in the staged tree before the destination is
+// published. A skipped entry (for any reason node-tar might choose) would
+// otherwise become a silently incomplete "successful" extraction.
+export async function verifyExtractionCompleteness(
+  root: string,
+  entries: string[],
+): Promise<void> {
+  for (const entry of entries) {
+    if (!(await exists(join(root, ...entry.split("/"))))) {
+      throw new CliError(
+        `Archive extraction is incomplete: ${entry} was not materialized`,
+        EXIT.general,
+        "INCOMPLETE_EXTRACTION",
+      );
+    }
+  }
+}
+
 export async function extractArchive(
   archivePath: string,
   outputPath: string,
@@ -40,7 +68,7 @@ export async function extractArchive(
   // framing and budgets) before a single byte is written. node-tar alone
   // cannot enforce trailer completeness or trailing-data rejection.
   const compressedBytes = (await stat(archivePath)).size;
-  await scanTarGzArchive(archivePath, compressedBytes);
+  const manifest = await scanTarGzArchive(archivePath, compressedBytes);
 
   const parent = dirname(destination);
   await mkdir(parent, { recursive: true });
@@ -50,12 +78,21 @@ export async function extractArchive(
   const staging = join(stagingRoot, "content");
   await mkdir(staging);
   try {
+    // strict makes node-tar's warnings (skipped/invalid entries, zlib
+    // trouble) reject the promise instead of silently resolving; onwarn is a
+    // belt-and-braces collector so nothing downgraded to a warning can slip
+    // through. Either path aborts before the destination is touched.
+    const warnings: string[] = [];
     await tar.extract({
       file: archivePath,
       cwd: staging,
       preservePaths: false,
       unlink: true,
+      strict: true,
+      onwarn: (code, message) => warnings.push(`${code}: ${message}`),
     });
+    throwIfExtractionWarnings(warnings);
+    await verifyExtractionCompleteness(staging, manifest.entries);
     if (force) await rm(destination, { recursive: true, force: true });
     await rename(staging, destination);
   } finally {

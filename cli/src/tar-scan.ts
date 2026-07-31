@@ -71,11 +71,67 @@ function unsafe(message: string): CliError {
   return new CliError(message, EXIT.general, "UNSAFE_ARCHIVE");
 }
 
+// Portable per-segment policy, mirroring the server: a segment must denote
+// the same ordinary file on every consumer OS. Windows reserves DOS device
+// basenames (even with extensions, and the superscript-digit spellings it
+// recognizes), treats `:` as an alternate-data-stream separator, strips
+// trailing dots and spaces, and forbids control characters — so all of
+// these reject on every host.
+const RESERVED_DEVICE_BASENAMES =
+  /^(?:CON|PRN|AUX|NUL|CLOCK\$|COM[1-9¹²³]|LPT[1-9¹²³])$/iu;
+const CONTROL_CHARS = /[\u0000-\u001f\u007f]/u;
+
+function isUnsafePortableSegment(segment: string): boolean {
+  if (segment.includes(":")) return true;
+  if (CONTROL_CHARS.test(segment)) return true;
+  if (segment.endsWith(".") || segment.endsWith(" ")) return true;
+  const base = segment.split(".", 1)[0]!.replace(/[. ]+$/u, "");
+  return RESERVED_DEVICE_BASENAMES.test(base);
+}
+
+function normalizeEntryPath(path: string): string | null {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.startsWith("/")) return null;
+  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
+  const segments = normalized.split("/");
+  // Preserve compatibility with the conventional tar `./name` prefix and
+  // directory trailing slash, but reject empty/dot segments everywhere else.
+  if (segments[0] === ".") segments.shift();
+  if (segments.at(-1) === "") segments.pop();
+  if (
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    return null;
+  }
+  return segments.join("/");
+}
+
 export function isUnsafeArchivePath(entryPath: string): boolean {
-  const normalized = entryPath.replaceAll("\\", "/");
-  if (normalized.startsWith("/")) return true;
-  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return true;
-  return normalized.split("/").includes("..");
+  const normalized = normalizeEntryPath(entryPath);
+  if (normalized === null) return true;
+  return normalized.split("/").filter(Boolean).some(isUnsafePortableSegment);
+}
+
+// Tar hardlink linknames are archive-root-relative (unlike symlinks, which
+// resolve from the entry's parent directory). Returns the normalized
+// root-relative path — `.` and empty segments dropped, matching how
+// node-tar normalizes paths — or null when the target is absolute,
+// drive/device-formed, or contains any `..` component.
+function normalizeRootRelative(path: string): string | null {
+  const normalized = path.replaceAll("\\", "/");
+  if (normalized.startsWith("/")) return null;
+  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return null;
+  const segments = normalized.split("/");
+  if (
+    segments.some(
+      (segment) => segment === "" || segment === "." || segment === "..",
+    )
+  ) {
+    return null;
+  }
+  return segments.join("/");
 }
 
 export function isUnsafeLinkTarget(
@@ -85,14 +141,20 @@ export function isUnsafeLinkTarget(
   const normalizedTarget = linkTarget.replaceAll("\\", "/");
   if (normalizedTarget.startsWith("/")) return true;
   if (WINDOWS_DRIVE_PREFIX.test(normalizedTarget)) return true;
-  const parent = entryPath.replaceAll("\\", "/").split("/").slice(0, -1);
+  const normalizedEntry = normalizeEntryPath(entryPath);
+  if (normalizedEntry === null) return true;
+  const parent =
+    normalizedEntry === "" ? [] : normalizedEntry.split("/").slice(0, -1);
   const segments = [...parent];
   for (const segment of normalizedTarget.split("/")) {
-    if (segment === "" || segment === ".") continue;
+    if (segment === "" || segment === ".") return true;
     if (segment === "..") {
       if (segments.length === 0) return true;
       segments.pop();
     } else {
+      // `..`/`.` are traversal syntax judged by containment above; every
+      // named segment must additionally be portable on its own.
+      if (isUnsafePortableSegment(segment)) return true;
       segments.push(segment);
     }
   }
@@ -177,11 +239,7 @@ class TarScanWalker {
   private done = false;
   private capture: Buffer[] | null = null;
   private captureKind:
-    | "gnu-path"
-    | "gnu-link"
-    | "pax-next"
-    | "pax-global"
-    | null = null;
+    "gnu-path" | "gnu-link" | "pax-next" | "pax-global" | null = null;
   private captured = 0;
   private overridePath: string | null = null;
   private overrideLink: string | null = null;
@@ -191,8 +249,63 @@ class TarScanWalker {
   private globalSize: number | null = null;
   private entryCount = 0;
   private uncompressedBytes = 0;
+  // Normalized root-relative paths a hardlink may legally target: regular
+  // files and previously accepted hardlinks (which chain back to one).
+  // Backward-only references make cycles impossible by construction.
+  private readonly materializable = new Set<string>();
+  // Destination manifest keyed by the collision key (NFC + lowercase per
+  // segment): paths that alias under Windows/macOS case or Unicode
+  // normalization rules would extract nondeterministically across
+  // platforms, so any conflicting claim rejects deterministically here.
+  private readonly manifest = new Map<
+    string,
+    { kind: "file" | "hardlink" | "symlink" | "dir"; spelling: string }
+  >();
+  // Every accepted entry path, in order — extraction verifies each one
+  // materialized before the destination is published.
+  readonly expectedPaths: string[] = [];
 
   constructor(private readonly compressedBytes: number) {}
+
+  private static collisionKey(normalizedPath: string): string {
+    return normalizedPath
+      .split("/")
+      .map((segment) => segment.normalize("NFC").toLowerCase())
+      .join("/");
+  }
+
+  private claimPath(
+    spelling: string,
+    kind: "file" | "hardlink" | "symlink" | "dir",
+  ): void {
+    const key = TarScanWalker.collisionKey(spelling);
+    const existing = this.manifest.get(key);
+    if (!existing) {
+      this.manifest.set(key, { kind, spelling });
+      return;
+    }
+    // Only an identically spelled directory redeclaration is idempotent
+    // (implicit parents, or explicit dir entries before/after children).
+    if (
+      existing.kind === "dir" &&
+      kind === "dir" &&
+      existing.spelling === spelling
+    ) {
+      return;
+    }
+    throw unsafe(`Archive contains conflicting entry paths: ${spelling}`);
+  }
+
+  private recordEntry(
+    normalizedPath: string,
+    kind: "file" | "hardlink" | "symlink" | "dir",
+  ): void {
+    const segments = normalizedPath.split("/");
+    for (let index = 1; index < segments.length; index += 1) {
+      this.claimPath(segments.slice(0, index).join("/"), "dir");
+    }
+    this.claimPath(normalizedPath, kind);
+  }
 
   push(data: Buffer): void {
     let offset = 0;
@@ -200,9 +313,7 @@ class TarScanWalker {
       if (this.done) {
         for (let index = offset; index < data.length; index += 1) {
           if (data[index] !== 0) {
-            throw invalid(
-              "Archive has data after the end-of-archive marker",
-            );
+            throw invalid("Archive has data after the end-of-archive marker");
           }
         }
         return;
@@ -223,6 +334,13 @@ class TarScanWalker {
       }
       if (this.paddingRemaining > 0) {
         const take = Math.min(this.paddingRemaining, data.length - offset);
+        // Tar specifies unused record bytes as NUL-filled; non-zero bytes
+        // hidden in content padding are not verifiable structure.
+        for (let index = offset; index < offset + take; index += 1) {
+          if (data[index] !== 0) {
+            throw invalid("Archive entry padding contains non-zero bytes");
+          }
+        }
         this.paddingRemaining -= take;
         offset += take;
         continue;
@@ -302,12 +420,64 @@ class TarScanWalker {
       }
       const headerLink = cString(block.subarray(157, 257));
       const linkTarget = this.overrideLink ?? this.globalLink ?? headerLink;
-      if (
-        (type === "1" || type === "2") &&
+      if (type === "1") {
+        // Hardlink targets resolve from the archive root, never from the
+        // containing entry; any `..` component (or absolute/device form)
+        // rejects outright, and the target must already be declared as a
+        // materializable regular file so extraction is provably complete.
+        const target = linkTarget ? normalizeRootRelative(linkTarget) : null;
+        if (
+          target === null ||
+          target === "" ||
+          target.split("/").some(isUnsafePortableSegment)
+        ) {
+          throw unsafe(`Archive contains an unsafe link: ${entryPath}`);
+        }
+        if (!this.materializable.has(target)) {
+          throw unsafe(
+            `Archive hardlink target is not an already-declared regular file: ${entryPath}`,
+          );
+        }
+      } else if (
+        type === "2" &&
         linkTarget &&
         isUnsafeLinkTarget(entryPath, linkTarget)
       ) {
         throw unsafe(`Archive contains an unsafe link: ${entryPath}`);
+      }
+      const trailingSeparator = entryPath.replaceAll("\\", "/").endsWith("/");
+      if (
+        trailingSeparator &&
+        type !== "5" &&
+        !(type === "0" && frameSize === 0)
+      ) {
+        throw unsafe(`Archive contains an unsafe path: ${entryPath}`);
+      }
+      const normalizedPath = normalizeEntryPath(entryPath) ?? "";
+      // Pre-ustar tars spell directories as regular entries with a trailing
+      // slash; node-tar coerces those to directories, so the manifest must
+      // agree.
+      const isDir = type === "5" || trailingSeparator;
+      if (normalizedPath === "") {
+        // Only the archive root itself ("./" or ".") may normalize to
+        // nothing, and only as a directory.
+        if (!isDir)
+          throw unsafe(`Archive contains an unsafe path: ${entryPath}`);
+      } else {
+        this.recordEntry(
+          normalizedPath,
+          isDir
+            ? "dir"
+            : type === "1"
+              ? "hardlink"
+              : type === "2"
+                ? "symlink"
+                : "file",
+        );
+        this.expectedPaths.push(normalizedPath);
+        if (!isDir && (type === "0" || type === "1")) {
+          this.materializable.add(normalizedPath);
+        }
       }
       this.overridePath = null;
       this.overrideLink = null;
@@ -376,14 +546,21 @@ function parsePaxSize(text: string): number {
   return Number(value);
 }
 
+export interface ArchiveScanManifest {
+  // Normalized root-relative paths of every accepted entry, in archive
+  // order; extraction must materialize each one before publishing.
+  entries: string[];
+}
+
 // Scan the archive file's raw bytes against the strict contract. Resolves
-// only when the whole gzip stream decodes and the tar structure is complete
-// and safe; throws CliError otherwise. Nothing is extracted and memory stays
-// O(1) — decompressed content is discarded after header inspection.
+// with the accepted-entry manifest only when the whole gzip stream decodes
+// and the tar structure is complete and safe; throws CliError otherwise.
+// Nothing is extracted; decompressed content is discarded after header
+// inspection, so memory is O(entries), never O(content).
 export async function scanTarGzArchive(
   archivePath: string,
   compressedBytes: number,
-): Promise<void> {
+): Promise<ArchiveScanManifest> {
   const walker = new TarScanWalker(compressedBytes);
   const gunzip = createGunzip();
   const source = createReadStream(archivePath);
@@ -425,4 +602,5 @@ export async function scanTarGzArchive(
     });
     source.pipe(gunzip);
   });
+  return { entries: walker.expectedPaths };
 }
