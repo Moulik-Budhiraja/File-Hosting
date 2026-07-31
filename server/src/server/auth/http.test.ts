@@ -208,6 +208,39 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     );
   });
 
+  it("clears a stale revoked session cookie idempotently", async () => {
+    const loggedIn = await login(
+      new Request("https://files.example.test/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://files.example.test",
+        },
+        body: JSON.stringify({
+          username: "admin",
+          password: "a sufficiently long admin password",
+        }),
+      }),
+    );
+    const sessionCookie = loggedIn.headers.get("set-cookie")!.split(";", 1)[0]!;
+    await service.auth.revokeSession(
+      decodeURIComponent(sessionCookie.split("=")[1]!),
+    );
+
+    const response = await logout(
+      new Request("https://files.example.test/api/auth/logout", {
+        method: "POST",
+        headers: {
+          cookie: sessionCookie,
+          origin: "https://files.example.test",
+        },
+      }),
+    );
+
+    assert.equal(response.status, 204);
+    assert.match(response.headers.get("set-cookie") ?? "", /Max-Age=0/iu);
+  });
+
   it("ignores malformed percent encoding in session cookies", () => {
     const request = new Request("https://files.example.test/raw/example", {
       headers: { cookie: `${SESSION_COOKIE}=%` },

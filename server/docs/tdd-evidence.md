@@ -112,5 +112,11 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: logout now derives `Secure` from the same canonical public URL HTTPS
       scheme as login.
 
+21. Idempotent stale-session logout
+    - RED: the focused revoked-cookie logout regression returned 401 instead of 204.
+    - GREEN: logout now clears present session cookies even when they no longer
+      resolve, while still requiring the canonical CSRF origin for unauthenticated
+      cookie requests and preserving 401 for requests with no credentials.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
