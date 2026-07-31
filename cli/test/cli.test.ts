@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
 import { mkdtemp, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Readable, Writable } from "node:stream";
 import { after, before, beforeEach, test } from "node:test";
@@ -395,7 +395,7 @@ test("directories require -r and archives retain symlink entries", async () => {
   assert.equal(result.code, 0);
   const [item] = JSON.parse(result.stdout.text) as FileMetadata[];
   assert.equal(item.archive, "tar.gz");
-  assert.equal(item.name, `${root.split("/").at(-1)}.tar.gz`);
+  assert.equal(item.name, `${basename(root)}.tar.gz`);
   const archive = join(scratch, "captured.tar.gz");
   await writeFile(archive, service.files.get(item.id)!.body);
   const entries: Array<{ path: string; type: string }> = [];
