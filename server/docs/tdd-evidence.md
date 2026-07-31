@@ -126,5 +126,17 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       transaction, rechecks the live schema under that lock, and only rebuilds a
       still-legacy table; the delayed second startup preserves the owner.
 
+23. Address-wide pre-bcrypt throttling
+    - RED: five invalid attempts with distinct usernames from one address were
+      followed by another full bcrypt path and `invalid_credentials`, not 429.
+    - GREEN: each attempt now atomically reserves both identity-specific and
+      address-wide slots before bcrypt; either exhausted slot returns 429.
+
+24. Disabled-user password-change race
+    - RED: the focused race disabled a member while bcrypt was in flight, but the
+      self-service password update still completed.
+    - GREEN: expected-hash password updates also require `active = 1` in the same
+      conditional write transaction.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

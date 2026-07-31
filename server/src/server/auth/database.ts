@@ -273,7 +273,7 @@ export class AuthRepository {
     try {
       const result = await transaction.execute({
         sql: `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?${
-          expectedPasswordHash ? " AND password_hash = ?" : ""
+          expectedPasswordHash ? " AND password_hash = ? AND active = 1" : ""
         }`,
         args: expectedPasswordHash
           ? [passwordHash, now.toISOString(), id, expectedPasswordHash]
@@ -341,19 +341,30 @@ export class AuthRepository {
       // Continue through the same bcrypt path to avoid username enumeration.
     }
     const throttleIdentity = username ?? `invalid:${digest(usernameInput)}`;
-    const throttleKey = digest(`${remoteAddress}\0${throttleIdentity}`);
+    const throttleKeys = [
+      digest(`identity\0${remoteAddress}\0${throttleIdentity}`),
+      digest(`address\0${remoteAddress}`),
+    ];
     await this.client.execute({
       sql: "DELETE FROM login_failures WHERE window_started_at <= ?",
       args: [new Date(now.getTime() - LOGIN_WINDOW_MS).toISOString()],
     });
-    const reservation = await this.client.execute({
-      sql: `INSERT INTO login_failures (throttle_key, failures, window_started_at)
-        VALUES (?, 1, ?)
-        ON CONFLICT(throttle_key) DO UPDATE SET failures = login_failures.failures + 1
-        RETURNING failures`,
-      args: [throttleKey, now.toISOString()],
-    });
-    if (Number(reservation.rows[0]?.failures) > MAX_LOGIN_FAILURES) {
+    const reservations = await this.client.batch(
+      throttleKeys.map((throttleKey) => ({
+        sql: `INSERT INTO login_failures (throttle_key, failures, window_started_at)
+          VALUES (?, 1, ?)
+          ON CONFLICT(throttle_key) DO UPDATE SET failures = login_failures.failures + 1
+          RETURNING failures`,
+        args: [throttleKey, now.toISOString()],
+      })),
+      "write",
+    );
+    if (
+      reservations.some(
+        (reservation) =>
+          Number(reservation.rows[0]?.failures) > MAX_LOGIN_FAILURES,
+      )
+    ) {
       throw new AppError(
         429,
         "login_throttled",
@@ -383,8 +394,8 @@ export class AuthRepository {
       );
     }
     await this.client.execute({
-      sql: "DELETE FROM login_failures WHERE throttle_key = ?",
-      args: [throttleKey],
+      sql: "DELETE FROM login_failures WHERE throttle_key IN (?, ?)",
+      args: throttleKeys,
     });
     return {
       user: userFromRow(row),

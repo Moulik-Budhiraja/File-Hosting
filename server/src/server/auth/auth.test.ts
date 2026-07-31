@@ -7,6 +7,7 @@ import { describe, it } from "node:test";
 import { createClient } from "@libsql/client";
 
 import { loadConfig } from "../files/config";
+import { AppError } from "../files/errors";
 import { AuthRepository } from "./database";
 import {
   hashPassword,
@@ -90,6 +91,40 @@ describe("user repository", () => {
     }
   });
 
+  it("limits varied usernames from the same remote address before bcrypt", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-address-throttle-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        await assert.rejects(
+          repository.authenticatePassword(
+            `missing.user.${attempt}`,
+            WRONG_CREDENTIAL,
+            "203.0.113.90",
+          ),
+          (error: unknown) =>
+            error instanceof AppError && error.code === "invalid_credentials",
+        );
+      }
+      await assert.rejects(
+        repository.authenticatePassword(
+          "another.missing.user",
+          WRONG_CREDENTIAL,
+          "203.0.113.90",
+        ),
+        (error: unknown) =>
+          error instanceof AppError && error.code === "login_throttled",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("never maps malformed usernames onto a valid account", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-invalid-username-test-"),
@@ -135,6 +170,37 @@ describe("user repository", () => {
       await assert.rejects(
         repository.createSession(authentication),
         /credentials changed/iu,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not complete a self-service password change after disablement", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-password-disable-race-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const member = await repository.createUser({
+        username: "disabled.during.change",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const change = repository.changePassword(
+        member.id,
+        MEMBER_CREDENTIAL,
+        OTHER_CREDENTIAL,
+      );
+      await repository.setActive(member.id, false);
+
+      await assert.rejects(
+        change,
+        (error: unknown) =>
+          error instanceof AppError && error.code === "invalid_credentials",
       );
     } finally {
       await repository.close();
@@ -290,7 +356,7 @@ describe("user repository", () => {
         const result = await inspection.execute(
           "SELECT COUNT(*) AS count FROM login_failures",
         );
-        assert.equal(Number(result.rows[0]?.count), 1);
+        assert.equal(Number(result.rows[0]?.count), 2);
       } finally {
         inspection.close();
       }
