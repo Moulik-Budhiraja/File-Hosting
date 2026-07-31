@@ -1,0 +1,120 @@
+name: Publish CLI
+
+on:
+  push:
+    tags:
+      - 'cli-v*'
+
+permissions:
+  contents: read
+  id-token: write
+
+concurrency:
+  group: publish-cli-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    if: github.repository == 'Moulik-Budhiraja/File-Hosting'
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: cli
+    steps:
+      - name: Check out the tagged commit
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          fetch-depth: 0
+          fetch-tags: true
+          persist-credentials: false
+
+      - name: Set up Node.js
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.18.1'
+          registry-url: 'https://registry.npmjs.org'
+          package-manager-cache: false
+
+      - name: Verify release tag and package version
+        shell: bash
+        env:
+          RELEASE_TAG: ${{ github.ref_name }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$RELEASE_TAG" =~ ^cli-v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Release tag must be a stable SemVer tag in the form cli-vX.Y.Z." >&2
+            exit 1
+          fi
+
+          package_name="$(node --input-type=commonjs -p "require('./package.json').name")"
+          package_version="$(node --input-type=commonjs -p "require('./package.json').version")"
+          if [[ "$package_name" != '@moulikbudhiraja/fs-cli' ]]; then
+            echo "Unexpected package name: $package_name" >&2
+            exit 1
+          fi
+          if [[ "$RELEASE_TAG" != "cli-v${package_version}" ]]; then
+            echo "Tag $RELEASE_TAG does not match cli/package.json version $package_version." >&2
+            exit 1
+          fi
+
+          tag_commit="$(git rev-list -n 1 "$RELEASE_TAG")"
+          workflow_commit="$(git rev-parse "${RELEASE_SHA}^{commit}")"
+          if [[ "$tag_commit" != "$workflow_commit" ]]; then
+            echo "Tag commit $tag_commit does not match the workflow commit $workflow_commit." >&2
+            exit 1
+          fi
+          git fetch --no-tags https://github.com/Moulik-Budhiraja/File-Hosting.git main
+          if ! git merge-base --is-ancestor "$workflow_commit" FETCH_HEAD; then
+            echo "The release tag must point to a commit on origin/main." >&2
+            exit 1
+          fi
+
+          encoded_name="$(node -p "encodeURIComponent(process.argv[1])" "$package_name")"
+          status="$(curl --silent --show-error --output "$RUNNER_TEMP/npm-version.json" \
+            --write-out '%{http_code}' \
+            "https://registry.npmjs.org/${encoded_name}/${package_version}")"
+          case "$status" in
+            404) ;;
+            200)
+              echo "$package_name@$package_version already exists on npm." >&2
+              exit 1
+              ;;
+            *)
+              echo "npm registry preflight returned HTTP $status; refusing to publish." >&2
+              exit 1
+              ;;
+          esac
+
+          node_version="$(node --version)"
+          npm_version="$(npm --version)"
+          if [[ "$node_version" != 'v24.18.1' || "$npm_version" != '11.16.0' ]]; then
+            echo "Expected Node v24.18.1 with npm 11.16.0; got $node_version with npm $npm_version." >&2
+            exit 1
+          fi
+          echo "Node $node_version with npm $npm_version"
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Audit production dependencies
+        run: npm audit --omit=dev
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      - name: Smoke-test the built CLI
+        run: node dist/index.js --help
+
+      - name: Inspect package contents
+        run: npm pack --dry-run
+
+      - name: Publish to npm
+        run: npm publish --access public --provenance

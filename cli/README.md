@@ -128,6 +128,35 @@ Stable exit statuses are:
 | 7 | human approval required |
 | 8 | partial success |
 
+## Releasing to npm
+
+The release workflow publishes only from stable `cli-vX.Y.Z` tags whose version
+exactly matches `cli/package.json` and whose commit is on `main`. Before the
+first release, add a GitHub Actions Trusted Publisher at
+`https://www.npmjs.com/package/@moulikbudhiraja/fs-cli/access` with:
+
+- Organization or user: `Moulik-Budhiraja`
+- Repository: `File-Hosting`
+- Workflow filename: `publish-cli.yml`
+- Environment name: leave blank
+- Allowed actions: `npm publish` only
+
+Keep the maintainer account's 2FA enabled; the workflow uses GitHub OIDC and has
+no npm token. After a release change is merged, run the checks below from
+`cli/`, explicitly authorize that version for publication, then create and push
+the matching tag. Never push a release tag merely to test the workflow.
+
+```sh
+npm ci
+npm audit --omit=dev
+npm run typecheck
+npm test
+npm run build
+npm pack --dry-run
+git tag cli-vX.Y.Z <main-commit>
+git push origin cli-vX.Y.Z
+```
+
 ## Development checks
 
 ```sh
