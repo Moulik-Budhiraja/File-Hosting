@@ -82,6 +82,7 @@ CREATE INDEX IF NOT EXISTS login_failures_window_idx ON login_failures(window_st
 const SESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
 const LOGIN_WINDOW_MS = 15 * 60 * 1000;
 const MAX_LOGIN_FAILURES = 5;
+const MAX_ACTIVE_API_KEYS = 10;
 
 function digest(value: string): string {
   return createHash("sha256").update(value, "utf8").digest("hex");
@@ -500,10 +501,15 @@ export class AuthRepository {
     }
     const secret = `fsk_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
-    await this.client.execute({
+    await this.client.execute(
+      "DELETE FROM api_keys WHERE revoked_at IS NOT NULL",
+    );
+    const result = await this.client.execute({
       sql: `INSERT INTO api_keys
         (id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)`,
+        SELECT ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL
+        WHERE (SELECT COUNT(*) FROM api_keys
+          WHERE user_id = ? AND revoked_at IS NULL) < ?`,
       args: [
         id,
         userId,
@@ -512,8 +518,17 @@ export class AuthRepository {
         secret.slice(0, 12),
         secret.slice(-4),
         now.toISOString(),
+        userId,
+        MAX_ACTIVE_API_KEYS,
       ],
     });
+    if (result.rowsAffected === 0) {
+      throw new AppError(
+        409,
+        "api_key_limit",
+        `A user can have at most ${MAX_ACTIVE_API_KEYS} active API keys`,
+      );
+    }
     return { id, secret };
   }
 

@@ -1,4 +1,5 @@
 import { AppError } from "@/server/files/errors";
+import { jsonObject } from "@/server/auth/http";
 import { errorResponse, json, notFound } from "@/server/files/http";
 import { getAuthorizedFile } from "@/server/files/request";
 import type { TagOperation } from "@/server/files/types";
@@ -35,25 +36,7 @@ export async function PATCH(
   try {
     const id = validateId((await context.params).id);
     const { service } = await getAuthorizedFile(request, id, true);
-    let body: unknown;
-    try {
-      body = await request.json();
-    } catch (cause) {
-      throw new AppError(
-        400,
-        "invalid_json",
-        "Request body must be valid JSON",
-        { cause },
-      );
-    }
-    if (!body || typeof body !== "object" || Array.isArray(body)) {
-      throw new AppError(
-        400,
-        "invalid_patch",
-        "Patch body must be a JSON object",
-      );
-    }
-    const record = body as Record<string, unknown>;
+    const record = await jsonObject(request);
     const allowed = new Set(["visibility", "tags"]);
     if (Object.keys(record).some((key) => !allowed.has(key))) {
       throw new AppError(

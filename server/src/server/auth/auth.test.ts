@@ -290,6 +290,43 @@ describe("user repository", () => {
     }
   });
 
+  it("caps active API keys and purges revoked history", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-api-key-cap-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const member = await repository.createUser({
+        username: "api.key.cap.member",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const keys = [];
+      for (let index = 0; index < 10; index += 1) {
+        keys.push(await repository.createApiKey(member.id, `key-${index}`));
+      }
+      await assert.rejects(
+        repository.createApiKey(member.id, "over-limit"),
+        (error: unknown) =>
+          error instanceof AppError && error.code === "api_key_limit",
+      );
+
+      await repository.revokeApiKey(keys[0]!.id, member.id, false);
+      await repository.createApiKey(member.id, "replacement");
+      const retained = await repository.listApiKeys(member.id);
+      assert.equal(retained.length, 10);
+      assert.equal(
+        retained.every((key) => key.revokedAt === null),
+        true,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("caps active sessions per user while keeping the newest login", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-session-cap-test-"),

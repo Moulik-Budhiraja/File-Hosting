@@ -358,6 +358,26 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.equal(invalid.headers.get("content-range"), "bytes */40");
   });
 
+  it("rejects oversized file PATCH bodies before parsing", async () => {
+    const file = await service.upload(chunks("bounded"), {
+      name: "bounded-patch.txt",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "text/plain",
+      contentLength: 7,
+    });
+    const response = await patchFile(
+      new Request(`http://localhost/api/files/${file.id}`, {
+        method: "PATCH",
+        headers: { ...AUTHORIZATION, "content-type": "application/json" },
+        body: JSON.stringify({ payload: "x".repeat(65_536) }),
+      }),
+      routeContext(file.id),
+    );
+    assert.equal(response.status, 413);
+  });
+
   it("makes private files indistinguishable from missing files without auth", async () => {
     const patchResponse = await patchFile(
       new Request(`http://localhost/api/files/${uploadedId}`, {

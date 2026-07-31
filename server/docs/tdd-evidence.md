@@ -162,5 +162,16 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: session issuance transactionally preserves the new token and deletes
       older active sessions beyond a per-user maximum of ten.
 
+29. Bounded file PATCH parsing
+    - RED: an authenticated oversized file PATCH parsed fully and returned 400 for
+      an unsupported field rather than rejecting its size.
+    - GREEN: the file PATCH route now uses the same bounded 64 KiB central JSON
+      reader and returns 413 before parsing overflow bodies.
+
+30. API-key retention and active cap
+    - RED: an eleventh active key was created successfully for one member.
+    - GREEN: creation atomically enforces at most ten active keys per user and
+      purges revoked key history before inserting a replacement.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
