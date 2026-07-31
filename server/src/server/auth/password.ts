@@ -18,7 +18,7 @@ export function normalizeUsername(value: string): string {
 }
 
 export function validatePassword(value: string): string {
-  if (value.length < 12 || Buffer.byteLength(value, "utf8") > 72) {
+  if ([...value].length < 12 || Buffer.byteLength(value, "utf8") > 72) {
     throw new AppError(
       400,
       "invalid_password",

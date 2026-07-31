@@ -246,6 +246,7 @@ export class FileService {
         updatedAt: now,
       };
       try {
+        await options.authorizeFinalize?.();
         return await this.repository.insert(file, options.tags);
       } catch (cause) {
         await unlink(finalPath).catch(() => undefined);

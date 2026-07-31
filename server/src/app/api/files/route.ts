@@ -1,5 +1,6 @@
 import { errorResponse, json } from "@/server/files/http";
 import { decodeCursor } from "@/server/files/database";
+import { AppError } from "@/server/files/errors";
 import { requestBody, requireApiContext } from "@/server/files/request";
 import {
   parseArchive,
@@ -46,6 +47,19 @@ export async function POST(request: Request): Promise<Response> {
       archive: parseArchive(url.searchParams.get("archive")),
       mimeType: request.headers.get("content-type") ?? undefined,
       contentLength,
+      authorizeFinalize: async () => {
+        const current = await requireApiContext(request, true);
+        if (
+          current.principal.userId !== principal.userId ||
+          current.principal.source !== principal.source
+        ) {
+          throw new AppError(
+            401,
+            "invalid_token",
+            "Credential is no longer valid",
+          );
+        }
+      },
     });
     return json(service.toMetadata(file), {
       status: 201,

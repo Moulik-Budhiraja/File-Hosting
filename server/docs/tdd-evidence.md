@@ -198,5 +198,17 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       `private=true`; current servers honor exact visibility while older servers
       safely fall back to private.
 
+35. Credential revalidation at upload finalization
+    - RED: a streamed upload ignored a revoked finalization authorization callback
+      and committed successfully.
+    - GREEN: upload routes now re-resolve the exact credential after streaming and
+      before metadata commit; FileService removes finalized bytes on rejection.
+
+36. Unicode password character minimum
+    - RED: six emoji satisfied the advertised 12-character minimum because UTF-16
+      code units were counted.
+    - GREEN: password lower bounds now count Unicode code points while retaining
+      the independent 72-byte UTF-8 bcrypt ceiling.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

@@ -32,6 +32,7 @@ describe("password security", () => {
     assert.equal(normalizeUsername("  Alice.Example  "), "alice.example");
     assert.throws(() => normalizeUsername("bad name"), /username/iu);
     assert.throws(() => validatePassword("short"), /12 characters/u);
+    assert.throws(() => validatePassword("😀".repeat(6)), /12 characters/u);
     assert.equal(validatePassword(HASH_CREDENTIAL), HASH_CREDENTIAL);
 
     const encoded = await hashPassword(HASH_CREDENTIAL);

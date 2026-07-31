@@ -62,6 +62,7 @@ export interface UploadOptions {
   archive: ArchiveType;
   mimeType?: string;
   contentLength?: number;
+  authorizeFinalize?: () => Promise<void> | void;
 }
 
 export type TagOperation = "add" | "remove" | "set";

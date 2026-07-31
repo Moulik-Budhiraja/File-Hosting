@@ -16,6 +16,7 @@ import { GET as health } from "../../app/healthz/route";
 import { GET as rawFile, HEAD as headRawFile } from "../../app/raw/[id]/route";
 import { isAuthorized } from "./auth";
 import { decodeCursor, encodeCursor } from "./database";
+import { AppError } from "./errors";
 import { generateFileId } from "./id";
 import { parseRangeHeader } from "./range";
 import { FileService } from "./service";
@@ -229,6 +230,24 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       tags: { operation: "set", values: ["final"] },
     });
     assert.deepEqual(replaced?.tags, ["final"]);
+  });
+
+  it("rejects a streamed upload when finalize authorization is revoked", async () => {
+    await assert.rejects(
+      service.upload(chunks("revoked"), {
+        name: "revoked-upload.txt",
+        tags: [],
+        visibility: "private",
+        archive: null,
+        mimeType: "text/plain",
+        contentLength: 7,
+        authorizeFinalize: () => {
+          throw new AppError(401, "invalid_token", "Credential was revoked");
+        },
+      }),
+      (error: unknown) =>
+        error instanceof AppError && error.code === "invalid_token",
+    );
   });
 
   it("rejects oversized streams and removes partial files", async () => {
