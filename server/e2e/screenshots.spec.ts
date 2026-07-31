@@ -7,9 +7,11 @@ import { ensureSeeded } from "./seed.mjs";
 const TOKEN = process.env.FS_E2E_TOKEN ?? "e2e-dashboard-fixture-token";
 const BASE = `http://127.0.0.1:${Number(process.env.FS_E2E_PORT ?? 4610)}`;
 
+// Screenshots land in the repository-relative test-results directory unless
+// FS_SCREENSHOT_DIR points somewhere explicit.
 const OUTPUT_DIR =
   process.env.FS_SCREENSHOT_DIR ??
-  "/Users/admin/Documents/Hermes Projects/fs-server-admin-dashboard-implementation/implementation-pass";
+  path.resolve(process.cwd(), "test-results", "screenshots");
 
 test.beforeAll(async () => {
   await ensureSeeded(BASE, TOKEN);

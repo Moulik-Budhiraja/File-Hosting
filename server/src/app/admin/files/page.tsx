@@ -1,15 +1,18 @@
 "use client";
 
 import Link from "next/link";
-import { useEffect, useMemo, useRef, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 
 import { adminApi, useAdminData } from "@/admin/client";
 import { LoadFallback } from "@/admin/components/LoadFallback";
+import { StaleBanner } from "@/admin/components/StaleBanner";
 import { StateBanner } from "@/admin/components/StateBanner";
+import { UploadDialog } from "@/admin/components/UploadDialog";
 import {
   formatBytes,
   formatInteger,
   formatListTimestamp,
+  formatUtcDateTime,
 } from "@/admin/format";
 import {
   advancePager,
@@ -21,6 +24,7 @@ import {
 const PAGE_SIZE = 16;
 
 type VisibilityFilter = "all" | "public" | "private";
+type ArchiveFilter = "all" | "tar.gz" | "none";
 
 function useDebounced<T>(value: T, delayMs: number): T {
   const [debounced, setDebounced] = useState(value);
@@ -31,126 +35,12 @@ function useDebounced<T>(value: T, delayMs: number): T {
   return debounced;
 }
 
-function UploadDialog({
-  open,
-  onClose,
-  onUploaded,
-}: {
-  open: boolean;
-  onClose: () => void;
-  onUploaded: () => void;
-}) {
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [name, setName] = useState("");
-  const [tags, setTags] = useState("");
-  const [isPrivate, setIsPrivate] = useState(false);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-
-  if (!open) return null;
-
-  async function submit(event: React.FormEvent) {
-    event.preventDefault();
-    const file = fileRef.current?.files?.[0];
-    if (!file) {
-      setError("Choose a file to upload");
-      return;
-    }
-    setBusy(true);
-    setError(null);
-    try {
-      await adminApi.uploadFile(file, {
-        name: name.trim() || file.name,
-        tags: tags
-          .split(/[\s,]+/)
-          .map((tag) => tag.trim())
-          .filter(Boolean),
-        visibility: isPrivate ? "private" : "public",
-      });
-      onUploaded();
-      onClose();
-    } catch (uploadError) {
-      setError(
-        uploadError instanceof Error ? uploadError.message : "Upload failed",
-      );
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <div className="dialog-overlay" onClick={onClose}>
-      <div
-        role="dialog"
-        aria-modal="true"
-        aria-label="Upload object"
-        className="dialog"
-        onClick={(event) => event.stopPropagation()}
-        onKeyDown={(event) => {
-          if (event.key === "Escape") onClose();
-        }}
-      >
-        <h2>Upload object</h2>
-        <form onSubmit={(event) => void submit(event)}>
-          <label>
-            File
-            <input ref={fileRef} type="file" required />
-          </label>
-          <label>
-            Name (defaults to the file name)
-            <input
-              type="text"
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="report.pdf"
-            />
-          </label>
-          <label>
-            Tags (space separated)
-            <input
-              type="text"
-              value={tags}
-              onChange={(event) => setTags(event.target.value)}
-              placeholder="ingest batch"
-            />
-          </label>
-          <label style={{ display: "flex", gap: 8, alignItems: "center" }}>
-            <input
-              type="checkbox"
-              checked={isPrivate}
-              onChange={(event) => setIsPrivate(event.target.checked)}
-            />
-            private — requires the bearer token to read
-          </label>
-          {error ? <p className="text-danger">{error}</p> : null}
-          <div className="dialog-actions">
-            <button
-              type="button"
-              className="button"
-              onClick={onClose}
-              disabled={busy}
-            >
-              Cancel
-            </button>
-            <button
-              type="submit"
-              className="button button-primary"
-              disabled={busy}
-            >
-              {busy ? "Uploading …" : "Upload"}
-            </button>
-          </div>
-        </form>
-      </div>
-    </div>
-  );
-}
-
 export default function FilesPage() {
   const [search, setSearch] = useState("");
   const [glob, setGlob] = useState("");
   const [tag, setTag] = useState("");
   const [visibility, setVisibility] = useState<VisibilityFilter>("all");
+  const [archive, setArchive] = useState<ArchiveFilter>("all");
   const [pager, setPager] = useState(initialPager);
   const [uploadOpen, setUploadOpen] = useState(false);
 
@@ -161,7 +51,7 @@ export default function FilesPage() {
   // Any filter change restarts from the first page.
   useEffect(() => {
     setPager(initialPager());
-  }, [debouncedSearch, debouncedGlob, debouncedTag, visibility]);
+  }, [debouncedSearch, debouncedGlob, debouncedTag, visibility, archive]);
 
   const query = useMemo(
     () => ({
@@ -169,10 +59,11 @@ export default function FilesPage() {
       name: debouncedGlob || undefined,
       tags: debouncedTag ? [debouncedTag] : [],
       visibility: visibility === "all" ? undefined : visibility,
+      archive: archive === "all" ? undefined : archive,
       limit: PAGE_SIZE,
       cursor: pager.cursor,
     }),
-    [debouncedSearch, debouncedGlob, debouncedTag, visibility, pager],
+    [debouncedSearch, debouncedGlob, debouncedTag, visibility, archive, pager],
   );
 
   const list = useAdminData(() => adminApi.listFiles(query), [query]);
@@ -193,6 +84,16 @@ export default function FilesPage() {
           </p>
         </div>
         <div className="header-actions">
+          <button
+            type="button"
+            className="button"
+            onClick={() => {
+              list.reload();
+              system.reload();
+            }}
+          >
+            Refresh
+          </button>
           <button
             type="button"
             className="button button-primary"
@@ -250,11 +151,35 @@ export default function FilesPage() {
             </button>
           ))}
         </div>
+        <div className="segment" role="group" aria-label="Archive filter">
+          {(["all", "tar.gz", "none"] as const).map((option) => (
+            <button
+              key={option}
+              type="button"
+              aria-pressed={archive === option}
+              onClick={() => setArchive(option)}
+            >
+              {option === "all" ? "Any" : option}
+            </button>
+          ))}
+        </div>
         <span className="filter-spacer" />
-        <span className="filter-note">newest first · glob is SQLite GLOB</span>
+        <span className="filter-note">
+          newest first · glob is SQLite GLOB · archive is upload metadata
+          {list.lastSuccessAt !== null
+            ? ` · updated ${formatUtcDateTime(new Date(list.lastSuccessAt).toISOString())}`
+            : ""}
+        </span>
       </div>
 
-      {list.status === "ready" ? (
+      <StaleBanner
+        status={list.data ? list.status : "ready"}
+        message={list.message}
+        lastSuccessAt={list.lastSuccessAt}
+        onRetry={list.reload}
+      />
+
+      {list.data ? (
         items.length === 0 ? (
           <StateBanner state="empty" />
         ) : (
@@ -282,7 +207,19 @@ export default function FilesPage() {
                 {items.map((file) => (
                   <tr key={file.id}>
                     <td className="cell-name">
-                      <Link href={`/admin/files/${file.id}`}>{file.name}</Link>
+                      {/* title + aria-label expose the full untruncated name;
+                          the id line keeps similarly prefixed rows
+                          distinguishable when narrow screens truncate. */}
+                      <Link
+                        href={`/admin/files/${file.id}`}
+                        title={file.name}
+                        aria-label={file.name}
+                      >
+                        <span className="cell-name-text">{file.name}</span>
+                        <span className="cell-name-id" aria-hidden>
+                          {file.id}
+                        </span>
+                      </Link>
                     </td>
                     <td className="cell-size">{formatBytes(file.size)}</td>
                     <td className="cell-mime cell-optional">
@@ -297,6 +234,9 @@ export default function FilesPage() {
                         aria-hidden
                       />
                       <span className="vis-text">{file.visibility}</span>
+                      <span className="vis-text-short" aria-hidden>
+                        {file.visibility === "public" ? "pub" : "prv"}
+                      </span>
                     </td>
                     <td className="cell-time">
                       {formatListTimestamp(file.created_at)}
@@ -309,7 +249,7 @@ export default function FilesPage() {
         )
       ) : (
         <LoadFallback
-          status={list.status === "loading" ? "loading" : list.status}
+          status={list.status === "ready" ? "loading" : list.status}
           message={list.message}
           onRetry={list.reload}
         />
@@ -317,7 +257,7 @@ export default function FilesPage() {
 
       <div className="pagination-footer">
         <span>
-          {list.status === "ready"
+          {list.data
             ? `${pagerLabel(pager, PAGE_SIZE, items.length, nextCursor !== null)} · limit ${PAGE_SIZE}`
             : "…"}
         </span>

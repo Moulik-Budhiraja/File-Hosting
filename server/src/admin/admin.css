@@ -8,7 +8,10 @@
   --color-hairline-strong: #333a41;
   --color-ink: #e8eaed;
   --color-ink-2: #a9b1b9;
-  --color-slate: #6e7880;
+  /* Lightened from the design token #6e7880, which fails WCAG AA (3.9:1 on
+     surface) at the 11-12px sizes this color is used for; #7d8891 is >=4.8:1
+     on every background in the palette. */
+  --color-slate: #7d8891;
   --color-primary: #6ca6dc;
   --color-primary-soft: #16222e;
   --color-warning: #d9a03f;
@@ -204,6 +207,14 @@
   line-height: 24px;
   font-weight: 600;
   letter-spacing: -0.02em;
+  /* Object names are user-controlled up to 255 unbroken bytes; they must
+     wrap instead of forcing horizontal overflow. */
+  overflow-wrap: anywhere;
+}
+
+.page-header > div {
+  min-width: 0;
+  max-width: 100%;
 }
 
 .page-subtitle {
@@ -416,6 +427,20 @@
   color: var(--color-primary);
 }
 
+.cell-name-text {
+  display: block;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+/* Object-id line: revealed on narrow screens where truncation can make
+   similarly prefixed names indistinguishable. */
+.cell-name-id {
+  display: none;
+  font-size: 11px;
+  color: var(--color-slate);
+}
+
 .cell-size {
   font-family: var(--font-mono);
   font-size: 12px;
@@ -429,6 +454,12 @@
   font-family: var(--font-mono);
   font-size: 12px;
   color: var(--color-slate);
+}
+
+.cell-tags {
+  max-width: 260px;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .cell-time {
@@ -476,7 +507,9 @@
   letter-spacing: -0.01em;
 }
 
-.figure-note {
+.storage-figures .figure-note {
+  /* Specificity beats the .admin-root p margin reset, so the annotation
+     sits flush right of the band on desktop as in the design. */
   margin-left: auto;
   font-family: var(--font-mono);
   font-size: 12px;
@@ -644,6 +677,17 @@
   color: var(--color-danger);
 }
 
+/* Retained-but-stale data: prominent, warning-colored, never green. */
+.state-stale {
+  border-color: #d9a03f66;
+  color: var(--color-warning);
+}
+
+.state-stale strong {
+  text-transform: uppercase;
+  letter-spacing: 0.06em;
+}
+
 /* ---------- Files browser ---------- */
 
 .filter-bar {
@@ -794,6 +838,16 @@
   color: var(--color-ink-2);
 }
 
+.url-note {
+  padding: 8px 24px 12px;
+  border-top: 1px solid var(--color-hairline);
+  font-family: var(--font-mono);
+  font-size: 11.5px;
+  line-height: 16px;
+  color: var(--color-slate);
+  overflow-wrap: anywhere;
+}
+
 .meta-row {
   display: grid;
   grid-template-columns: 118px 1fr;
@@ -837,6 +891,8 @@
   gap: 6px;
   margin: 0 8px 6px 0;
   padding: 3px 8px;
+  max-width: 100%;
+  overflow-wrap: anywhere;
   border: 1px solid var(--color-hairline-strong);
   border-radius: var(--radius-sm);
   font-family: var(--font-mono);
@@ -965,7 +1021,10 @@
 }
 
 .status-row .status-source {
-  flex-shrink: 0;
+  flex-shrink: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+  text-align: right;
   font-family: var(--font-mono);
   font-size: 11px;
   color: var(--color-slate);
@@ -1001,24 +1060,27 @@
 
 /* ---------- Dialogs ---------- */
 
-.dialog-overlay {
-  position: fixed;
-  inset: 0;
-  z-index: 40;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  padding: 16px;
-  background: #0c0e10cc;
-}
-
+/* Native <dialog> shown with showModal(); the browser supplies the top
+   layer, focus trap, inert background, and invoker focus restoration. */
 .dialog {
-  width: 100%;
+  width: calc(100% - 32px);
   max-width: 440px;
-  padding: 20px 22px;
+  padding: 0;
   background: var(--color-surface);
   border: 1px solid var(--color-hairline-strong);
   border-radius: var(--radius-md);
+  color: var(--color-ink);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 18px;
+}
+
+.dialog::backdrop {
+  background: #0c0e10cc;
+}
+
+.dialog-inner {
+  padding: 20px 22px;
 }
 
 .dialog h2 {
@@ -1028,6 +1090,7 @@
 
 .dialog p {
   margin-top: 10px;
+  overflow-wrap: anywhere;
   font-family: var(--font-mono);
   font-size: 12px;
   line-height: 17px;
@@ -1115,6 +1178,13 @@
   color: var(--color-ink);
   font-family: var(--font-mono);
   font-size: 13px;
+}
+
+.vis-text-short {
+  display: none;
+  font-family: var(--font-mono);
+  font-size: 11px;
+  color: var(--color-ink-2);
 }
 
 /* ---------- Responsive ---------- */
@@ -1229,7 +1299,7 @@
     line-height: 24px;
   }
 
-  .figure-note {
+  .storage-figures .figure-note {
     margin-left: 0;
   }
 
@@ -1287,16 +1357,26 @@
   .cell-name {
     max-width: 40vw;
   }
+
+  .cell-name-id {
+    display: block;
+  }
 }
 
 @media (max-width: 480px) {
-  /* Visibility keeps its dot; the word is spelled out in the inspector. */
+  /* The full word stays in the accessibility tree; sighted users get a
+     three-letter abbreviation next to the dot, never color alone. */
   .vis-text {
-    display: none;
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
   }
 
-  .cell-vis .dot {
-    margin-right: 0;
+  .vis-text-short {
+    display: inline;
   }
 
   .status-row {
@@ -1305,8 +1385,14 @@
     padding: 11px 16px;
   }
 
-  .status-row .status-name {
+  .status-row .status-name,
+  .status-row .status-detail,
+  .status-row .status-source {
     width: 100%;
+  }
+
+  .status-row .status-source {
+    text-align: left;
   }
 
   .pagination-footer {
@@ -1327,11 +1413,52 @@
   }
 
   .dialog {
-    max-width: 100%;
+    width: calc(100vw - 24px);
+    margin-bottom: max(12px, env(safe-area-inset-bottom));
+  }
+}
+
+/* ---------- Touch targets ---------- */
+
+/* Coarse pointers get >=44px hit areas on interactive controls; desktop
+   pointer users keep the compact density. */
+@media (pointer: coarse) {
+  .button,
+  .segment button,
+  .nav-menu-button,
+  .nav-item,
+  .button-ghost,
+  .token-form button,
+  .page-header .button,
+  .pagination-footer .button {
+    min-height: 44px;
   }
 
-  .dialog-overlay {
-    padding: 12px;
-    padding-bottom: max(12px, env(safe-area-inset-bottom));
+  .button-ghost {
+    min-width: 44px;
+  }
+
+  .field,
+  .tag-add input,
+  .token-form input {
+    height: 44px;
+  }
+
+  .tag-chip {
+    min-height: 34px;
+  }
+
+  /* The chip remove button keeps its compact glyph but gains an expanded
+     invisible hit area. */
+  .tag-chip button {
+    position: relative;
+    min-width: 28px;
+    min-height: 28px;
+  }
+
+  .tag-chip button::after {
+    content: "";
+    position: absolute;
+    inset: -8px;
   }
 }

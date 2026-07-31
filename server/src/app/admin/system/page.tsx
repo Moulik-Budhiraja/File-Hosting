@@ -1,8 +1,10 @@
 "use client";
 
 import { adminApi, useAdminData } from "@/admin/client";
+import { CLI_EXAMPLES } from "@/admin/cli-examples";
 import { LoadFallback } from "@/admin/components/LoadFallback";
 import { ProposedBlock } from "@/admin/components/ProposedBlock";
+import { StaleBanner } from "@/admin/components/StaleBanner";
 import { formatBytes, formatInteger, formatUptime } from "@/admin/format";
 
 interface StatusRowProps {
@@ -31,20 +33,19 @@ function StatusRow({ name, detail, source, state }: StatusRowProps) {
   );
 }
 
-const CLI_COMMANDS = [
-  "$ fs upload ./batch.parquet --tag ingest",
-  '$ fs list "datasets/**" --json',
-  "$ fs find --tag ingest --name '*.parquet'",
-  "$ fs info 9f2c41d7",
-  "$ fs visibility 9f2c41d7 private",
-  "$ fs rm 9f2c41d7",
-];
+// Deployment configuration recorded in the repository's compose.yaml. The
+// running process cannot observe the Docker daemon, so these are rendered
+// strictly as configured defaults — never as runtime state.
+const COMPOSE_DEFAULT_SOURCE = "compose.yaml default; runtime unverified";
 
 export default function SystemPage() {
   const system = useAdminData(() => adminApi.getSystem(), [], {
     refreshMs: 30_000,
   });
   const info = system.data;
+  // Green "ok" states and the 200 claim are earned by the CURRENT request
+  // only; retained data after a failed refresh renders without them.
+  const fresh = system.status === "ready";
 
   return (
     <main className="admin-main">
@@ -52,13 +53,22 @@ export default function SystemPage() {
         <div>
           <h1 className="page-title">System Health &amp; Configuration</h1>
           <p className="page-subtitle">
-            {info
+            {fresh && info
               ? `GET /api/system · 200 · node ${info.node}`
-              : "waiting for /api/system"}
+              : info
+                ? `GET /api/system · refresh ${system.status} — data is stale`
+                : "waiting for /api/system"}
           </p>
         </div>
         <p className="header-side">config read-only · set via environment</p>
       </div>
+
+      <StaleBanner
+        status={info ? system.status : "ready"}
+        message={system.message}
+        lastSuccessAt={system.lastSuccessAt}
+        onRetry={system.reload}
+      />
 
       {info ? (
         <div className="system-body">
@@ -69,22 +79,30 @@ export default function SystemPage() {
               </div>
               <StatusRow
                 name="Next.js app server"
-                detail={`node ${info.node} · standalone build · up ${formatUptime(info.uptime_seconds)}`}
-                state="ok"
+                detail={`node ${info.node} · up ${formatUptime(info.uptime_seconds)}`}
+                source="from /api/system"
+                state={fresh ? "ok" : undefined}
               />
               <StatusRow
                 name="SQLite metadata DB"
                 detail={
                   info.database.db_bytes === null
-                    ? "remote libSQL endpoint · ping ok"
-                    : `${formatBytes(info.database.db_bytes)} on disk · WAL · ping ok`
+                    ? `remote libSQL endpoint${fresh ? " · ping ok" : ""}`
+                    : `${formatBytes(info.database.db_bytes)} on disk${fresh ? " · ping ok" : ""}`
                 }
-                state="ok"
+                source="from /api/system"
+                state={fresh ? "ok" : undefined}
               />
               <StatusRow
                 name="Filesystem object store"
-                detail={`${formatBytes(info.storage.free_bytes)} free · read-write`}
-                state="ok"
+                detail={`${formatBytes(info.storage.free_bytes)} free${fresh ? " · read-write verified" : ""}`}
+                source="from /api/system"
+                state={fresh ? "ok" : undefined}
+              />
+              <StatusRow
+                name="Docker healthcheck"
+                detail="probes /healthz · interval 30s · timeout 5s · retries 3 · start period 20s — pass/fail state is only visible to the Docker daemon"
+                source={COMPOSE_DEFAULT_SOURCE}
               />
             </section>
 
@@ -175,15 +193,17 @@ export default function SystemPage() {
               <div className="panel-head">
                 <h2 className="section-label">
                   Server logs
-                  <small>Proposed · Not implemented</small>
+                  <small>no log-read API</small>
                 </h2>
               </div>
               <p
                 className="proposed-items"
                 style={{ padding: "12px 24px 18px" }}
               >
-                logs go to container stdout (docker json-file, 10 MB × 3) —
-                there is no log-read API, so nothing can be shown here.
+                compose.yaml routes container stdout to the docker json-file
+                driver, 10 MB × 3 files — compose.yaml default; runtime
+                unverified. There is no log-read API, so no log contents or
+                rotation state can be shown here.
               </p>
             </section>
 
@@ -195,8 +215,8 @@ export default function SystemPage() {
                 <h2 className="section-label">CLI operations</h2>
               </div>
               <div className="cli-block">
-                {CLI_COMMANDS.map((command) => (
-                  <div key={command}>{command}</div>
+                {CLI_EXAMPLES.map((example) => (
+                  <div key={example.display}>{example.display}</div>
                 ))}
               </div>
             </section>

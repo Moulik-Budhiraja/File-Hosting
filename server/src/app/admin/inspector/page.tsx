@@ -24,34 +24,46 @@ export default function InspectorIndexPage() {
         </div>
       </div>
       {recent.status === "ready" && recent.data ? (
-        <div className="table-scroll">
-          <table className="data-table">
-            <thead>
-              <tr>
-                <th scope="col">Name</th>
-                <th scope="col" style={{ textAlign: "right" }}>
-                  Size
-                </th>
-                <th scope="col" style={{ textAlign: "right" }}>
-                  Uploaded
-                </th>
-              </tr>
-            </thead>
-            <tbody>
-              {recent.data.items.map((file) => (
-                <tr key={file.id}>
-                  <td className="cell-name">
-                    <Link href={`/admin/files/${file.id}`}>{file.name}</Link>
-                  </td>
-                  <td className="cell-size">{formatBytes(file.size)}</td>
-                  <td className="cell-time">
-                    {formatListTimestamp(file.created_at)}
-                  </td>
+        recent.data.items.length === 0 ? (
+          <div className="state-banner" role="status">
+            <p>
+              no objects on this server yet — upload one from{" "}
+              <Link className="panel-link" href="/admin/files">
+                Files
+              </Link>{" "}
+              to inspect it
+            </p>
+          </div>
+        ) : (
+          <div className="table-scroll">
+            <table className="data-table">
+              <thead>
+                <tr>
+                  <th scope="col">Name</th>
+                  <th scope="col" style={{ textAlign: "right" }}>
+                    Size
+                  </th>
+                  <th scope="col" style={{ textAlign: "right" }}>
+                    Uploaded
+                  </th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {recent.data.items.map((file) => (
+                  <tr key={file.id}>
+                    <td className="cell-name">
+                      <Link href={`/admin/files/${file.id}`}>{file.name}</Link>
+                    </td>
+                    <td className="cell-size">{formatBytes(file.size)}</td>
+                    <td className="cell-time">
+                      {formatListTimestamp(file.created_at)}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )
       ) : (
         <LoadFallback
           status={recent.status === "ready" ? "loading" : recent.status}

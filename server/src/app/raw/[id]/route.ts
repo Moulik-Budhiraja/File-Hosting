@@ -58,7 +58,9 @@ async function respond(
     if (head || file.size === 0) {
       return new Response(null, { status: range ? 206 : 200, headers });
     }
-    const stream = service.openReadStream(file, range?.start, range?.end);
+    const stream = Readable.from(
+      service.trackedDownloadStream(file, range?.start, range?.end),
+    );
     return new Response(
       Readable.toWeb(stream) as unknown as ReadableStream<Uint8Array>,
       { status: range ? 206 : 200, headers },

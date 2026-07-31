@@ -37,6 +37,7 @@ export interface ListFilesOptions {
   name?: string;
   tags: string[];
   visibility?: Visibility;
+  archive?: ArchiveType | "none";
   limit: number;
   cursor?: { createdAt: string; id: string };
 }

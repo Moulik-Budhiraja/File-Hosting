@@ -19,6 +19,7 @@ import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
+import { TransferRegistry, type ActiveTransfer } from "./transfers";
 import type {
   FileMetadata,
   ListFilesOptions,
@@ -55,6 +56,7 @@ function normalizeMimeType(name: string, supplied?: string): string {
 
 export class FileService {
   readonly tempDir: string;
+  private readonly transfers = new TransferRegistry();
 
   private constructor(
     readonly config: FilesConfig,
@@ -153,6 +155,11 @@ export class FileService {
     let size = 0;
     let bytesAtLastCapacityCheck = 0;
     let closed = false;
+    const transferId = this.transfers.begin(
+      "upload",
+      options.name,
+      options.contentLength ?? null,
+    );
 
     try {
       for await (const rawChunk of stream) {
@@ -179,6 +186,7 @@ export class FileService {
           bytesAtLastCapacityCheck = sizeBeforeChunk;
         }
 
+        this.transfers.progress(transferId, chunk.length);
         checksum.update(chunk);
         let offset = 0;
         while (offset < chunk.length) {
@@ -240,6 +248,7 @@ export class FileService {
         );
       }
     } finally {
+      this.transfers.end(transferId);
       if (!closed) await handle.close().catch(() => undefined);
       await unlink(tempPath).catch(() => undefined);
     }
@@ -276,6 +285,37 @@ export class FileService {
 
   openReadStream(file: StoredFile, start?: number, end?: number) {
     return createReadStream(this.storagePath(file), { start, end });
+  }
+
+  activeTransfers(): ActiveTransfer[] {
+    return this.transfers.list();
+  }
+
+  // Download stream wrapped with live transfer accounting. The generator's
+  // finally block runs on completion, error, and early cancellation (the
+  // consumer calling return()), so entries never leak.
+  trackedDownloadStream(
+    file: StoredFile,
+    start?: number,
+    end?: number,
+  ): AsyncIterable<Uint8Array> {
+    const registry = this.transfers;
+    const source = this.openReadStream(file, start, end);
+    const totalBytes =
+      start !== undefined && end !== undefined ? end - start + 1 : file.size;
+    return (async function* tracked() {
+      const transferId = registry.begin("download", file.name, totalBytes);
+      try {
+        for await (const chunk of source) {
+          const bytes = chunk as Buffer;
+          registry.progress(transferId, bytes.length);
+          yield bytes;
+        }
+      } finally {
+        registry.end(transferId);
+        source.destroy();
+      }
+    })();
   }
 
   async systemInfo(): Promise<{

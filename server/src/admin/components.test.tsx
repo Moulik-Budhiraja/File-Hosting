@@ -7,6 +7,7 @@ import { ConfirmDialog } from "./components/ConfirmDialog";
 import { NavRail } from "./components/NavRail";
 import { ProposedBlock } from "./components/ProposedBlock";
 import { StateBanner } from "./components/StateBanner";
+import { UploadDialog } from "./components/UploadDialog";
 
 describe("NavRail", () => {
   const markup = renderToStaticMarkup(
@@ -82,6 +83,10 @@ describe("ConfirmDialog", () => {
     assert.match(markup, /role="alertdialog"/);
     assert.match(markup, /aria-modal="true"/);
     assert.match(markup, /aria-labelledby/);
+    assert.match(markup, /aria-describedby/);
+    // Native <dialog> supplies top-layer rendering, focus trapping, Escape
+    // handling, inert background, and invoker focus restoration.
+    assert.match(markup, /<dialog/);
     assert.match(markup, /Delete object/);
     assert.match(markup, /no soft-delete/);
     assert.match(markup, /<button[^>]*>Cancel<\/button>/);
@@ -98,6 +103,41 @@ describe("ConfirmDialog", () => {
           confirmLabel="Delete"
           onCancel={() => undefined}
           onConfirm={() => undefined}
+        />,
+      ),
+      "",
+    );
+  });
+});
+
+describe("UploadDialog", () => {
+  it("is a labelled, described native-dialog modal with truthful controls", () => {
+    const markup = renderToStaticMarkup(
+      <UploadDialog
+        open
+        onClose={() => undefined}
+        onUploaded={() => undefined}
+      />,
+    );
+    assert.match(markup, /<dialog/);
+    assert.match(markup, /role="dialog"/);
+    assert.match(markup, /aria-modal="true"/);
+    assert.match(markup, /aria-labelledby/);
+    assert.match(markup, /aria-describedby/);
+    assert.match(markup, /Upload object/);
+    assert.match(markup, /type="file"/);
+    // The archive marker maps to the real API's archive=tar.gz metadata.
+    assert.match(markup, /tar\.gz/);
+    assert.match(markup, /<button[^>]*>Cancel<\/button>/);
+  });
+
+  it("renders nothing while closed", () => {
+    assert.equal(
+      renderToStaticMarkup(
+        <UploadDialog
+          open={false}
+          onClose={() => undefined}
+          onUploaded={() => undefined}
         />,
       ),
       "",

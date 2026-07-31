@@ -1,0 +1,57 @@
+name: Server
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "cli/**"
+      - "tests/**"
+      - ".github/workflows/server.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "cli/**"
+      - "tests/**"
+      - ".github/workflows/server.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Lint, unit, build, and E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            cli/package-lock.json
+      - name: Install CLI dependencies and build (CLI examples + root E2E use dist)
+        working-directory: cli
+        run: |
+          npm ci
+          npm run build
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Lint, typecheck, and unit tests
+        working-directory: server
+        run: npm run check
+      - name: Production build
+        working-directory: server
+        run: npm run build
+      - name: Install Playwright browsers
+        working-directory: server
+        run: npx playwright install --with-deps chromium
+      - name: Dashboard E2E (production standalone server)
+        working-directory: server
+        env:
+          CI: "1"
+        run: npm run test:e2e
+      - name: Root black-box E2E (server + CLI)
+        run: node --test tests/e2e.test.mjs

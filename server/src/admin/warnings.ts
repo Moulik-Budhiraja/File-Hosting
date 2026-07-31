@@ -1,6 +1,11 @@
 import { formatBytes } from "./format";
 
+export type WarningKind = "free-space" | "temp-parts";
+
 export interface Warning {
+  // Stable machine-readable identity; UI highlighting keys off this, never
+  // off the human-readable title copy.
+  kind: WarningKind;
   severity: "info" | "warning" | "danger";
   title: string;
   detail: string;
@@ -19,12 +24,14 @@ export function deriveWarnings(inputs: WarningInputs): Warning[] {
 
   if (minFreeBytes > 0 && freeBytes < minFreeBytes) {
     warnings.push({
+      kind: "free-space",
       severity: "danger",
       title: "Free space below reserve floor",
       detail: `${formatBytes(freeBytes)} free · reserved-space floor ${formatBytes(minFreeBytes)} · writes refused at floor`,
     });
   } else if (minFreeBytes > 0 && freeBytes < minFreeBytes * 2) {
     warnings.push({
+      kind: "free-space",
       severity: "warning",
       title: "Free space nearing reserve floor",
       detail: `${formatBytes(freeBytes)} free · reserved-space floor ${formatBytes(minFreeBytes)} · writes refused at floor`,
@@ -33,6 +40,7 @@ export function deriveWarnings(inputs: WarningInputs): Warning[] {
 
   if (tempPartCount > 0) {
     warnings.push({
+      kind: "temp-parts",
       severity: "info",
       title: `${tempPartCount} temp .part ${tempPartCount === 1 ? "file" : "files"} present`,
       detail:

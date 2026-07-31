@@ -8,8 +8,15 @@ import {
   useSyncExternalStore,
 } from "react";
 
-import { AdminApiError, createAdminApi, type ErrorKind } from "./api";
+import { AdminApiError, createAdminApi } from "./api";
 import { authStore } from "./auth-store";
+import {
+  applyLoadOutcome,
+  initialLoadState,
+  type LoadSnapshot,
+} from "./load-state";
+
+export type { LoadStatus } from "./load-state";
 
 export const adminApi = createAdminApi({
   getToken: () => authStore.getToken(),
@@ -23,12 +30,7 @@ export function useToken(): string | null {
   );
 }
 
-export type LoadStatus = "loading" | "ready" | ErrorKind;
-
-export interface LoadState<T> {
-  status: LoadStatus;
-  data: T | null;
-  message?: string;
+export interface LoadState<T> extends LoadSnapshot<T> {
   reload: () => void;
 }
 
@@ -37,11 +39,7 @@ export function useAdminData<T>(
   deps: readonly unknown[],
   options: { refreshMs?: number } = {},
 ): LoadState<T> {
-  const [state, setState] = useState<{
-    status: LoadStatus;
-    data: T | null;
-    message?: string;
-  }>({ status: "loading", data: null });
+  const [state, setState] = useState<LoadSnapshot<T>>(initialLoadState<T>);
   const [generation, setGeneration] = useState(0);
   const loaderRef = useRef(loader);
   loaderRef.current = loader;
@@ -59,19 +57,23 @@ export function useAdminData<T>(
       try {
         const data = await loaderRef.current();
         if (cancelled) return;
-        setState({ status: "ready", data });
+        setState((previous) =>
+          applyLoadOutcome(previous, { ok: true, data, at: Date.now() }),
+        );
       } catch (error) {
         if (cancelled) return;
         const kind =
           error instanceof AdminApiError ? error.kind : ("api" as const);
         const message =
           error instanceof Error ? error.message : "Unexpected error";
-        setState((previous) => ({
-          status: kind,
-          // Keep stale data visible during background refresh failures.
-          data: background ? previous.data : null,
-          message,
-        }));
+        setState((previous) =>
+          applyLoadOutcome(previous, {
+            ok: false,
+            kind,
+            message,
+            at: Date.now(),
+          }),
+        );
       }
       if (options.refreshMs && !cancelled) {
         timer = setTimeout(() => void run(true), options.refreshMs);

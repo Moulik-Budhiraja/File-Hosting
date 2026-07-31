@@ -182,7 +182,7 @@ test.describe("inspector", () => {
     );
     await expect(page.getByText("bytes ·")).toBeVisible();
     await expect(
-      page.getByText("archive/hide state · Proposed · Not implemented"),
+      page.getByText("archive/hide toggle · Proposed · Not implemented"),
     ).toBeVisible();
   });
 

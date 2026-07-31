@@ -27,12 +27,14 @@ describe("deriveWarnings", () => {
     const warnings = deriveWarnings(system({ free: 1_500, reserve: 1_000 }));
     assert.equal(warnings.length, 1);
     assert.equal(warnings[0]?.severity, "warning");
+    assert.equal(warnings[0]?.kind, "free-space");
     assert.match(warnings[0]?.title ?? "", /reserve floor/i);
   });
 
   it("escalates to danger below the reserve floor", () => {
     const warnings = deriveWarnings(system({ free: 900, reserve: 1_000 }));
     assert.equal(warnings[0]?.severity, "danger");
+    assert.equal(warnings[0]?.kind, "free-space");
     assert.match(warnings[0]?.detail ?? "", /writes refused/i);
   });
 
@@ -43,5 +45,6 @@ describe("deriveWarnings", () => {
     assert.equal(warnings.length, 1);
     assert.match(warnings[0]?.title ?? "", /\.part/i);
     assert.equal(warnings[0]?.severity, "info");
+    assert.equal(warnings[0]?.kind, "temp-parts");
   });
 });

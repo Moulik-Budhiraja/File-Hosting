@@ -53,6 +53,14 @@ export interface SystemResponse {
     temp_part_count: number;
   };
   database: { db_bytes: number | null };
+  // CURRENT in-flight transfers for the responding server process only.
+  transfers: {
+    direction: "upload" | "download";
+    name: string;
+    bytes: number;
+    total_bytes: number | null;
+    started_at: string;
+  }[];
   config: {
     max_upload_bytes: number;
     min_free_bytes: number;
@@ -65,6 +73,7 @@ export interface FilesQuery {
   name?: string;
   tags?: string[];
   visibility?: "public" | "private";
+  archive?: "tar.gz" | "none";
   limit: number;
   cursor?: string;
 }
@@ -75,6 +84,7 @@ export function buildFilesQuery(query: FilesQuery): string {
   if (query.name) params.set("name", query.name);
   for (const tag of query.tags ?? []) params.append("tag", tag);
   if (query.visibility) params.set("visibility", query.visibility);
+  if (query.archive) params.set("archive", query.archive);
   params.set("limit", String(query.limit));
   if (query.cursor) params.set("cursor", query.cursor);
   return params.toString();
@@ -109,10 +119,19 @@ export interface AdminApi {
       name: string;
       tags: string[];
       visibility: "public" | "private";
+      archive?: "tar.gz";
     },
   ): Promise<FileEntry>;
-  fetchRawText(id: string, maxBytes: number): Promise<string>;
-  fetchRawBlob(id: string): Promise<Blob>;
+  fetchRawText(
+    id: string,
+    maxBytes: number,
+    options?: { signal?: AbortSignal },
+  ): Promise<string>;
+  fetchRawBlob(id: string, options?: { signal?: AbortSignal }): Promise<Blob>;
+  fetchRawStream(
+    id: string,
+    options?: { signal?: AbortSignal },
+  ): Promise<Response>;
 }
 
 async function readErrorMessage(response: Response): Promise<{
@@ -191,25 +210,45 @@ export function createAdminApi(options: AdminApiOptions): AdminApi {
       await request(`/api/files/${id}`, { method: "DELETE" });
     },
     async uploadFile(body, uploadOptions) {
-      const params = new URLSearchParams();
-      params.set("name", uploadOptions.name);
-      for (const tag of uploadOptions.tags) params.append("tag", tag);
-      if (uploadOptions.visibility === "private") params.set("private", "true");
-      const response = await request(`/api/files?${params.toString()}`, {
+      // Metadata travels percent-encoded in x-fs-* headers so filenames and
+      // tags never enter the request URL (and any access logs of it).
+      const headers: Record<string, string> = {
+        "x-fs-name": encodeURIComponent(uploadOptions.name),
+      };
+      if (uploadOptions.tags.length > 0) {
+        headers["x-fs-tags"] = uploadOptions.tags
+          .map((tag) => encodeURIComponent(tag))
+          .join(",");
+      }
+      if (uploadOptions.visibility === "private")
+        headers["x-fs-private"] = "true";
+      if (uploadOptions.archive)
+        headers["x-fs-archive"] = uploadOptions.archive;
+      const response = await request("/api/files", {
         method: "POST",
+        headers,
         body,
       });
       return (await response.json()) as FileEntry;
     },
-    async fetchRawText(id, maxBytes) {
+    async fetchRawText(id, maxBytes, fetchOptions = {}) {
       const response = await request(`/raw/${id}`, {
-        headers: { range: `bytes=0-${maxBytes - 1}` },
+        // A range of "bytes=0--1" would be malformed; zero-byte objects are
+        // fetched without a range header and yield an empty string.
+        headers:
+          maxBytes > 0 ? { range: `bytes=0-${maxBytes - 1}` } : undefined,
+        signal: fetchOptions.signal,
       });
       return response.text();
     },
-    async fetchRawBlob(id) {
-      const response = await request(`/raw/${id}`);
+    async fetchRawBlob(id, fetchOptions = {}) {
+      const response = await request(`/raw/${id}`, {
+        signal: fetchOptions.signal,
+      });
       return response.blob();
+    },
+    async fetchRawStream(id, fetchOptions = {}) {
+      return request(`/raw/${id}`, { signal: fetchOptions.signal });
     },
   };
 }

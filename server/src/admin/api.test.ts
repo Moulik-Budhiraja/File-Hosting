@@ -25,6 +25,17 @@ describe("buildFilesQuery", () => {
     );
     assert.equal(buildFilesQuery({ limit: 25 }), "limit=25");
   });
+
+  it("serializes the archive filter when set", () => {
+    assert.equal(
+      buildFilesQuery({ archive: "tar.gz", limit: 16 }),
+      "archive=tar.gz&limit=16",
+    );
+    assert.equal(
+      buildFilesQuery({ archive: "none", limit: 16 }),
+      "archive=none&limit=16",
+    );
+  });
 });
 
 describe("createAdminApi", () => {
@@ -140,27 +151,87 @@ describe("createAdminApi", () => {
     });
   });
 
-  it("uploads with name, tags, and visibility in the query string", async () => {
-    const seen: { url?: string; method?: string } = {};
+  it("uploads with metadata in x-fs-* headers and a metadata-free URL", async () => {
+    const seen: { url?: string; method?: string; headers?: Headers } = {};
     const api = createAdminApi({
       fetchImpl: async (input, init) => {
         seen.url = input as string;
         seen.method = init?.method;
+        seen.headers = new Headers(init?.headers);
         return jsonResponse(201, { id: "abc1234" });
       },
       getToken: () => "secret",
     });
     const created = await api.uploadFile(new Blob(["hi"]), {
-      name: "notes.txt",
-      tags: ["a", "b"],
+      name: "café notes.txt",
+      tags: ["a", "télé b"],
       visibility: "private",
+      archive: "tar.gz",
     });
     assert.equal(created.id, "abc1234");
     assert.equal(seen.method, "POST");
+    // Filenames and tags must never appear in the request URL (access logs).
+    assert.equal(seen.url, "/api/files");
     assert.equal(
-      seen.url,
-      "/api/files?name=notes.txt&tag=a&tag=b&private=true",
+      seen.headers?.get("x-fs-name"),
+      encodeURIComponent("café notes.txt"),
     );
+    assert.equal(
+      seen.headers?.get("x-fs-tags"),
+      ["a", encodeURIComponent("télé b")].join(","),
+    );
+    assert.equal(seen.headers?.get("x-fs-private"), "true");
+    assert.equal(seen.headers?.get("x-fs-archive"), "tar.gz");
+  });
+
+  it("omits the private and archive headers for public non-archive uploads", async () => {
+    const seen: { headers?: Headers } = {};
+    const api = createAdminApi({
+      fetchImpl: async (_input, init) => {
+        seen.headers = new Headers(init?.headers);
+        return jsonResponse(201, { id: "abc1234" });
+      },
+      getToken: () => "secret",
+    });
+    await api.uploadFile(new Blob(["hi"]), {
+      name: "plain.txt",
+      tags: [],
+      visibility: "public",
+    });
+    assert.equal(seen.headers?.get("x-fs-private"), null);
+    assert.equal(seen.headers?.get("x-fs-archive"), null);
+    assert.equal(seen.headers?.get("x-fs-tags"), null);
+  });
+
+  it("omits the range header for zero-byte text previews", async () => {
+    const seen: { range?: string | null } = {};
+    const api = createAdminApi({
+      fetchImpl: async (_input, init) => {
+        seen.range = new Headers(init?.headers).get("range");
+        return new Response("", { status: 200 });
+      },
+      getToken: () => "secret",
+    });
+    const text = await api.fetchRawText("abc1234", 0);
+    assert.equal(text, "");
+    assert.equal(seen.range, null);
+  });
+
+  it("passes an abort signal through raw fetches", async () => {
+    const seen: { signals: (AbortSignal | null | undefined)[] } = {
+      signals: [],
+    };
+    const api = createAdminApi({
+      fetchImpl: async (_input, init) => {
+        seen.signals.push(init?.signal);
+        return new Response("body", { status: 200 });
+      },
+      getToken: () => "secret",
+    });
+    const controller = new AbortController();
+    await api.fetchRawText("abc1234", 16, { signal: controller.signal });
+    await api.fetchRawBlob("abc1234", { signal: controller.signal });
+    assert.deepEqual(seen.signals, [controller.signal, controller.signal]);
   });
 
   it("fetches health without a token", async () => {

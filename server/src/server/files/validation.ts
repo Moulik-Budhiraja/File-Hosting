@@ -111,6 +111,20 @@ export function parseArchive(value: string | null): ArchiveType {
   return value;
 }
 
+export function parseArchiveFilter(
+  value: string | null,
+): ArchiveType | "none" | undefined {
+  if (value === null || value === "") return undefined;
+  if (value !== "tar.gz" && value !== "none") {
+    throw new AppError(
+      400,
+      "invalid_archive",
+      "Archive filter must be tar.gz or none",
+    );
+  }
+  return value;
+}
+
 export function parseBoolean(value: string | null, fallback = false): boolean {
   if (value === null || value === "") return fallback;
   if (value === "true") return true;

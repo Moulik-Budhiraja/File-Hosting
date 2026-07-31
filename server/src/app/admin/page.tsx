@@ -5,6 +5,7 @@ import { useEffect, useState } from "react";
 
 import { adminApi, useAdminData } from "@/admin/client";
 import { LoadFallback } from "@/admin/components/LoadFallback";
+import { StaleBanner } from "@/admin/components/StaleBanner";
 import { ProposedBlock } from "@/admin/components/ProposedBlock";
 import { StateBanner } from "@/admin/components/StateBanner";
 import {
@@ -20,7 +21,9 @@ const RECENT_LIMIT = 12;
 
 export default function OverviewPage() {
   const system = useAdminData(() => adminApi.getSystem(), [], {
-    refreshMs: 30_000,
+    // Current transfers are ephemeral; a 30 s poll made the "live" table miss
+    // ordinary uploads entirely. One second keeps this in-process view useful.
+    refreshMs: 1_000,
   });
   const recent = useAdminData(
     () => adminApi.listFiles({ limit: RECENT_LIMIT }),
@@ -77,6 +80,13 @@ export default function OverviewPage() {
         </p>
       </div>
 
+      <StaleBanner
+        status={info ? system.status : "ready"}
+        message={system.message}
+        lastSuccessAt={system.lastSuccessAt}
+        onRetry={system.reload}
+      />
+
       {info ? (
         <section className="storage-band" aria-label="Storage">
           <div className="storage-figures">
@@ -93,7 +103,7 @@ export default function OverviewPage() {
                   warnings.some(
                     (warning) =>
                       warning.severity !== "info" &&
-                      warning.title.toLowerCase().includes("free space"),
+                      warning.kind === "free-space",
                   )
                     ? "text-warning"
                     : ""
@@ -139,13 +149,73 @@ export default function OverviewPage() {
             <div className="panel-head">
               <h2 className="section-label">
                 Active transfers
-                <small>Proposed · Not implemented</small>
+                <small>
+                  {info
+                    ? `${info.transfers.length} ${info.transfers.length === 1 ? "stream" : "streams"} · this server process · no history kept`
+                    : "awaiting /api/system"}
+                </small>
               </h2>
             </div>
-            <p className="proposed-items" style={{ padding: "0 32px 18px" }}>
-              streamed uploads/downloads are not instrumented — the server
-              exposes no transfer-metrics API, so nothing is shown here.
-            </p>
+            {info ? (
+              info.transfers.length === 0 ? (
+                <p
+                  className="warning-detail"
+                  style={{ padding: "0 32px 18px" }}
+                >
+                  none in flight right now — streamed uploads and downloads
+                  appear here only while they are active
+                </p>
+              ) : (
+                <div className="table-scroll">
+                  <table className="data-table">
+                    <thead>
+                      <tr>
+                        <th scope="col">Object</th>
+                        <th scope="col" style={{ textAlign: "right" }}>
+                          Transferred
+                        </th>
+                        <th scope="col" className="cell-optional">
+                          Progress
+                        </th>
+                        <th scope="col">Stage</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {info.transfers.map((transfer, index) => (
+                        <tr key={`${transfer.started_at}-${index}`}>
+                          <td className="cell-name">
+                            <span aria-hidden>
+                              {transfer.direction === "upload" ? "↑ " : "↓ "}
+                            </span>
+                            {transfer.name}
+                          </td>
+                          <td className="cell-size">
+                            {formatBytes(transfer.bytes)}
+                            {transfer.total_bytes !== null
+                              ? ` / ${formatBytes(transfer.total_bytes)}`
+                              : ""}
+                          </td>
+                          <td className="cell-mime cell-optional">
+                            {transfer.total_bytes
+                              ? `${Math.min(100, Math.round((transfer.bytes / transfer.total_bytes) * 100))}%`
+                              : "size unknown"}
+                          </td>
+                          <td className="cell-vis">
+                            {transfer.direction === "upload"
+                              ? "streaming → .part"
+                              : "streaming → client"}
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              )
+            ) : (
+              <p className="warning-detail" style={{ padding: "0 32px 18px" }}>
+                unavailable until /api/system responds
+              </p>
+            )}
           </section>
 
           <section
@@ -158,7 +228,13 @@ export default function OverviewPage() {
                 all files →
               </Link>
             </div>
-            {recent.status === "ready" && recent.data ? (
+            <StaleBanner
+              status={recent.data ? recent.status : "ready"}
+              message={recent.message}
+              lastSuccessAt={recent.lastSuccessAt}
+              onRetry={recent.reload}
+            />
+            {recent.data ? (
               recent.data.items.length === 0 ? (
                 <StateBanner state="empty" />
               ) : (

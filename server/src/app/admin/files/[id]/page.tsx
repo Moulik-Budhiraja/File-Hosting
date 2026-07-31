@@ -2,13 +2,18 @@
 
 import Link from "next/link";
 import { useParams, useRouter } from "next/navigation";
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 
 import { adminApi, useAdminData } from "@/admin/client";
 import { type FileEntry } from "@/admin/api";
 import { ConfirmDialog } from "@/admin/components/ConfirmDialog";
 import { LoadFallback } from "@/admin/components/LoadFallback";
-import { formatExactBytes, formatUtcDateTime } from "@/admin/format";
+import { browserDownloadEnvironment, downloadFile } from "@/admin/download";
+import {
+  formatBytes,
+  formatExactBytes,
+  formatUtcDateTime,
+} from "@/admin/format";
 
 const TEXT_PREVIEW_LIMIT = 256 * 1024;
 const IMAGE_PREVIEW_LIMIT = 4 * 1024 * 1024;
@@ -34,13 +39,22 @@ function Preview({ file }: { file: FileEntry }) {
   useEffect(() => {
     let cancelled = false;
     let objectUrl: string | null = null;
+    // Aborting on cleanup stops in-flight preview fetches on unmount or
+    // object change, so a stable object triggers exactly one request.
+    const controller = new AbortController();
     setText(null);
     setImageUrl(null);
     setFailed(false);
 
-    if (textEligible) {
+    if (textEligible && file.size === 0) {
+      // A zero-byte text object is a truthful empty preview, not a fetch —
+      // and never a malformed "bytes=0--1" range request.
+      setText("");
+    } else if (textEligible) {
       adminApi
-        .fetchRawText(file.id, Math.min(file.size, TEXT_PREVIEW_LIMIT))
+        .fetchRawText(file.id, Math.min(file.size, TEXT_PREVIEW_LIMIT), {
+          signal: controller.signal,
+        })
         .then((value) => {
           if (!cancelled) setText(value);
         })
@@ -49,7 +63,7 @@ function Preview({ file }: { file: FileEntry }) {
         });
     } else if (imageEligible) {
       adminApi
-        .fetchRawBlob(file.id)
+        .fetchRawBlob(file.id, { signal: controller.signal })
         .then((blob) => {
           objectUrl = URL.createObjectURL(blob);
           if (!cancelled) setImageUrl(objectUrl);
@@ -60,6 +74,7 @@ function Preview({ file }: { file: FileEntry }) {
     }
     return () => {
       cancelled = true;
+      controller.abort();
       if (objectUrl) URL.revokeObjectURL(objectUrl);
     };
   }, [file.id, file.size, file.visibility, textEligible, imageEligible]);
@@ -73,6 +88,10 @@ function Preview({ file }: { file: FileEntry }) {
   if (textEligible)
     return text === null ? (
       <p className="preview-placeholder">loading text preview …</p>
+    ) : text === "" && file.size === 0 ? (
+      <p className="preview-placeholder">
+        empty file — 0 bytes, nothing to preview
+      </p>
     ) : (
       <pre>
         {text}
@@ -94,35 +113,33 @@ function Preview({ file }: { file: FileEntry }) {
   );
 }
 
-// Private raw reads require the bearer header, so downloads stream through an
-// authenticated fetch into a temporary object URL instead of a plain anchor.
-async function downloadWithAuth(file: FileEntry): Promise<void> {
-  const blob = await adminApi.fetchRawBlob(file.id);
-  const objectUrl = URL.createObjectURL(blob);
-  const anchor = document.createElement("a");
-  anchor.href = objectUrl;
-  anchor.download = file.name;
-  document.body.append(anchor);
-  anchor.click();
-  anchor.remove();
-  URL.revokeObjectURL(objectUrl);
-}
-
 function CopyButton({ value, label }: { value: string; label: string }) {
-  const [copied, setCopied] = useState(false);
+  const [state, setState] = useState<"idle" | "pending" | "copied" | "failed">(
+    "idle",
+  );
   return (
     <button
       type="button"
-      className="button button-ghost"
+      className={`button button-ghost${state === "failed" ? " text-danger" : ""}`}
       aria-label={label}
+      disabled={state === "pending"}
       onClick={() => {
-        void navigator.clipboard.writeText(value).then(() => {
-          setCopied(true);
-          setTimeout(() => setCopied(false), 1_500);
-        });
+        if (state === "pending") return;
+        setState("pending");
+        navigator.clipboard
+          .writeText(value)
+          .then(() => setState("copied"))
+          .catch(() => setState("failed"))
+          .finally(() => setTimeout(() => setState("idle"), 1_500));
       }}
     >
-      {copied ? "copied" : "copy"}
+      {state === "pending"
+        ? "copying …"
+        : state === "copied"
+          ? "copied"
+          : state === "failed"
+            ? "copy failed"
+            : "copy"}
     </button>
   );
 }
@@ -145,6 +162,12 @@ export default function InspectorPage() {
   const [confirmOpen, setConfirmOpen] = useState(false);
   const [deleting, setDeleting] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [download, setDownload] = useState<{
+    busy: boolean;
+    bytes: number;
+    error: string | null;
+  }>({ busy: false, bytes: 0, error: null });
+  const downloadAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
     setVisibility(null);
@@ -200,6 +223,36 @@ export default function InspectorPage() {
     }
   }
 
+  async function startDownload() {
+    if (!file || download.busy) return;
+    const controller = new AbortController();
+    downloadAbortRef.current = controller;
+    setDownload({ busy: true, bytes: 0, error: null });
+    try {
+      // Streams straight to disk where the File System Access API exists;
+      // otherwise a bounded buffered fallback that refuses oversized objects
+      // before any bytes are fetched.
+      await downloadFile(
+        { id: file.id, name: file.name, size: file.size },
+        browserDownloadEnvironment(adminApi),
+        {
+          signal: controller.signal,
+          onProgress: (bytes) =>
+            setDownload((current) => ({ ...current, bytes })),
+        },
+      );
+      setDownload({ busy: false, bytes: 0, error: null });
+    } catch (error) {
+      setDownload({
+        busy: false,
+        bytes: 0,
+        error: error instanceof Error ? error.message : "Download failed",
+      });
+    } finally {
+      downloadAbortRef.current = null;
+    }
+  }
+
   async function confirmDelete() {
     setDeleting(true);
     setDeleteError(null);
@@ -226,10 +279,24 @@ export default function InspectorPage() {
           <button
             type="button"
             className="button button-primary"
-            onClick={() => void downloadWithAuth(file)}
+            disabled={download.busy}
+            onClick={() => void startDownload()}
           >
-            Download
+            {download.busy
+              ? file.size > 0
+                ? `Downloading … ${formatBytes(download.bytes)} / ${formatBytes(file.size)}`
+                : "Downloading …"
+              : "Download"}
           </button>
+          {download.busy ? (
+            <button
+              type="button"
+              className="button"
+              onClick={() => downloadAbortRef.current?.abort()}
+            >
+              Cancel download
+            </button>
+          ) : null}
           <button
             type="button"
             className="button"
@@ -258,6 +325,11 @@ export default function InspectorPage() {
           {deleteError}
         </p>
       ) : null}
+      {download.error ? (
+        <p className="state-banner state-api" role="alert">
+          download failed — {download.error}
+        </p>
+      ) : null}
 
       <div className="inspector-split">
         <section className="preview-pane" aria-label="Preview">
@@ -273,7 +345,12 @@ export default function InspectorPage() {
           <div>
             <div className="url-row">
               <span className="url-label">Preview</span>
-              <span className="url-value">{file.preview_url}</span>
+              <span className="url-value">
+                {file.preview_url}
+                {file.visibility === "private"
+                  ? " · auth: bearer header required"
+                  : ""}
+              </span>
               <CopyButton value={file.preview_url} label="Copy preview URL" />
             </div>
             <div className="url-row">
@@ -281,11 +358,18 @@ export default function InspectorPage() {
               <span className="url-value">
                 {file.raw_url}
                 {file.visibility === "private"
-                  ? " · auth: bearer required (private)"
+                  ? " · auth: bearer header required"
                   : ""}
               </span>
               <CopyButton value={file.raw_url} label="Copy raw URL" />
             </div>
+            {file.visibility === "private" ? (
+              <p className="url-note">
+                both URLs need the Authorization: Bearer header — pasting them
+                into a browser address bar cannot attach it, so unauthenticated
+                requests receive 404 (by design)
+              </p>
+            ) : null}
           </div>
         </section>
 
@@ -330,7 +414,7 @@ export default function InspectorPage() {
                   ? "tar.gz — uploaded as a directory archive"
                   : "none"}
                 <p className="meta-note">
-                  archive/hide state · Proposed · Not implemented
+                  archive/hide toggle · Proposed · Not implemented
                 </p>
               </dd>
             </div>

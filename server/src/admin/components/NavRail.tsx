@@ -51,8 +51,10 @@ export function NavRail({
       <div className="nav-product">
         <p className="nav-brand">fs-server</p>
         <p className="nav-env">
+          {/* Unknown health is neutral — success green is earned, never
+              assumed before the first /healthz response. */}
           <span
-            className={`dot ${health && !health.ok ? "dot-danger" : "dot-success"}`}
+            className={`dot ${health === null ? "dot-muted" : health.ok ? "dot-success" : "dot-danger"}`}
             aria-hidden
           />
           admin console

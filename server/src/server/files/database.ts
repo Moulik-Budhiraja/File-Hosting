@@ -263,6 +263,12 @@ export class FileRepository {
       where.push("f.visibility = ?");
       args.push(options.visibility);
     }
+    if (options.archive === "none") {
+      where.push("f.archive IS NULL");
+    } else if (options.archive) {
+      where.push("f.archive = ?");
+      args.push(options.archive);
+    }
     for (const tag of options.tags) {
       where.push(`EXISTS (
         SELECT 1 FROM file_tags filter_ft

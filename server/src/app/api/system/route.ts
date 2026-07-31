@@ -23,6 +23,14 @@ export async function GET(request: Request): Promise<Response> {
         temp_part_count: info.storage.tempPartCount,
       },
       database: { db_bytes: info.database.dbBytes },
+      // Current in-flight transfers for THIS server process only; no history.
+      transfers: service.activeTransfers().map((transfer) => ({
+        direction: transfer.direction,
+        name: transfer.name,
+        bytes: transfer.bytes,
+        total_bytes: transfer.totalBytes,
+        started_at: transfer.startedAt,
+      })),
       config: {
         max_upload_bytes: info.config.maxUploadBytes,
         min_free_bytes: info.config.minFreeBytes,
