@@ -128,6 +128,7 @@ npm install --global @moulikbudhiraja/fs-cli
 The primary forms are:
 
 ```text
+fs auth ...        save/check/delete the token in the OS credential store
 fs <path>          upload shorthand
 fs up ...          explicit upload
 fs down ...        download
@@ -138,6 +139,11 @@ fs tag ...         manage tags
 fs visibility ...  change public/private visibility
 fs rm ...          delete
 ```
+
+Run `fs auth set` once to save the token in macOS Keychain, Windows Credential
+Manager, or a Secret Service-compatible Linux keyring. Later human and agent
+invocations authenticate automatically; `FS_TOKEN` remains an explicit
+override for CI and headless environments.
 
 The CLI supports shell globs and its own quoted glob expansion for uploads, with
 `-r` required for directories (each directory becomes one `.tar.gz` object).

@@ -8,6 +8,7 @@ import { parseArgs } from "node:util";
 import { createInterface } from "node:readline/promises";
 import { ApiClient, type ListParams } from "./api.js";
 import { loadConfig } from "./config.js";
+import { createCredentialStore, readSecret, type CredentialStore } from "./credentials.js";
 import { asCliError, CliError, EXIT, type ExitCode } from "./errors.js";
 import { extractArchive } from "./extract.js";
 import { prepareInputs } from "./inputs.js";
@@ -15,7 +16,7 @@ import { chooseOutputMode, formatBytes, printInfo, printItems, type OutputMode }
 import type { FileMetadata, Streams } from "./types.js";
 
 const LARGE_UPLOAD = 1024 ** 3;
-const COMMANDS = new Set(["up", "down", "list", "find", "info", "tag", "visibility", "rm", "help"]);
+const COMMANDS = new Set(["up", "down", "list", "find", "info", "tag", "visibility", "rm", "auth", "help"]);
 const FILE_ID = /^[A-Za-z0-9]{7}$/;
 
 const commonOutputOptions = {
@@ -32,6 +33,8 @@ export interface RunDependencies {
   env?: NodeJS.ProcessEnv;
   fetch?: typeof fetch;
   streams?: Streams;
+  credentials?: CredentialStore;
+  readSecret?: () => Promise<string>;
 }
 
 const ROOT_HELP = `Usage:
@@ -44,6 +47,7 @@ const ROOT_HELP = `Usage:
   fs tag <id> add|remove|set <tag...>
   fs visibility <id> public|private
   fs rm <id...> [--yes]             Delete files
+  fs auth set|status|delete         Manage the saved token
 
 Environment:
   FS_URL       Server URL (default: https://files.moulik.dev)
@@ -69,6 +73,12 @@ Options:
   --allow-large-upload        Confirm prior human approval above 1 GiB
   --no-input                  Never prompt
   --json | --jsonl | --id     Machine-readable output
+`;
+
+const AUTH_HELP = `Usage: fs auth set|status|delete
+
+--no-input is accepted by status and delete, which never prompt. auth set is
+interactive and rejects --no-input; use FS_TOKEN in noninteractive environments.
 `;
 
 interface ParsedArguments {
@@ -99,8 +109,52 @@ function writeError(streams: Streams, error: CliError, prefix = "fs"): void {
 
 function requireToken(token: string): void {
   if (!token) {
-    throw new CliError("FS_TOKEN is required", EXIT.auth, "MISSING_TOKEN");
+    throw new CliError("No token configured. Run 'fs auth set' or set FS_TOKEN.", EXIT.auth, "MISSING_TOKEN");
   }
+}
+
+async function authCommand(args: string[], dependencies: RunDependencies, streams: Streams): Promise<ExitCode> {
+  const parsed = parse(args, { "no-input": { type: "boolean" }, help: { type: "boolean", short: "h" } });
+  if (parsed.values.help) {
+    streams.stdout.write(AUTH_HELP);
+    return EXIT.success;
+  }
+  const [action, ...extra] = parsed.positionals;
+  if (extra.length || !action || !["set", "status", "delete"].includes(action)) {
+    throw new CliError("Usage: fs auth set|status|delete", EXIT.usage, "INVALID_ARGUMENTS");
+  }
+  if (action === "set" && parsed.values["no-input"]) {
+    throw new CliError(
+      "fs auth set is interactive and cannot be used with --no-input; set FS_TOKEN instead",
+      EXIT.usage,
+      "INTERACTIVE_REQUIRED",
+    );
+  }
+  if (!dependencies.credentials) {
+    throw new CliError("Secure credential storage is unavailable", EXIT.auth, "CREDENTIAL_STORE_UNAVAILABLE");
+  }
+  if (action === "status") {
+    const configured = Boolean(dependencies.credentials.getPassword());
+    streams.stdout.write(`Authentication: ${configured ? "configured" : "not configured"}\n`);
+    return configured ? EXIT.success : EXIT.auth;
+  }
+  if (action === "delete") {
+    const deleted = dependencies.credentials.deletePassword();
+    if (!deleted) {
+      streams.stderr.write("No saved token was configured.\n");
+      return EXIT.auth;
+    }
+    streams.stderr.write("Saved token deleted from the operating system credential store.\n");
+    return EXIT.success;
+  }
+  if (!dependencies.readSecret) {
+    throw new CliError("Secure credential storage is unavailable", EXIT.auth, "CREDENTIAL_STORE_UNAVAILABLE");
+  }
+  const token = (await dependencies.readSecret()).trim();
+  if (!token) throw new CliError("Token cannot be empty", EXIT.usage, "EMPTY_TOKEN");
+  dependencies.credentials.setPassword(token);
+  streams.stderr.write("Token saved in the operating system credential store.\n");
+  return EXIT.success;
 }
 
 function validateIds(ids: string[]): void {
@@ -576,7 +630,7 @@ async function dispatch(argv: string[], dependencies: RunDependencies): Promise<
     return EXIT.success;
   }
   if (argv[0] === "--version" || argv[0] === "-V") {
-    streams.stdout.write("0.1.0\n");
+    streams.stdout.write("0.2.0\n");
     return EXIT.success;
   }
 
@@ -584,6 +638,36 @@ async function dispatch(argv: string[], dependencies: RunDependencies): Promise<
   const command = explicit ? argv[0]! : "up";
   const args = explicit ? argv.slice(1) : argv;
   const config = loadConfig(dependencies.env);
+  const needsToken = !args.includes("--help") && !args.includes("-h");
+  const authPositionals = args.filter((arg) => arg !== "--no-input");
+  const validAuthAction = command === "auth"
+    && authPositionals.length === 1
+    && ["set", "status", "delete"].includes(authPositionals[0]!);
+  const interactiveAuthSetBlocked = validAuthAction
+    && authPositionals[0] === "set"
+    && args.includes("--no-input");
+  if (command === "auth" && (!validAuthAction || interactiveAuthSetBlocked)) {
+    return authCommand(args, dependencies, streams);
+  }
+  let credentials = dependencies.credentials;
+  if (!credentials && validAuthAction) {
+    credentials = await createCredentialStore(config.baseUrl);
+  } else if (command !== "auth" && !config.token && needsToken) {
+    try {
+      credentials ??= await createCredentialStore(config.baseUrl);
+      config.token = credentials.getPassword() ?? "";
+    } catch {
+      // Native keyrings may be unavailable in headless sessions. Preserve the
+      // environment-variable fallback and report the standard missing-token guidance.
+      credentials = undefined;
+    }
+  }
+  const runtimeDependencies: RunDependencies = {
+    ...dependencies,
+    credentials,
+    readSecret: dependencies.readSecret ?? (() => readSecret(streams)),
+  };
+  if (command === "auth") return authCommand(args, runtimeDependencies, streams);
   if (!args.includes("--help") && !args.includes("-h")) requireToken(config.token);
   const api = new ApiClient(config, dependencies.fetch);
   switch (command) {

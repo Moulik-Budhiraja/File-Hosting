@@ -19,12 +19,33 @@ npm run build
 npm link
 ```
 
-Configure the endpoint and shared bearer token:
+Save the shared bearer token in the operating system credential store (macOS
+Keychain, Windows Credential Manager, or the Linux secret service):
+
+```sh
+fs auth set
+fs auth status
+```
+
+The prompt does not echo the token. To remove the saved token, run
+`fs auth delete`. The noninteractive `auth status` and `auth delete` actions
+accept and ignore the global `--no-input` flag. `auth set` always requires an
+interactive terminal and rejects `--no-input`; use `FS_TOKEN` instead in
+noninteractive environments.
+
+For CI and other noninteractive environments, configure the endpoint and token
+with environment variables instead:
 
 ```sh
 export FS_URL=https://files.moulik.dev  # this is the default
 export FS_TOKEN=replace-with-the-shared-secret
 ```
+
+`FS_TOKEN` takes precedence over a saved credential when both are present.
+Saved credentials are scoped to `FS_URL`, so different servers do not share
+tokens. Linux desktop environments normally provide Secret Service; headless
+Linux sessions need an unlocked compatible keyring on the session D-Bus or
+should use `FS_TOKEN`.
 
 ## Commands
 
