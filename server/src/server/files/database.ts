@@ -1,6 +1,3 @@
-import { mkdir } from "node:fs/promises";
-import path from "node:path";
-
 import {
   createClient,
   type Client,
@@ -8,6 +5,7 @@ import {
   type Row,
 } from "@libsql/client";
 
+import { prepareLocalDatabaseDirectory } from "./database-url";
 import { AppError } from "./errors";
 import type {
   ArchiveType,
@@ -50,13 +48,6 @@ CREATE INDEX IF NOT EXISTS files_visibility_idx ON files(visibility);
 CREATE INDEX IF NOT EXISTS files_owner_visibility_idx ON files(owner_id, visibility);
 CREATE INDEX IF NOT EXISTS file_tags_tag_name_idx ON file_tags(tag_name, file_id);
 `;
-
-function localDatabasePath(databaseUrl: string): string | null {
-  if (!databaseUrl.startsWith("file:")) return null;
-  const raw = databaseUrl.slice("file:".length).split("?")[0];
-  if (!raw || raw === ":memory:") return null;
-  return path.resolve(decodeURIComponent(raw));
-}
 
 function rowString(row: Row, key: string): string {
   const value = row[key];
@@ -133,9 +124,7 @@ export class FileRepository {
   }
 
   static async create(databaseUrl: string): Promise<FileRepository> {
-    const databasePath = localDatabasePath(databaseUrl);
-    if (databasePath)
-      await mkdir(path.dirname(databasePath), { recursive: true });
+    await prepareLocalDatabaseDirectory(databaseUrl);
     const repository = new FileRepository(
       createClient({ url: databaseUrl, intMode: "number" }),
     );

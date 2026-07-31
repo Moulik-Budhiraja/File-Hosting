@@ -39,9 +39,7 @@ export async function POST(request: Request): Promise<Response> {
       remoteAddress,
     );
     const session = await service.auth.createSession(user.id);
-    const secure =
-      process.env.NODE_ENV === "production" ||
-      new URL(service.config.publicUrl).protocol === "https:";
+    const secure = new URL(service.config.publicUrl).protocol === "https:";
     const cookie = `${SESSION_COOKIE}=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor((Date.parse(session.expiresAt) - Date.now()) / 1000)}${secure ? "; Secure" : ""}`;
     return json(
       { user: publicUser(user), expires_at: session.expiresAt },

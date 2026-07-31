@@ -34,7 +34,8 @@ For a container's first start, set `FS_BOOTSTRAP_USERNAME` and
 `FS_BOOTSTRAP_PASSWORD` together. The server atomically creates an admin only
 when the users table is empty. Remove both variables immediately after the first
 successful start; leaving them configured makes a later start fail closed once
-users exist. Passwords must be 12-1024 characters.
+users exist. Passwords must be at least 12 characters and at most 72 UTF-8 bytes,
+matching bcrypt's input limit.
 
 ## Authentication and authorization
 
@@ -49,8 +50,9 @@ users exist. Passwords must be 12-1024 characters.
   Five failures per normalized username and client address in 15 minutes cause
   a temporary `429`. Configure the reverse proxy to replace, not append
   untrusted, `X-Real-IP`/`X-Forwarded-For` values.
-- Passwords use bcrypt with a random salt and cost 12. Raw passwords are never
-  stored or intentionally logged.
+- Passwords use bcrypt with a random salt and cost 12. Every password entry path
+  enforces a 12-character minimum and bcrypt's 72-byte UTF-8 maximum. Raw
+  passwords are never stored or intentionally logged.
 - Sessions are random 256-bit values stored only as SHA-256 digests with expiry
   and revocation. Disabled users fail every session/API-key lookup immediately.
 

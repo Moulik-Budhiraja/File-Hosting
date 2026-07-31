@@ -134,6 +134,38 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     );
   });
 
+  it("does not mark an HTTP public URL session cookie Secure in production", async (t) => {
+    const previousNodeEnv = process.env.NODE_ENV;
+    const previousPublicUrl = service.config.publicUrl;
+    Reflect.set(process.env, "NODE_ENV", "production");
+    service.config.publicUrl = "http://localhost:3000";
+    t.after(() => {
+      if (previousNodeEnv === undefined)
+        Reflect.deleteProperty(process.env, "NODE_ENV");
+      else Reflect.set(process.env, "NODE_ENV", previousNodeEnv);
+      service.config.publicUrl = previousPublicUrl;
+    });
+
+    const response = await login(
+      new Request("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          username: "admin",
+          password: "a sufficiently long admin password",
+        }),
+      }),
+    );
+
+    assert.equal(response.status, 200);
+    const cookie = response.headers.get("set-cookie") ?? "";
+    assert.match(cookie, /^fs_session=/u);
+    assert.doesNotMatch(cookie, /(?:^|;\s*)Secure(?:;|$)/iu);
+  });
+
   it("uses legacy bearer as admin and returns API key secrets only once", async (t) => {
     const logged: unknown[][] = [];
     const originalConsoleError = console.error;

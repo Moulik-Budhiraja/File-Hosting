@@ -18,11 +18,11 @@ export function normalizeUsername(value: string): string {
 }
 
 export function validatePassword(value: string): string {
-  if (value.length < 12 || value.length > 1024) {
+  if (value.length < 12 || Buffer.byteLength(value, "utf8") > 72) {
     throw new AppError(
       400,
       "invalid_password",
-      "Password must be at least 12 characters and no more than 1024 characters",
+      "Password must be at least 12 characters and no more than 72 UTF-8 bytes",
     );
   }
   return value;
@@ -37,7 +37,7 @@ export async function verifyPassword(
   encoded: string,
 ): Promise<boolean> {
   try {
-    return await bcrypt.compare(password, encoded);
+    return await bcrypt.compare(validatePassword(password), encoded);
   } catch {
     return false;
   }

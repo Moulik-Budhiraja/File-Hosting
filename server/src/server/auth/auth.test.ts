@@ -40,6 +40,23 @@ describe("password security", () => {
     assert.doesNotMatch(encoded, new RegExp(HASH_CREDENTIAL, "u"));
   });
 
+  it("rejects passwords beyond bcrypt's 72-byte UTF-8 limit", async () => {
+    const ascii72 = "a".repeat(72);
+    const ascii73 = `${ascii72}b`;
+    const multibyte72 = "界".repeat(24);
+    const multibyte73 = `${multibyte72}a`;
+
+    assert.equal(validatePassword(ascii72), ascii72);
+    assert.equal(Buffer.byteLength(multibyte72, "utf8"), 72);
+    assert.equal(validatePassword(multibyte72), multibyte72);
+    assert.throws(() => validatePassword(ascii73), /72 UTF-8 bytes/u);
+    assert.throws(() => validatePassword(multibyte73), /72 UTF-8 bytes/u);
+
+    const encoded = await hashPassword(ascii72);
+    assert.equal(await verifyPassword(ascii72, encoded), true);
+    assert.equal(await verifyPassword(ascii73, encoded), false);
+  });
+
   it("requires bootstrap username and password to be configured together", () => {
     assert.throws(
       () =>
@@ -54,6 +71,25 @@ describe("password security", () => {
 });
 
 describe("user repository", () => {
+  it("creates missing parent directories for a local SQLite database", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-create-test-"),
+    );
+    const databasePath = path.join(directory, "nested", "data", "files.db");
+    let repository: AuthRepository | undefined;
+    try {
+      repository = await AuthRepository.create(`file:${databasePath}`);
+      const admin = await repository.bootstrapAdmin({
+        username: "bootstrap.admin",
+        password: ADMIN_CREDENTIAL,
+      });
+      assert.equal(admin.role, "admin");
+    } finally {
+      await repository?.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("creates normalized users and protects the last active admin", async () => {
     const directory = await mkdtemp(path.join(os.tmpdir(), "fs-auth-test-"));
     const databaseUrl = `file:${path.join(directory, "auth.db")}`;

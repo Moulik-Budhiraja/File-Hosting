@@ -2,6 +2,7 @@ import { createHash, randomBytes, randomUUID } from "node:crypto";
 
 import { createClient, type Client, type Row } from "@libsql/client";
 
+import { prepareLocalDatabaseDirectory } from "../files/database-url";
 import { AppError } from "../files/errors";
 import { hashPassword, normalizeUsername, verifyPassword } from "./password";
 
@@ -99,6 +100,7 @@ export class AuthRepository {
   private constructor(private readonly client: Client) {}
 
   static async create(databaseUrl: string): Promise<AuthRepository> {
+    await prepareLocalDatabaseDirectory(databaseUrl);
     const client = createClient({ url: databaseUrl, intMode: "number" });
     await client.execute("PRAGMA foreign_keys = ON");
     await client.execute("PRAGMA busy_timeout = 5000");

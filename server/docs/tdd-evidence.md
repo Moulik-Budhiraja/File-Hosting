@@ -28,6 +28,25 @@ cycles observed in this worktree:
    - RED: `fs visibility <id> protected` returned exit code 2.
    - GREEN: the focused CLI test passed after extending only visibility types and
      validation to accept `protected`.
+7. Standalone bootstrap database directory
+   - RED: `npx tsx --test --test-name-pattern='creates missing parent directories'
+src/server/auth/auth.test.ts` failed with SQLite error 14 because the nested
+     parent directory did not exist.
+   - GREEN: the same focused test passed after both repositories shared local
+     `file:` database-directory preparation.
+8. HTTP canonical public URL cookie security
+   - RED: `npx tsx --test --test-name-pattern='does not mark an HTTP public URL'
+src/server/auth/http.test.ts` found `Secure` on the production-mode HTTP
+     session cookie.
+   - GREEN: the same focused test passed after cookie security was derived only
+     from the validated configured public URL scheme; the existing HTTPS test
+     continues to require `Secure`.
+9. Bcrypt UTF-8 input boundary
+   - RED: `npx tsx --test --test-name-pattern="rejects passwords beyond bcrypt's"
+src/server/auth/auth.test.ts` reported a missing rejection for 73-byte input.
+   - GREEN: the same focused test passed with exact 72-byte ASCII and multibyte
+     boundaries accepted, 73-byte forms rejected, and verification routed through
+     the central validator to prevent bcrypt truncation-equivalent credentials.
 
 Final full-suite commands and results are recorded in the pull request
 validation section.
