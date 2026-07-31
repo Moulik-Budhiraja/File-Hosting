@@ -108,6 +108,87 @@ describe("archive upload contract", { concurrency: false }, () => {
     );
   });
 
+  it("rejects short non-zero tails after the marker with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    for (const tail of [Buffer.from([0x41]), Buffer.alloc(511, 0x41)]) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(
+            gzipSync(
+              Buffer.concat([tarEntry("ok.txt", "fine"), tarTrailer(), tail]),
+            ),
+          ),
+          uploadOptions(`short-tail-${tail.length}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          return true;
+        },
+      );
+      // No metadata row, no live object, no lingering .part file.
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
+  it("rejects Windows drive-absolute entries and links with no persistence", async () => {
+    const { tarTrailer } = await import("./tar-fixtures");
+    const fixtures = [
+      Buffer.concat([tarEntry("C:\\absolute.txt", "x"), tarTrailer()]),
+      Buffer.concat([
+        tarEntry("link", "", { type: "2", linkname: "C:\\absolute.txt" }),
+        tarTrailer(),
+      ]),
+      Buffer.concat([tarEntry("\\\\server\\share\\f.txt", "x"), tarTrailer()]),
+    ];
+    for (const [index, fixture] of fixtures.entries()) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`windows-path-${index}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          return true;
+        },
+      );
+      assert.deepEqual(await storeState(), beforeState);
+    }
+  });
+
+  it("rejects a declared entry size impossible under the configured maximum with a size-limit reason", async () => {
+    // maxUploadBytes is 64 MiB → ceiling 128 GiB; declare 200 GiB via pax.
+    const paxSize = String(200 * 1024 ** 3);
+    let length = paxSize.length + 8;
+    for (;;) {
+      const next = String(length).length + paxSize.length + 7;
+      if (next === length) break;
+      length = next;
+    }
+    const record = `${length} size=${paxSize}\n`;
+    const payload = gzipSync(
+      Buffer.concat([
+        tarEntry("PaxHeader/huge", record, { type: "x" }),
+        tarEntry("huge.bin", ""),
+        Buffer.alloc(1024),
+      ]),
+    );
+    await assert.rejects(
+      service.upload(stream(payload), uploadOptions("huge.tar.gz")),
+      (error: unknown) => {
+        assert.ok(error instanceof AppError);
+        assert.equal(error.code, "invalid_archive");
+        assert.match(error.message, /size limit/u);
+        return true;
+      },
+    );
+  });
+
   it("accepts a structurally valid tar.gz and stores the original bytes", async () => {
     const bytes = validTarGz();
     const file = await service.upload(

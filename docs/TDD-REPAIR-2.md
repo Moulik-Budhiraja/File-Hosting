@@ -401,7 +401,8 @@ preserving the same rendered behavior.
 
 Production screenshots were regenerated in:
 
-`/Users/admin/Documents/Hermes Projects/fs-server-admin-dashboard-implementation/implementation-pass/`
+the established external `fs-server-admin-dashboard-implementation/implementation-pass/`
+artifact directory (kept outside the repository).
 
 Files: Overview/Files/Inspector/System at desktop 1440x960 and mobile 390x844,
 plus mobile navigation-open and token-gate captures. Same-scale Paper-vs-

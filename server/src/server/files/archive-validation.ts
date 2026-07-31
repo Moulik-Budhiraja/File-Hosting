@@ -63,15 +63,25 @@ function checksumMatches(block: Buffer): boolean {
   return stored === unsigned || stored === signed;
 }
 
+// Platform-independent lexical safety: the archive contract must hold on
+// every consumer OS, so Windows spellings reject even on POSIX hosts. After
+// backslash normalization a leading "/" covers POSIX-absolute, UNC
+// (\\server\share), device (\\.\) and extended (\\?\) forms; a single-letter
+// drive prefix covers both drive-absolute (C:/x, C:\x) and drive-relative
+// (C:x) forms.
+const WINDOWS_DRIVE_PREFIX = /^[A-Za-z]:/u;
+
 export function isUnsafeArchivePath(entryPath: string): boolean {
   const normalized = entryPath.replaceAll("\\", "/");
   if (normalized.startsWith("/")) return true;
+  if (WINDOWS_DRIVE_PREFIX.test(normalized)) return true;
   return normalized.split("/").includes("..");
 }
 
 function isUnsafeLinkTarget(entryPath: string, linkTarget: string): boolean {
   const normalizedTarget = linkTarget.replaceAll("\\", "/");
   if (normalizedTarget.startsWith("/")) return true;
+  if (WINDOWS_DRIVE_PREFIX.test(normalizedTarget)) return true;
   const parent = entryPath.replaceAll("\\", "/").split("/").slice(0, -1);
   const segments = [...parent];
   for (const segment of normalizedTarget.split("/")) {
@@ -135,13 +145,32 @@ class TarWalker {
   private captured = 0;
   private overridePath: string | null = null;
   private overrideLink: string | null = null;
+  private overrideSize: number | null = null;
   private globalPath: string | null = null;
   private globalLink: string | null = null;
+  private globalSize: number | null = null;
   private entrySeen = false;
+
+  // Largest decompressed size a single entry may declare. Derived from the
+  // configured upload maximum × the gzip ratio ceiling; Infinity when no
+  // maximum is configured.
+  constructor(private readonly maxEntryBytes = Infinity) {}
 
   push(data: Buffer): void {
     let offset = 0;
     while (offset < data.length) {
+      if (this.done) {
+        // Strict termination: once the end-of-archive marker (two zero
+        // records) is reached, only zero-valued padding may follow — full
+        // records, or a partial final record cut by end-of-stream. Every
+        // non-zero trailing byte rejects, block-aligned or not.
+        for (let index = offset; index < data.length; index += 1) {
+          if (data[index] !== 0) {
+            throw invalid("data found after the end-of-archive marker");
+          }
+        }
+        return;
+      }
       if (this.contentRemaining > 0) {
         const take = Math.min(this.contentRemaining, data.length - offset);
         if (this.capture) {
@@ -190,10 +219,6 @@ class TarWalker {
 
   private consumeHeaderBlock(block: Buffer): void {
     const isZero = block.every((byte) => byte === 0);
-    if (this.done) {
-      if (!isZero) throw invalid("data found after the end-of-archive marker");
-      return;
-    }
     if (isZero) {
       this.zeroBlocks += 1;
       if (this.zeroBlocks === 2) this.done = true;
@@ -215,6 +240,10 @@ class TarWalker {
     const headerPath = prefix
       ? `${prefix}/${cString(block.subarray(0, 100))}`
       : cString(block.subarray(0, 100));
+    // Metadata records are always framed by their own header size; only an
+    // ordinary entry's content honors a pending pax size override (the pax
+    // spelling for members beyond the 8 GiB octal header limit).
+    let frameSize = size;
 
     if (type === "L" || type === "K" || type === "x" || type === "g") {
       // Metadata entry — its payload can override the next entry's path or
@@ -237,6 +266,7 @@ class TarWalker {
         throw invalid(`unsupported archive entry type ${JSON.stringify(type)}`);
       }
       this.entrySeen = true;
+      frameSize = this.overrideSize ?? this.globalSize ?? size;
       const entryPath = this.overridePath ?? this.globalPath ?? headerPath;
       if (entryPath === "" || isUnsafeArchivePath(entryPath)) {
         throw invalid("archive contains an unsafe entry path");
@@ -252,11 +282,18 @@ class TarWalker {
       }
       this.overridePath = null;
       this.overrideLink = null;
+      this.overrideSize = null;
     }
 
+    if (frameSize > this.maxEntryBytes) {
+      throw invalid(
+        "archive entry size exceeds the configured archive size limit",
+      );
+    }
     // Link and directory entries carry no content regardless of size field
     // quirks; everything else advances by the padded content size.
-    const contentSize = type === "1" || type === "2" || type === "5" ? 0 : size;
+    const contentSize =
+      type === "1" || type === "2" || type === "5" ? 0 : frameSize;
     this.contentRemaining = contentSize;
     this.paddingRemaining =
       contentSize % BLOCK === 0 ? 0 : BLOCK - (contentSize % BLOCK);
@@ -277,27 +314,63 @@ class TarWalker {
       const records = parsePaxRecords(payload);
       const path = records.get("path");
       const link = records.get("linkpath");
+      const sizeText = records.get("size");
+      const size =
+        sizeText === undefined ? undefined : this.parsePaxSize(sizeText);
       if (kind === "pax-global") {
         if (path !== undefined) this.globalPath = path;
         if (link !== undefined) this.globalLink = link;
+        if (size !== undefined) this.globalSize = size;
       } else {
         if (path !== undefined) this.overridePath = path;
         if (link !== undefined) this.overrideLink = link;
+        if (size !== undefined) this.overrideSize = size;
       }
     }
+  }
+
+  // A pax size must be plain decimal digits. BigInt parsing distinguishes a
+  // malformed value from one that is well-formed but beyond the safe-integer
+  // range or the configured decompressed ceiling — the latter two get an
+  // explicit size-limit reason, never a misleading framing/checksum claim.
+  private parsePaxSize(text: string): number {
+    if (!/^\d+$/u.test(text)) {
+      throw invalid("malformed pax size record");
+    }
+    const value = BigInt(text);
+    if (value > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw invalid(
+        "archive entry size exceeds the configured archive size limit",
+      );
+    }
+    const resolved = Number(value);
+    if (resolved > this.maxEntryBytes) {
+      throw invalid(
+        "archive entry size exceeds the configured archive size limit",
+      );
+    }
+    return resolved;
   }
 }
 
 export class TarGzArchiveValidator {
   private readonly gunzip: Gunzip;
-  private readonly walker = new TarWalker();
+  private readonly walker: TarWalker;
   private readonly maxRatio: number;
   private compressedBytes = 0;
   private decompressedBytes = 0;
   private failure: AppError | null = null;
 
-  constructor(options: { maxRatio?: number } = {}) {
+  constructor(options: { maxRatio?: number; maxUploadBytes?: number } = {}) {
     this.maxRatio = options.maxRatio ?? DEFAULT_MAX_RATIO;
+    // With a configured upload maximum, no entry can decompress beyond
+    // maxRatio × that maximum — declared sizes above it are impossible and
+    // reject with an explicit size-limit reason before framing goes wrong.
+    this.walker = new TarWalker(
+      options.maxUploadBytes && options.maxUploadBytes > 0
+        ? options.maxUploadBytes * this.maxRatio
+        : Infinity,
+    );
     this.gunzip = createGunzip();
     this.gunzip.on("data", (chunk: Buffer) => {
       if (this.failure) return;

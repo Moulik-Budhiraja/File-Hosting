@@ -847,6 +847,225 @@ test("extraction refuses Windows traversal, special entries, and oversized decla
   await assert.rejects(readFile(join(scratch, "escaped.txt")), { code: "ENOENT" });
 });
 
+// Strip the 1024-byte end-of-archive marker rawTarEntry appends, so entries
+// can be concatenated or terminated deliberately.
+function stripMarker(entry: Buffer): Buffer {
+  return entry.subarray(0, entry.length - 1024);
+}
+
+test("extraction enforces the strict tar termination contract", async () => {
+  const whole = rawTarEntry("inside.txt", "inside");
+  const rejects: Array<{ name: string; bytes: Buffer; pattern: RegExp }> = [
+    {
+      name: "no-trailer.tar.gz",
+      bytes: gzipSync(stripMarker(whole)),
+      pattern: /end-of-archive/i,
+    },
+    {
+      name: "one-zero-block.tar.gz",
+      bytes: gzipSync(Buffer.concat([stripMarker(whole), Buffer.alloc(512)])),
+      pattern: /end-of-archive/i,
+    },
+    {
+      name: "tail-1.tar.gz",
+      bytes: gzipSync(Buffer.concat([whole, Buffer.from([0x41])])),
+      pattern: /after the end-of-archive/i,
+    },
+    {
+      name: "tail-511.tar.gz",
+      bytes: gzipSync(Buffer.concat([whole, Buffer.alloc(511, 0x41)])),
+      pattern: /after the end-of-archive/i,
+    },
+    {
+      name: "tail-block.tar.gz",
+      bytes: gzipSync(Buffer.concat([whole, Buffer.alloc(512, 0x41)])),
+      pattern: /after the end-of-archive/i,
+    },
+    {
+      name: "second-member.tar.gz",
+      bytes: Buffer.concat([gzipSync(whole), gzipSync(whole)]),
+      pattern: /after the end-of-archive/i,
+    },
+    {
+      name: "cut-gzip.tar.gz",
+      bytes: gzipSync(whole).subarray(0, gzipSync(whole).length - 8),
+      pattern: /gzip/i,
+    },
+  ];
+  for (const fixture of rejects) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, fixture.pattern, fixture.name);
+    // No destination is ever created or replaced for a rejected archive.
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+
+  const accepts: Array<{ name: string; bytes: Buffer }> = [
+    { name: "plain.tar.gz", bytes: gzipSync(whole) },
+    {
+      name: "partial-zero-tail.tar.gz",
+      bytes: gzipSync(Buffer.concat([whole, Buffer.alloc(100)])),
+    },
+    {
+      name: "extra-zero-blocks.tar.gz",
+      bytes: gzipSync(Buffer.concat([whole, Buffer.alloc(3 * 512 + 7)])),
+    },
+    {
+      name: "zero-member.tar.gz",
+      bytes: Buffer.concat([gzipSync(whole), gzipSync(Buffer.alloc(700))]),
+    },
+  ];
+  for (const fixture of accepts) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-out`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 0, `${fixture.name}: ${result.stderr.text}`);
+    assert.equal(
+      await readFile(join(destination, "inside.txt"), "utf8"),
+      "inside",
+    );
+  }
+});
+
+test("extraction rejects a rejected archive without touching an existing destination", async () => {
+  const destination = join(scratch, "keep-me");
+  await writeFile(destination, "existing content");
+  const bytes = gzipSync(
+    Buffer.concat([rawTarEntry("inside.txt", "x"), Buffer.from([0x41])]),
+  );
+  const item = service.seed(
+    { name: "tail.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const result = await cli([
+    "down",
+    item.id,
+    "--extract",
+    "-o",
+    destination,
+    "--force",
+  ]);
+  assert.equal(result.code, 1);
+  assert.equal(await readFile(destination, "utf8"), "existing content");
+});
+
+test("extraction rejects Windows path spellings on every host OS", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer }> = [
+    {
+      name: "drive-abs-backslash.tar.gz",
+      bytes: gzipSync(rawTarEntry("C:\\absolute.txt", "x")),
+    },
+    {
+      name: "drive-abs-slash.tar.gz",
+      bytes: gzipSync(rawTarEntry("C:/absolute.txt", "x")),
+    },
+    {
+      name: "drive-relative.tar.gz",
+      bytes: gzipSync(rawTarEntry("c:relative.txt", "x")),
+    },
+    {
+      name: "unc.tar.gz",
+      bytes: gzipSync(rawTarEntry("\\\\server\\share\\file.txt", "x")),
+    },
+    {
+      name: "device.tar.gz",
+      bytes: gzipSync(rawTarEntry("\\\\.\\PIPE\\name", "x")),
+    },
+    {
+      name: "drive-link.tar.gz",
+      bytes: gzipSync(
+        rawTarEntry("link", "", { type: "2", linkname: "C:\\target.txt" }),
+      ),
+    },
+    {
+      name: "drive-relative-link.tar.gz",
+      bytes: gzipSync(
+        rawTarEntry("link", "", { type: "1", linkname: "d:relative.txt" }),
+      ),
+    },
+  ];
+  for (const fixture of fixtures) {
+    const item = service.seed(
+      { name: fixture.name, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(scratch, `${fixture.name}-destination`);
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1, `${fixture.name} must fail`);
+    assert.match(result.stderr.text, /unsafe (path|link)/i, fixture.name);
+    await assert.rejects(readFile(destination), { code: "ENOENT" });
+  }
+});
+
+test("extraction honors pax size overrides for framing, like the server", async () => {
+  function paxRecord(key: string, value: string): string {
+    let length = key.length + value.length + 3;
+    for (;;) {
+      const next = String(length).length + key.length + value.length + 3;
+      if (next === length) return `${length} ${key}=${value}\n`;
+      length = next;
+    }
+  }
+  // Legacy header placeholder says 0 bytes; the pax record carries the real
+  // size. Framing must follow the pax size on both scan and extraction.
+  const bytes = gzipSync(
+    Buffer.concat([
+      stripMarker(
+        rawTarEntry("PaxHeader/big.bin", paxRecord("size", "5"), {
+          type: "x",
+        }),
+      ),
+      rawTarEntry("big.bin", "hello", { declaredSize: 0 }),
+    ]),
+  );
+  const item = service.seed(
+    { name: "pax-size.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const destination = join(scratch, "pax-size-out");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 0, result.stderr.text);
+  assert.equal(await readFile(join(destination, "big.bin"), "utf8"), "hello");
+
+  // A pax-declared size beyond the 100 GiB budget rejects up front with the
+  // truthful budget reason, before any bytes land.
+  const oversized = gzipSync(
+    Buffer.concat([
+      stripMarker(
+        rawTarEntry(
+          "PaxHeader/huge.bin",
+          paxRecord("size", String(200 * 1024 ** 3)),
+          { type: "x" },
+        ),
+      ),
+      rawTarEntry("huge.bin", "", { declaredSize: 0 }),
+    ]),
+  );
+  const big = service.seed(
+    { name: "pax-oversize.tar.gz", archive: "tar.gz", size: oversized.length },
+    oversized,
+  );
+  const bigDestination = join(scratch, "pax-oversize-out");
+  const bigResult = await cli([
+    "down",
+    big.id,
+    "--extract",
+    "-o",
+    bigDestination,
+  ]);
+  assert.equal(bigResult.code, 1);
+  assert.match(bigResult.stderr.text, /declared uncompressed size/i);
+  await assert.rejects(readFile(bigDestination), { code: "ENOENT" });
+});
+
 test("extraction fails cleanly on garbage bytes marked archive=tar.gz", async () => {
   const item = service.seed(
     { name: "garbage.tar.gz", archive: "tar.gz", size: 24 },

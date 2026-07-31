@@ -160,7 +160,11 @@ export class FileService {
     // archive=tar.gz is a verified contract: the stream must prove it is a
     // complete, safe tar.gz before any object placement or metadata commit.
     const archiveValidator =
-      options.archive === "tar.gz" ? new TarGzArchiveValidator() : null;
+      options.archive === "tar.gz"
+        ? new TarGzArchiveValidator({
+            maxUploadBytes: this.config.maxUploadBytes,
+          })
+        : null;
     let size = 0;
     let bytesAtLastCapacityCheck = 0;
     let closed = false;

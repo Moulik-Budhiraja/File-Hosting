@@ -167,7 +167,8 @@ export default function InspectorPage() {
     busy: boolean;
     bytes: number;
     error: string | null;
-  }>({ busy: false, bytes: 0, error: null });
+    cancelled: boolean;
+  }>({ busy: false, bytes: 0, error: null, cancelled: false });
   const downloadAbortRef = useRef<AbortController | null>(null);
 
   useEffect(() => {
@@ -228,12 +229,12 @@ export default function InspectorPage() {
     if (!file || download.busy) return;
     const controller = new AbortController();
     downloadAbortRef.current = controller;
-    setDownload({ busy: true, bytes: 0, error: null });
+    setDownload({ busy: true, bytes: 0, error: null, cancelled: false });
     try {
       // Streams straight to disk where the File System Access API exists;
       // otherwise a bounded buffered fallback that refuses oversized objects
       // before any bytes are fetched.
-      await downloadFile(
+      const outcome = await downloadFile(
         { id: file.id, name: file.name, size: file.size },
         browserDownloadEnvironment(adminApi),
         {
@@ -242,7 +243,15 @@ export default function InspectorPage() {
             setDownload((current) => ({ ...current, bytes })),
         },
       );
-      setDownload({ busy: false, bytes: 0, error: null });
+      // Ordinary cancellation (picker dismissal, Cancel during response
+      // establishment/stream/fallback) is a neutral outcome the operator is
+      // told about — never a failure, never a silent reset.
+      setDownload({
+        busy: false,
+        bytes: 0,
+        error: null,
+        cancelled: outcome.cancelled,
+      });
     } catch (error) {
       // Cancellation is normalized to a resolved outcome by downloadFile;
       // this guard keeps an abort that slips through from rendering as a
@@ -256,6 +265,7 @@ export default function InspectorPage() {
           : error instanceof Error
             ? error.message
             : "Download failed",
+        cancelled,
       });
     } finally {
       downloadAbortRef.current = null;
@@ -337,6 +347,11 @@ export default function InspectorPage() {
       {download.error ? (
         <p className="state-banner state-api" role="alert">
           download failed — {download.error}
+        </p>
+      ) : null}
+      {download.cancelled ? (
+        <p className="state-banner" role="status">
+          download cancelled
         </p>
       ) : null}
 

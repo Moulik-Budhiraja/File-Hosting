@@ -844,7 +844,9 @@
   color: var(--color-ink-2);
 }
 
-.url-note {
+/* Specificity beats the .admin-root p padding reset, so the private-URL
+   explanation keeps the same horizontal inset as its URL rows. */
+.admin-root .url-note {
   padding: 8px 24px 12px;
   border-top: 1px solid var(--color-hairline);
   font-family: var(--font-mono);
