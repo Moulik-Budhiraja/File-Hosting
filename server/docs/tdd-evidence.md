@@ -77,5 +77,20 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: indexed cleanup before session creation now removes expired and revoked
       rows.
 
+15. API-key owner validation
+    - RED: the focused missing-owner HTTP test received 500 and logged a
+      `SQLITE_CONSTRAINT_FOREIGNKEY` error instead of returning 404.
+    - GREEN: API-key creation now validates the owner centrally and returns
+      `user_not_found` before insertion.
+16. Malformed session cookies
+    - RED: the focused malformed-cookie test threw `URIError: URI malformed`.
+    - GREEN: cookie decoding now treats malformed percent encoding as an absent,
+      unauthenticated cookie.
+17. Protected CLI filtering
+    - RED: the focused `list supports protected-only visibility filtering` test
+      exited with usage code 2 because `--protected` was unknown.
+    - GREEN: list/find now expose `--protected`, send `visibility=protected`, and
+      reject every conflicting visibility-flag combination.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

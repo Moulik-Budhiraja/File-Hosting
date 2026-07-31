@@ -351,21 +351,23 @@ async function listCommand(args: string[], api: ApiClient, streams: Streams, fin
     tag: { type: "string", multiple: true },
     name: { type: "string" },
     public: { type: "boolean" },
+    protected: { type: "boolean" },
     private: { type: "boolean" },
     limit: { type: "string" },
   });
   if (parsed.values.help) {
     streams.stdout.write(
       find
-        ? "Usage: fs find [query] [--name <glob>] [--tag <tag>...] [--public|--private] [--limit N] [--json|--jsonl|--ids]\n"
-        : "Usage: fs list [--tag <tag>...] [--public|--private] [--limit N] [--json|--jsonl|--ids]\n",
+        ? "Usage: fs find [query] [--name <glob>] [--tag <tag>...] [--public|--protected|--private] [--limit N] [--json|--jsonl|--ids]\n"
+        : "Usage: fs list [--tag <tag>...] [--public|--protected|--private] [--limit N] [--json|--jsonl|--ids]\n",
     );
     return EXIT.success;
   }
   if (!find && parsed.positionals.length) throw new CliError("fs list does not accept positional arguments", EXIT.usage, "INVALID_ARGUMENTS");
   if (find && parsed.positionals.length > 1) throw new CliError("fs find accepts at most one query", EXIT.usage, "INVALID_ARGUMENTS");
-  if (parsed.values.public && parsed.values.private) {
-    throw new CliError("Choose only one of --public or --private", EXIT.usage, "VISIBILITY_CONFLICT");
+  const visibilityOptions = [parsed.values.public, parsed.values.protected, parsed.values.private].filter(Boolean).length;
+  if (visibilityOptions > 1) {
+    throw new CliError("Choose only one of --public, --protected, or --private", EXIT.usage, "VISIBILITY_CONFLICT");
   }
   const mode = chooseOutputMode(parsed.values);
   const limit = positiveInteger(parsed.values.limit, "--limit");
@@ -375,7 +377,13 @@ async function listCommand(args: string[], api: ApiClient, streams: Streams, fin
       q: find ? parsed.positionals[0] : undefined,
       name: find ? parsed.values.name : undefined,
       tags: tagsFrom(parsed.values.tag),
-      visibility: parsed.values.public ? "public" : parsed.values.private ? "private" : undefined,
+      visibility: parsed.values.public
+        ? "public"
+        : parsed.values.protected
+          ? "protected"
+          : parsed.values.private
+            ? "private"
+            : undefined,
     },
     limit,
   );

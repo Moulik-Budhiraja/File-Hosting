@@ -24,7 +24,13 @@ function equalSecret(a: string, b: string): boolean {
 export function cookieValue(request: Request, name: string): string | null {
   for (const part of (request.headers.get("cookie") ?? "").split(";")) {
     const [key, ...value] = part.trim().split("=");
-    if (key === name) return decodeURIComponent(value.join("="));
+    if (key === name) {
+      try {
+        return decodeURIComponent(value.join("="));
+      } catch {
+        return null;
+      }
+    }
   }
   return null;
 }

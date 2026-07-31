@@ -453,6 +453,9 @@ export class AuthRepository {
     nameInput: string,
     now = new Date(),
   ): Promise<{ id: string; secret: string }> {
+    if (!(await this.getUser(userId))) {
+      throw new AppError(404, "user_not_found", "User not found");
+    }
     const name = nameInput.trim();
     if (!name || Buffer.byteLength(name, "utf8") > 100) {
       throw new AppError(

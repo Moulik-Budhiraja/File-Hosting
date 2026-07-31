@@ -635,6 +635,25 @@ test("list paginates, caps server page size, and supports NUL-delimited IDs", as
   assert(limits.every((limit) => limit <= 500));
 });
 
+test("list supports protected-only visibility filtering", async () => {
+  const match = service.seed({ visibility: "protected" });
+  service.seed({ visibility: "public" });
+
+  const result = await cli(["list", "--protected", "--json"]);
+
+  assert.equal(result.code, 0);
+  assert.deepEqual(
+    (JSON.parse(result.stdout.text) as FileMetadata[]).map((item) => item.id),
+    [match.id],
+  );
+  const request = service.requests.find((entry) => entry.path === "/api/files")!;
+  assert.equal(request.query.get("visibility"), "protected");
+
+  const conflict = await cli(["list", "--protected", "--private"]);
+  assert.equal(conflict.code, 2);
+  assert.match(conflict.stderr.text, /choose only one/iu);
+});
+
 test("find sends query, name glob, tags, and visibility", async () => {
   const match = service.seed({ name: "quarterly.pdf", tags: ["finance"], visibility: "private" });
   service.seed({ name: "quarterly.txt", tags: ["finance"], visibility: "private" });

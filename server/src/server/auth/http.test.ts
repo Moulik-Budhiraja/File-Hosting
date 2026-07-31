@@ -19,6 +19,7 @@ import {
   POST as createUser,
 } from "../../app/api/users/route";
 import { FileService } from "../files/service";
+import { cookieValue, SESSION_COOKIE } from "./http";
 import { setFileServiceForTests } from "../files/singleton";
 
 const LEGACY_TOKEN = "legacy-admin-service-token";
@@ -164,6 +165,32 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     const cookie = response.headers.get("set-cookie") ?? "";
     assert.match(cookie, /^fs_session=/u);
     assert.doesNotMatch(cookie, /(?:^|;\s*)Secure(?:;|$)/iu);
+  });
+
+  it("ignores malformed percent encoding in session cookies", () => {
+    const request = new Request("https://files.example.test/raw/example", {
+      headers: { cookie: `${SESSION_COOKIE}=%` },
+    });
+    assert.equal(cookieValue(request, SESSION_COOKIE), null);
+  });
+
+  it("returns 404 when an administrator targets a missing API-key owner", async () => {
+    const response = await createKey(
+      new Request("https://files.example.test/api/api-keys", {
+        method: "POST",
+        headers: { ...LEGACY_AUTH, "content-type": "application/json" },
+        body: JSON.stringify({
+          name: "orphaned",
+          user_id: "missing-user-id",
+        }),
+      }),
+    );
+
+    assert.equal(response.status, 404);
+    assert.equal(
+      ((await response.json()) as { error: { code: string } }).error.code,
+      "user_not_found",
+    );
   });
 
   it("uses legacy bearer as admin and returns API key secrets only once", async (t) => {
