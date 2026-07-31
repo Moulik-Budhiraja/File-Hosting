@@ -337,12 +337,25 @@ test("auth delete removes the stored credential", async () => {
     credentials: {
       getPassword(): string { return "stored-secret-token"; },
       setPassword(): void {},
-      deletePassword(): void { deleted = true; },
+      deletePassword(): boolean { deleted = true; return true; },
     },
   });
   assert.equal(result.code, 0);
   assert.equal(deleted, true);
   assert.match(result.stderr.text, /deleted/i);
+});
+
+test("auth delete reports when no saved credential exists", async () => {
+  const result = await cli(["auth", "delete"], "", { FS_TOKEN: "" }, {
+    credentials: {
+      getPassword(): null { return null; },
+      setPassword(): void {},
+      deletePassword(): boolean { return false; },
+    },
+  });
+  assert.equal(result.code, 3);
+  assert.match(result.stderr.text, /no saved token/i);
+  assert.doesNotMatch(result.stderr.text, /token deleted/i);
 });
 
 test("upload shorthand streams bytes and applies tags and visibility", async () => {

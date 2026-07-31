@@ -125,7 +125,11 @@ async function authCommand(args: string[], dependencies: RunDependencies, stream
     return configured ? EXIT.success : EXIT.auth;
   }
   if (action === "delete") {
-    dependencies.credentials.deletePassword();
+    const deleted = dependencies.credentials.deletePassword();
+    if (!deleted) {
+      streams.stderr.write("No saved token was configured.\n");
+      return EXIT.auth;
+    }
     streams.stderr.write("Saved token deleted from the operating system credential store.\n");
     return EXIT.success;
   }
