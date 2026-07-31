@@ -1,6 +1,11 @@
 export const BASE62_ID_PATTERN = /^[0-9A-Za-z]{7}$/;
 
-export type Visibility = "public" | "private";
+export type Visibility = "public" | "protected" | "private";
+export type AccessRole = "anonymous" | "admin" | "member";
+export interface AccessScope {
+  role: AccessRole;
+  userId: string | null;
+}
 export type ArchiveType = "tar.gz" | null;
 
 export interface StoredFile {
@@ -10,6 +15,7 @@ export interface StoredFile {
   mimeType: string;
   sha256: string;
   visibility: Visibility;
+  ownerId: string | null;
   storageKey: string;
   archive: ArchiveType;
   createdAt: string;
@@ -24,6 +30,7 @@ export interface FileMetadata {
   mime_type: string;
   sha256: string;
   visibility: Visibility;
+  owner_id: string | null;
   tags: string[];
   preview_url: string;
   raw_url: string;
@@ -39,6 +46,7 @@ export interface ListFilesOptions {
   visibility?: Visibility;
   limit: number;
   cursor?: { createdAt: string; id: string };
+  access?: AccessScope;
 }
 
 export interface ListFilesResult {
@@ -50,6 +58,7 @@ export interface UploadOptions {
   name: string;
   tags: string[];
   visibility: Visibility;
+  ownerId?: string | null;
   archive: ArchiveType;
   mimeType?: string;
   contentLength?: number;

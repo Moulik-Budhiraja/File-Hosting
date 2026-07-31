@@ -11,7 +11,7 @@ export interface ListParams {
   q?: string;
   name?: string;
   tags?: string[];
-  visibility?: "public" | "private";
+  visibility?: "public" | "protected" | "private";
   limit?: number;
   cursor?: string;
 }
@@ -115,7 +115,7 @@ export class ApiClient {
     id: string,
     body: {
       tags?: { operation: "add" | "remove" | "set"; values: string[] };
-      visibility?: "public" | "private";
+      visibility?: "public" | "protected" | "private";
     },
   ): Promise<FileMetadata> {
     const response = await this.checked(this.url(`/api/files/${encodeURIComponent(id)}`), {

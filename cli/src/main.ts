@@ -48,7 +48,7 @@ const ROOT_HELP = `Usage:
   fs find [query] [options]         Search by name and/or tag
   fs info <id...> [options]         Show metadata and URLs
   fs tag <id> add|remove|set <tag...>
-  fs visibility <id> public|private
+  fs visibility <id> public|protected|private
   fs rm <id...> [--yes]             Delete files
   fs auth set|status|delete         Manage the saved token
 
@@ -452,15 +452,15 @@ async function tagCommand(args: string[], api: ApiClient, streams: Streams): Pro
 async function visibilityCommand(args: string[], api: ApiClient, streams: Streams): Promise<ExitCode> {
   const parsed = parse(args, { json: { type: "boolean" }, "no-input": { type: "boolean" }, help: { type: "boolean", short: "h" } });
   if (parsed.values.help) {
-    streams.stdout.write("Usage: fs visibility <id> public|private [--json]\n");
+    streams.stdout.write("Usage: fs visibility <id> public|protected|private [--json]\n");
     return EXIT.success;
   }
   const [id, visibility, ...extra] = parsed.positionals;
-  if (!id || !visibility || extra.length || !["public", "private"].includes(visibility)) {
-    throw new CliError("Usage: fs visibility <id> public|private", EXIT.usage, "INVALID_ARGUMENTS");
+  if (!id || !visibility || extra.length || !["public", "protected", "private"].includes(visibility)) {
+    throw new CliError("Usage: fs visibility <id> public|protected|private", EXIT.usage, "INVALID_ARGUMENTS");
   }
   validateIds([id]);
-  const item = enrich(api, await api.patch(id, { visibility: visibility as "public" | "private" }));
+  const item = enrich(api, await api.patch(id, { visibility: visibility as "public" | "protected" | "private" }));
   printInfo(streams, item, parsed.values.json ?? false);
   return EXIT.success;
 }

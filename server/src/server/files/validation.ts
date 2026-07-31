@@ -86,14 +86,14 @@ export function parseVisibility(
     throw new AppError(
       400,
       "invalid_visibility",
-      "Visibility must be public or private",
+      "Visibility must be public, protected, or private",
     );
   }
-  if (value !== "public" && value !== "private") {
+  if (value !== "public" && value !== "protected" && value !== "private") {
     throw new AppError(
       400,
       "invalid_visibility",
-      "Visibility must be public or private",
+      "Visibility must be public, protected, or private",
     );
   }
   return value;

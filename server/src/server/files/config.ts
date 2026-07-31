@@ -9,6 +9,8 @@ export interface FilesConfig {
   publicUrl: string;
   maxUploadBytes: number;
   minFreeBytes: number;
+  bootstrapUsername?: string;
+  bootstrapPassword?: string;
 }
 
 function readNonNegativeInteger(name: string, fallback: number): number {
@@ -71,6 +73,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): FilesConfig {
     return value;
   };
 
+  const bootstrapUsername = env.FS_BOOTSTRAP_USERNAME;
+  const bootstrapPassword = env.FS_BOOTSTRAP_PASSWORD;
+  if (Boolean(bootstrapUsername) !== Boolean(bootstrapPassword)) {
+    throw new AppError(
+      500,
+      "invalid_configuration",
+      "FS_BOOTSTRAP_USERNAME and FS_BOOTSTRAP_PASSWORD must be configured together",
+    );
+  }
+
   return {
     token,
     databaseUrl: env.DATABASE_URL ?? "file:./data/files.db",
@@ -78,6 +90,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): FilesConfig {
     publicUrl: publicUrl.replace(/\/+$/, ""),
     maxUploadBytes: readInteger("FS_MAX_UPLOAD_BYTES", 10_737_418_240),
     minFreeBytes: readInteger("FS_MIN_FREE_BYTES", 1_073_741_824),
+    bootstrapUsername,
+    bootstrapPassword,
   };
 }
 

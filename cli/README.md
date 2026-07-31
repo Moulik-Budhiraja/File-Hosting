@@ -80,6 +80,7 @@ fs list
 fs find quarterly --name '*.pdf' --tag finance
 fs info Ab12xY9
 fs tag Ab12xY9 add reviewed important
+fs visibility Ab12xY9 protected
 fs visibility Ab12xY9 private
 fs rm Ab12xY9 --yes
 ```

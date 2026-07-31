@@ -4,7 +4,8 @@ export interface FileMetadata {
   size: number;
   mime_type?: string | null;
   sha256?: string | null;
-  visibility: "public" | "private";
+  visibility: "public" | "protected" | "private";
+  owner_id?: string | null;
   tags: string[];
   archive: "tar.gz" | null;
   created_at?: string;

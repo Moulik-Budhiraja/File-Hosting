@@ -1,6 +1,6 @@
 import { AppError } from "@/server/files/errors";
 import { errorResponse, json, notFound } from "@/server/files/http";
-import { requireApiService } from "@/server/files/request";
+import { getAuthorizedFile } from "@/server/files/request";
 import type { TagOperation } from "@/server/files/types";
 import {
   parseVisibility,
@@ -20,9 +20,8 @@ export async function GET(
   context: RouteContext,
 ): Promise<Response> {
   try {
-    const service = await requireApiService(request);
-    const file = await service.get(validateId((await context.params).id));
-    if (!file) throw notFound();
+    const id = validateId((await context.params).id);
+    const { service, file } = await getAuthorizedFile(request, id);
     return json(service.toMetadata(file));
   } catch (error) {
     return errorResponse(error);
@@ -34,8 +33,8 @@ export async function PATCH(
   context: RouteContext,
 ): Promise<Response> {
   try {
-    const service = await requireApiService(request);
     const id = validateId((await context.params).id);
+    const { service } = await getAuthorizedFile(request, id, true);
     let body: unknown;
     try {
       body = await request.json();
@@ -123,8 +122,9 @@ export async function DELETE(
   context: RouteContext,
 ): Promise<Response> {
   try {
-    const service = await requireApiService(request);
-    const file = await service.delete(validateId((await context.params).id));
+    const id = validateId((await context.params).id);
+    const { service } = await getAuthorizedFile(request, id, true);
+    const file = await service.delete(id);
     if (!file) throw notFound();
     return new Response(null, { status: 204 });
   } catch (error) {

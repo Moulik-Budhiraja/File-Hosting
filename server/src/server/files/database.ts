@@ -25,7 +25,8 @@ CREATE TABLE IF NOT EXISTS files (
   size INTEGER NOT NULL CHECK(size >= 0),
   mime_type TEXT NOT NULL,
   sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
-  visibility TEXT NOT NULL CHECK(visibility IN ('public', 'private')),
+  visibility TEXT NOT NULL CHECK(visibility IN ('public', 'protected', 'private')),
+  owner_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
   storage_key TEXT NOT NULL UNIQUE,
   archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
   created_at TEXT NOT NULL,
@@ -46,6 +47,7 @@ CREATE TABLE IF NOT EXISTS file_tags (
 CREATE INDEX IF NOT EXISTS files_created_at_id_idx ON files(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS files_name_idx ON files(name);
 CREATE INDEX IF NOT EXISTS files_visibility_idx ON files(visibility);
+CREATE INDEX IF NOT EXISTS files_owner_visibility_idx ON files(owner_id, visibility);
 CREATE INDEX IF NOT EXISTS file_tags_tag_name_idx ON file_tags(tag_name, file_id);
 `;
 
@@ -79,6 +81,7 @@ function fileFromRow(row: Row, tags: string[]): StoredFile {
     mimeType: rowString(row, "mime_type"),
     sha256: rowString(row, "sha256"),
     visibility: rowString(row, "visibility") as Visibility,
+    ownerId: typeof row.owner_id === "string" ? row.owner_id : null,
     storageKey: rowString(row, "storage_key"),
     archive: archive === null ? null : (archive as ArchiveType),
     createdAt: rowString(row, "created_at"),
@@ -140,6 +143,61 @@ export class FileRepository {
     return repository;
   }
 
+  private async migrateLegacyFiles(): Promise<void> {
+    const existing = await this.client.execute(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",
+    );
+    const definition = existing.rows[0]?.sql;
+    if (
+      typeof definition !== "string" ||
+      (definition.includes("owner_id") && definition.includes("'protected'"))
+    ) {
+      return;
+    }
+
+    await this.client.execute("PRAGMA foreign_keys = OFF");
+    try {
+      await this.client.batch(
+        [
+          `CREATE TABLE files_v2 (
+            id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
+            name TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0),
+            mime_type TEXT NOT NULL, sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+            visibility TEXT NOT NULL CHECK(visibility IN ('public', 'protected', 'private')),
+            owner_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+            storage_key TEXT NOT NULL UNIQUE,
+            archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          )`,
+          `INSERT INTO files_v2
+            (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
+            SELECT id, name, size, mime_type, sha256, visibility, NULL, storage_key, archive, created_at, updated_at FROM files`,
+          `CREATE TABLE file_tags_v2 (
+            file_id TEXT NOT NULL REFERENCES files_v2(id) ON DELETE CASCADE,
+            tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
+            PRIMARY KEY (file_id, tag_name)
+          )`,
+          "INSERT INTO file_tags_v2 SELECT file_id, tag_name FROM file_tags",
+          "DROP TABLE file_tags",
+          "DROP TABLE files",
+          "ALTER TABLE files_v2 RENAME TO files",
+          "ALTER TABLE file_tags_v2 RENAME TO file_tags",
+        ],
+        "write",
+      );
+    } finally {
+      await this.client.execute("PRAGMA foreign_keys = ON");
+    }
+    const violations = await this.client.execute("PRAGMA foreign_key_check");
+    if (violations.rows.length > 0) {
+      throw new AppError(
+        500,
+        "migration_integrity_error",
+        "File migration failed foreign-key validation",
+      );
+    }
+  }
+
   private async initialize(): Promise<void> {
     await this.client.execute("PRAGMA foreign_keys = ON");
     await this.client.execute("PRAGMA busy_timeout = 5000");
@@ -148,6 +206,7 @@ export class FileRepository {
     } catch {
       // Remote libSQL endpoints manage journaling themselves.
     }
+    await this.migrateLegacyFiles();
     await this.client.executeMultiple(SCHEMA);
   }
 
@@ -203,8 +262,8 @@ export class FileRepository {
     try {
       await transaction.execute({
         sql: `INSERT INTO files
-          (id, name, size, mime_type, sha256, visibility, storage_key, archive, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
         args: [
           file.id,
           file.name,
@@ -212,6 +271,7 @@ export class FileRepository {
           file.mimeType,
           file.sha256,
           file.visibility,
+          file.ownerId,
           file.storageKey,
           file.archive,
           file.createdAt,
@@ -230,6 +290,9 @@ export class FileRepository {
       }
       await transaction.commit();
       return { ...file, tags: [...tags].sort((a, b) => a.localeCompare(b)) };
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     } finally {
       transaction.close();
     }
@@ -239,6 +302,15 @@ export class FileRepository {
     await this.ready;
     const where: string[] = [];
     const args: InValue[] = [];
+    const access = options.access ?? { role: "admin", userId: null };
+    if (access.role === "anonymous") {
+      where.push("f.visibility = 'public'");
+    } else if (access.role === "member") {
+      where.push(
+        "(f.visibility IN ('public', 'protected') OR (f.visibility = 'private' AND f.owner_id = ?))",
+      );
+      args.push(access.userId);
+    }
 
     if (options.q) {
       const search = `%${escapeLike(options.q.toLocaleLowerCase("en-US"))}%`;
@@ -349,6 +421,9 @@ export class FileRepository {
         });
       }
       await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     } finally {
       transaction.close();
     }

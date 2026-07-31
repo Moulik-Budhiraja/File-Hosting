@@ -666,6 +666,8 @@ test("tag and visibility commands use PATCH semantics", async () => {
   assert.deepEqual(service.files.get(item.id)?.metadata.tags, ["new"]);
   assert.equal((await cli(["tag", item.id, "set"])).code, 0);
   assert.deepEqual(service.files.get(item.id)?.metadata.tags, []);
+  assert.equal((await cli(["visibility", item.id, "protected"])).code, 0);
+  assert.equal(service.files.get(item.id)?.metadata.visibility, "protected");
   assert.equal((await cli(["visibility", item.id, "private"])).code, 0);
   assert.equal(service.files.get(item.id)?.metadata.visibility, "private");
 });
