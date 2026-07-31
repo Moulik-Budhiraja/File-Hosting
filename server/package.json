@@ -20,7 +20,7 @@
   "dependencies": {
     "@libsql/client": "^0.14.0",
     "mime-types": "^3.0.1",
-    "next": "^15.2.3",
+    "next": "^15.5.22",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
@@ -31,7 +31,7 @@
     "@types/react": "^19.0.0",
     "@types/react-dom": "^19.0.0",
     "eslint": "^9.23.0",
-    "eslint-config-next": "^15.2.3",
+    "eslint-config-next": "^15.5.22",
     "prettier": "^3.5.3",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2",
@@ -41,6 +41,9 @@
     "initVersion": "7.40.0"
   },
   "overrides": {
-    "postcss": "8.5.10"
+    "next": {
+      "postcss": "8.5.25",
+      "sharp": "0.35.3"
+    }
   }
 }
