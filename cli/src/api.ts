@@ -79,7 +79,10 @@ export class ApiClient {
   }): Promise<FileMetadata> {
     const query = new URLSearchParams({ name: input.name });
     for (const tag of input.tags) query.append("tag", tag);
-    if (input.visibility !== "public") query.set("visibility", input.visibility);
+    if (input.visibility !== "public") {
+      query.set("visibility", input.visibility);
+      query.set("private", "true");
+    }
     if (input.archive) query.set("archive", input.archive);
     const response = await this.checked(this.url("/api/files", query), {
       method: "POST",

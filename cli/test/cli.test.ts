@@ -445,6 +445,7 @@ test("upload creates protected objects atomically", async () => {
   assert.equal(item.visibility, "protected");
   const request = service.requests.find((entry) => entry.path === "/api/files")!;
   assert.equal(request.query.get("visibility"), "protected");
+  assert.equal(request.query.get("private"), "true");
 });
 
 test("upload shorthand streams bytes and applies tags and visibility", async () => {

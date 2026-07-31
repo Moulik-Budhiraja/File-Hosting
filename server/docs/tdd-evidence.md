@@ -192,5 +192,11 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: revoked-key cleanup is now constrained to the key owner requesting
       creation, preserving unrelated users' audit metadata.
 
+34. Fail-closed non-public upload compatibility
+    - RED: the protected-upload request omitted the legacy `private=true` signal.
+    - GREEN: every non-public upload now sends both modern `visibility` and legacy
+      `private=true`; current servers honor exact visibility while older servers
+      safely fall back to private.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
