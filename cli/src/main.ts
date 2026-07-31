@@ -13,6 +13,7 @@ import { asCliError, CliError, EXIT, type ExitCode } from "./errors.js";
 import { extractArchive } from "./extract.js";
 import { prepareInputs } from "./inputs.js";
 import { chooseOutputMode, formatBytes, printInfo, printItems, type OutputMode } from "./output.js";
+import { TransferProgress, type ProgressScheduler, type ProgressSignals } from "./progress.js";
 import type { FileMetadata, Streams } from "./types.js";
 
 const LARGE_UPLOAD = 1024 ** 3;
@@ -35,6 +36,8 @@ export interface RunDependencies {
   streams?: Streams;
   credentials?: CredentialStore;
   readSecret?: () => Promise<string>;
+  progressScheduler?: ProgressScheduler;
+  progressSignals?: ProgressSignals;
 }
 
 const ROOT_HELP = `Usage:
@@ -239,6 +242,7 @@ async function uploadCommand(
   args: string[],
   api: ApiClient,
   streams: Streams,
+  dependencies: RunDependencies,
 ): Promise<ExitCode> {
   const parsed = parse(args, {
     ...commonOutputOptions,
@@ -274,18 +278,28 @@ async function uploadCommand(
     let firstFailure: CliError | undefined;
     let successes = 0;
     for (const input of prepared.inputs) {
+      const progress = new TransferProgress({
+        label: "Uploading",
+        name: input.name,
+        total: input.uploadSize,
+        stderr: streams.stderr,
+        scheduler: dependencies.progressScheduler,
+        signals: dependencies.progressSignals,
+        enabled: mode === "human",
+      });
       try {
         const item = enrich(
           api,
           await api.upload({
             name: input.name,
             size: input.uploadSize,
-            stream: input.open(),
+            stream: progress.trackReadable(input.open()),
             tags,
             private: parsed.values.private ?? false,
             archive: input.archive,
           }),
         );
+        progress.complete();
         successes += 1;
         if (mode === "json") jsonResults.push(item);
         else if (mode === "jsonl") streams.stdout.write(`${JSON.stringify(item)}\n`);
@@ -296,6 +310,7 @@ async function uploadCommand(
           if (prepared.inputs.length > 1) streams.stdout.write("\n");
         }
       } catch (error) {
+        progress.fail();
         const cliError = asCliError(error);
         firstFailure ??= cliError;
         failures += 1;
@@ -512,7 +527,7 @@ function safeName(name: string, fallback: string): string {
   return !value || value === "." || value === ".." ? fallback : value;
 }
 
-async function saveResponse(response: Response, destination: string, force: boolean): Promise<void> {
+async function saveResponse(response: Response, destination: string, force: boolean, progress: TransferProgress): Promise<void> {
   if (!response.body) throw new CliError("Download returned an empty body", EXIT.network, "EMPTY_BODY");
   const target = resolve(destination);
   if ((await pathExists(target)) && !force) {
@@ -521,7 +536,11 @@ async function saveResponse(response: Response, destination: string, force: bool
   await mkdir(dirname(target), { recursive: true });
   const temporary = `${target}.fs-${process.pid}-${Date.now()}`;
   try {
-    await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), createWriteStream(temporary, { flags: "wx" }));
+    await pipeline(
+      Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
+      progress.track(),
+      createWriteStream(temporary, { flags: "wx" }),
+    );
     if (force) {
       await rm(target, { recursive: true, force: true });
       await rename(temporary, target);
@@ -538,7 +557,7 @@ async function saveResponse(response: Response, destination: string, force: bool
   }
 }
 
-async function downCommand(args: string[], api: ApiClient, streams: Streams): Promise<ExitCode> {
+async function downCommand(args: string[], api: ApiClient, streams: Streams, dependencies: RunDependencies): Promise<ExitCode> {
   const parsed = parse(args, {
     output: { type: "string", short: "o" },
     extract: { type: "boolean" },
@@ -572,20 +591,35 @@ async function downCommand(args: string[], api: ApiClient, streams: Streams): Pr
   let failures = 0;
   let firstFailure: CliError | undefined;
   for (const id of parsed.positionals) {
+    let progress: TransferProgress | undefined;
     try {
       const item = enrich(api, await api.info(id));
       if (parsed.values.extract && item.archive !== "tar.gz") {
         throw new CliError(`${id} is not a CLI-created tar.gz archive`, EXIT.usage, "NOT_ARCHIVE");
       }
+      progress = new TransferProgress({
+        label: "Downloading",
+        name: item.name,
+        total: item.size,
+        stderr: streams.stderr,
+        scheduler: dependencies.progressScheduler,
+        signals: dependencies.progressSignals,
+        enabled: parsed.values.output !== "-",
+      });
       const response = await api.raw(id);
       if (parsed.values.output === "-") {
         if (!response.body) throw new CliError("Download returned an empty body", EXIT.network, "EMPTY_BODY");
-        await pipeline(Readable.fromWeb(response.body as import("node:stream/web").ReadableStream), streams.stdout);
+        await pipeline(
+          Readable.fromWeb(response.body as import("node:stream/web").ReadableStream),
+          progress.track(),
+          streams.stdout,
+        );
       } else if (parsed.values.extract) {
         const temp = await mkdtemp(join(tmpdir(), "fs-down-"));
         try {
           const archivePath = join(temp, "download.tar.gz");
-          await saveResponse(response, archivePath, false);
+          await saveResponse(response, archivePath, false, progress);
+          progress.complete();
           const defaultName = safeName(item.name, id).replace(/\.tar\.gz$/i, "") || id;
           const destination = outputRoot
             ? join(outputRoot, defaultName)
@@ -605,11 +639,14 @@ async function downCommand(args: string[], api: ApiClient, streams: Streams): Pr
             ? join(requested, filename)
             : requested;
         } else destination = resolve(filename);
-        await saveResponse(response, destination, parsed.values.force ?? false);
+        await saveResponse(response, destination, parsed.values.force ?? false, progress);
+        progress.complete();
         streams.stdout.write(`Downloaded ${id} to ${destination}\n`);
       }
+      if (parsed.values.output === "-") progress.complete();
       successes += 1;
     } catch (error) {
+      progress?.fail();
       const cliError = asCliError(error);
       firstFailure ??= cliError;
       failures += 1;
@@ -671,8 +708,8 @@ async function dispatch(argv: string[], dependencies: RunDependencies): Promise<
   if (!args.includes("--help") && !args.includes("-h")) requireToken(config.token);
   const api = new ApiClient(config, dependencies.fetch);
   switch (command) {
-    case "up": return uploadCommand(args, api, streams);
-    case "down": return downCommand(args, api, streams);
+    case "up": return uploadCommand(args, api, streams, dependencies);
+    case "down": return downCommand(args, api, streams, dependencies);
     case "list": return listCommand(args, api, streams, false);
     case "find": return listCommand(args, api, streams, true);
     case "info": return infoCommand(args, api, streams);
