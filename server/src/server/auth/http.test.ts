@@ -167,6 +167,47 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     assert.doesNotMatch(cookie, /(?:^|;\s*)Secure(?:;|$)/iu);
   });
 
+  it("does not mark an HTTP public URL logout cookie Secure in production", async (t) => {
+    const originalNodeEnv = process.env.NODE_ENV;
+    const originalPublicUrl = service.config.publicUrl;
+    t.after(() => {
+      if (originalNodeEnv === undefined)
+        Reflect.deleteProperty(process.env, "NODE_ENV");
+      else Reflect.set(process.env, "NODE_ENV", originalNodeEnv);
+      service.config.publicUrl = originalPublicUrl;
+    });
+    Reflect.set(process.env, "NODE_ENV", "production");
+    service.config.publicUrl = "http://localhost:3000";
+
+    const loggedIn = await login(
+      new Request("http://localhost:3000/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "http://localhost:3000",
+        },
+        body: JSON.stringify({
+          username: "admin",
+          password: "a sufficiently long admin password",
+        }),
+      }),
+    );
+    assert.equal(loggedIn.status, 200, await loggedIn.clone().text());
+    const sessionCookie = loggedIn.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const response = await logout(
+      new Request("http://localhost:3000/api/auth/logout", {
+        method: "POST",
+        headers: { cookie: sessionCookie, origin: "http://localhost:3000" },
+      }),
+    );
+
+    assert.equal(response.status, 204);
+    assert.doesNotMatch(
+      response.headers.get("set-cookie") ?? "",
+      /(?:^|;\s*)Secure(?:;|$)/iu,
+    );
+  });
+
   it("ignores malformed percent encoding in session cookies", () => {
     const request = new Request("https://files.example.test/raw/example", {
       headers: { cookie: `${SESSION_COOKIE}=%` },

@@ -15,9 +15,7 @@ export async function POST(request: Request): Promise<Response> {
     assertCsrf(request, service, principal);
     const token = cookieValue(request, SESSION_COOKIE);
     if (token) await service.auth.revokeSession(token);
-    const secure =
-      process.env.NODE_ENV === "production" ||
-      new URL(service.config.publicUrl).protocol === "https:";
+    const secure = new URL(service.config.publicUrl).protocol === "https:";
     return new Response(null, {
       status: 204,
       headers: {

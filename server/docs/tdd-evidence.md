@@ -106,5 +106,11 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
     - GREEN: failed normalization now retains an explicit null identity, uses only
       the dummy bcrypt path, and derives a non-account throttle identity.
 
+20. Logout cookie scheme parity
+    - RED: the focused HTTP logout regression received a deletion cookie ending in
+      `Secure` for a production `http://localhost:3000` public URL.
+    - GREEN: logout now derives `Secure` from the same canonical public URL HTTPS
+      scheme as login.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
