@@ -186,5 +186,11 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       the same write transaction; service cleanup preserves that authorization
       error while removing finalized bytes.
 
+33. Owner-scoped revoked API-key cleanup
+    - RED: creating a key for one member erased another member's revoked audit
+      record.
+    - GREEN: revoked-key cleanup is now constrained to the key owner requesting
+      creation, preserving unrelated users' audit metadata.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.

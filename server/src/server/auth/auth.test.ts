@@ -331,6 +331,37 @@ describe("user repository", () => {
     }
   });
 
+  it("does not purge another user's revoked API-key audit record", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-api-key-owner-retention-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const first = await repository.createUser({
+        username: "first.key.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const second = await repository.createUser({
+        username: "second.key.owner",
+        password: OTHER_CREDENTIAL,
+        role: "member",
+      });
+      const revoked = await repository.createApiKey(first.id, "revoked-audit");
+      await repository.revokeApiKey(revoked.id, first.id, false);
+      await repository.createApiKey(second.id, "second-owner-key");
+
+      const retained = await repository.listApiKeys(first.id);
+      assert.equal(retained.length, 1);
+      assert.notEqual(retained[0]!.revokedAt, null);
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("caps active API keys and purges revoked history", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-api-key-cap-test-"),

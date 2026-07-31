@@ -503,9 +503,10 @@ export class AuthRepository {
     }
     const secret = `fsk_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
-    await this.client.execute(
-      "DELETE FROM api_keys WHERE revoked_at IS NOT NULL",
-    );
+    await this.client.execute({
+      sql: "DELETE FROM api_keys WHERE user_id = ? AND revoked_at IS NOT NULL",
+      args: [userId],
+    });
     const result = await this.client.execute({
       sql: `INSERT INTO api_keys
         (id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at)
