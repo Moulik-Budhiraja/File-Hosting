@@ -1,11 +1,11 @@
 import assert from "node:assert/strict";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
-import { mkdtemp, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm, symlink, truncate, writeFile } from "node:fs/promises";
 import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { Readable, Writable } from "node:stream";
 import { after, before, beforeEach, test } from "node:test";
-import { gzipSync } from "node:zlib";
+import { gunzipSync, gzipSync } from "node:zlib";
 import * as tar from "tar";
 import { run } from "../src/main.js";
 import type { ProgressScheduler } from "../src/progress.js";
@@ -774,11 +774,18 @@ function rawTarEntry(
     prefix?: string;
     prefixBytes?: Buffer;
     magic?: string;
+    // Verbatim field writers. `Buffer.write(…, "utf8")` can never emit a NUL,
+    // so the fields node-tar decodes with `decString` — which keeps the bytes
+    // after a NUL that is followed by a line terminator — can only be
+    // exercised by writing the raw bytes.
+    nameBytes?: Buffer;
+    linknameBytes?: Buffer;
   } = {},
 ): Buffer {
   const body = Buffer.from(contents);
   const header = Buffer.alloc(512);
-  header.write(pathname, 0, 100, "utf8");
+  if (options.nameBytes) options.nameBytes.copy(header, 0, 0, 100);
+  else header.write(pathname, 0, 100, "utf8");
   header.write("0000644\0", 100, 8, "latin1");
   header.write("0000000\0", 108, 8, "latin1");
   header.write("0000000\0", 116, 8, "latin1");
@@ -797,7 +804,8 @@ function rawTarEntry(
   header.write("00000000000\0", 136, 12, "latin1");
   header.fill(0x20, 148, 156);
   header.write(options.type ?? "0", 156, 1, "latin1");
-  if (options.linkname) header.write(options.linkname, 157, 100, "utf8");
+  if (options.linknameBytes) options.linknameBytes.copy(header, 157, 0, 100);
+  else if (options.linkname) header.write(options.linkname, 157, 100, "utf8");
   header.write(options.magic ?? "ustar\u000000", 257, 8, "latin1");
   if (options.prefix) header.write(options.prefix, 345, 155, "utf8");
   if (options.prefixBytes) options.prefixBytes.copy(header, 345);
@@ -2604,4 +2612,508 @@ test("a scanned archive reports its symlink targets in the manifest", async () =
   const manifest = await scanTarGzArchive(archivePath, bytes.length);
   assert.deepEqual(manifest.entries, ["dir/real.txt", "dir/link"]);
   assert.deepEqual(manifest.links, [{ path: "dir/link", target: "real.txt" }]);
+});
+
+// node-tar reads every header string field with `decString`
+// (dist/esm/header.js): `.toString("utf8").replace(/\0.*/, "")`. The regex is
+// non-global and `.` never matches a line terminator, so only the run from
+// the FIRST NUL to the next LF/CR/U+2028/U+2029 is dropped — everything after
+// that terminator survives into the path or link target node-tar actually
+// publishes. Decoding as a C string let a benign prefix hide a hostile suffix
+// from the whole policy and made the manifest disagree with the real tree.
+// The GNU `L`/`K` payload gets the same rule (dist/esm/parse.js `[EMITMETA]`).
+
+// A 100-byte field: `prefix`, a NUL, a line terminator, then a suffix a
+// C-string decoder discards but node-tar keeps.
+function nulHiddenField(
+  prefix: string,
+  separator: string,
+  suffix: string,
+  fill = 0x59,
+): Buffer {
+  const field = Buffer.alloc(100, fill);
+  Buffer.from(`${prefix}\0${separator}${suffix}`, "utf8").copy(field);
+  return field;
+}
+
+async function scanBytes(bytes: Buffer, label: string) {
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const room = await mkdtemp(join(scratch, `${label}-`));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, bytes);
+  return { archivePath, room, scan: () => scanTarGzArchive(archivePath, bytes.length) };
+}
+
+test("the scanner mirrors node-tar decString for every header string field", async () => {
+  const fixtures: Array<{ name: string; bytes: Buffer; pattern: RegExp }> = [
+    {
+      name: "name-device",
+      bytes: gzipSync(
+        rawTarEntry("ignored", "", {
+          nameBytes: nulHiddenField("good.txt", "\n", "CON.txt"),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "name-ads-colon",
+      bytes: gzipSync(
+        rawTarEntry("ignored", "", {
+          nameBytes: nulHiddenField("ok.txt", "\n", "a:b.txt"),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "name-trailing-space",
+      bytes: gzipSync(
+        rawTarEntry("ignored", "", {
+          nameBytes: nulHiddenField("ok.txt", "\n", "bad "),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "name-traversal",
+      bytes: gzipSync(
+        rawTarEntry("ignored", "", {
+          nameBytes: nulHiddenField("ok.txt", "\n", "/../escape.txt"),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "name-carriage-return",
+      bytes: gzipSync(
+        rawTarEntry("ignored", "", {
+          nameBytes: nulHiddenField("ok.txt", "\r", "CON.txt"),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "name-nul-padded-tail",
+      bytes: gzipSync(
+        rawTarEntry("ignored", "", {
+          nameBytes: nulHiddenField("good.txt", "\n", "CON.txt", 0),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "linkpath-symlink",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "x")),
+          rawTarEntry("lnk", "", {
+            type: "2",
+            linknameBytes: nulHiddenField("real.txt", "\n", "COM1.log"),
+          }),
+        ]),
+      ),
+      pattern: /unsafe link/i,
+    },
+    {
+      name: "linkpath-hardlink",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "x")),
+          rawTarEntry("hard", "", {
+            type: "1",
+            linknameBytes: nulHiddenField("real.txt", "\n", "QQQ"),
+          }),
+        ]),
+      ),
+      pattern: /unsafe link/i,
+    },
+    {
+      name: "ustar-prefix",
+      bytes: gzipSync(
+        rawTarEntry("inner.txt", "x", {
+          prefixBytes: (() => {
+            const field = Buffer.alloc(155);
+            Buffer.from("dir\0\nCON", "utf8").copy(field);
+            return field;
+          })(),
+        }),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "gnu-long-name",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("././@LongLink", "good.txt\0\nCON.txt", { type: "L" })),
+          rawTarEntry("truncated.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "gnu-long-link",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "x")),
+          stripMarker(rawTarEntry("././@LongLink", "real.txt\0\nCOM1.log", { type: "K" })),
+          rawTarEntry("lnk", "", { type: "2", linkname: "real.txt" }),
+        ]),
+      ),
+      pattern: /unsafe link/i,
+    },
+    {
+      name: "gnu-masked-by-pax",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("././@LongLink", "good.txt\0\nCON.txt", { type: "L" })),
+          stripMarker(
+            rawTarEntry("PaxHeader/x", rawPaxRecord("path", "benign.txt"), { type: "x" }),
+          ),
+          rawTarEntry("truncated.txt", "x"),
+        ]),
+      ),
+      pattern: /unsafe path/i,
+    },
+    {
+      name: "gnu-link-masked-by-global-pax",
+      bytes: gzipSync(
+        Buffer.concat([
+          stripMarker(rawTarEntry("real.txt", "x")),
+          stripMarker(rawTarEntry("././@LongLink", "real.txt\0\nCOM1.log", { type: "K" })),
+          stripMarker(
+            rawTarEntry("GlobalHead", rawPaxRecord("linkpath", "real.txt"), { type: "g" }),
+          ),
+          rawTarEntry("lnk", "", { type: "2", linkname: "real.txt" }),
+        ]),
+      ),
+      pattern: /unsafe link/i,
+    },
+  ];
+
+  for (const fixture of fixtures) {
+    const probe = await scanBytes(fixture.bytes, `dec-${fixture.name}`);
+    await assert.rejects(probe.scan(), (error: unknown) => {
+      assert.match((error as Error).message, fixture.pattern);
+      return true;
+    }, `expected ${fixture.name} to reject`);
+
+    // No publication either: the whole command fails closed with a truthful
+    // CliError and leaves the destination absent.
+    const item = service.seed(
+      { name: `${fixture.name}.tar.gz`, archive: "tar.gz", size: fixture.bytes.length },
+      fixture.bytes,
+    );
+    const destination = join(probe.room, "dest");
+    const result = await cli(["down", item.id, "--extract", "-o", destination]);
+    assert.equal(result.code, 1);
+    assert.match(result.stderr.text, fixture.pattern);
+    assert.deepEqual((await readdir(probe.room)).sort(), ["a.tar.gz"]);
+  }
+});
+
+// The point of mirroring decString is that the scanner validates the exact
+// string node-tar publishes — not that every NUL-bearing field is refused.
+// U+2028 also ends the regex's run but is not a control character, so the
+// joined name is an ordinary portable one; the manifest must equal the tree a
+// real `tar.extract` produces, byte for byte.
+test("a surviving suffix that is portable is validated and matches real extraction", async () => {
+  const { mkdir } = await import("node:fs/promises");
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const bytes = gzipSync(
+    rawTarEntry("ignored", "hi", {
+      nameBytes: nulHiddenField("good.txt", "\u2028", "CON.txt"),
+    }),
+  );
+  const room = await mkdtemp(join(scratch, "dec-portable-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, bytes);
+  const manifest = await scanTarGzArchive(archivePath, bytes.length);
+  assert.equal(manifest.entries.length, 1);
+  assert.match(manifest.entries[0]!, /^good\.txt\u2028CON\.txtY+$/u);
+
+  const out = join(room, "out");
+  await mkdir(out);
+  await tar.extract({ file: archivePath, cwd: out, preservePaths: false, strict: true });
+  assert.deepEqual((await readdir(out)).sort(), manifest.entries);
+});
+
+// The same bytes must be refused identically no matter how the gzip stream is
+// chunked into the walker, and the server must never store them.
+test("hidden-suffix archives reject at every chunk size and are never persisted", async () => {
+  const bytes = gzipSync(
+    rawTarEntry("ignored", "", {
+      nameBytes: nulHiddenField("good.txt", "\n", "CON.txt"),
+    }),
+  );
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const room = await mkdtemp(join(scratch, "dec-chunks-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, bytes);
+  for (const highWaterMark of [1, 7, 511, 512, 513, 65536]) {
+    // createReadStream inside the scanner uses the default watermark, so the
+    // chunking is exercised through the archive bytes themselves: rewriting
+    // the file with different gzip framing keeps the tar identical.
+    await writeFile(archivePath, gzipSync(Buffer.from(gunzipSync(bytes)), { chunkSize: highWaterMark < 64 ? 64 : highWaterMark }));
+    await assert.rejects(scanTarGzArchive(archivePath, bytes.length), (error: unknown) => {
+      assert.match((error as Error).message, /unsafe path/i);
+      return true;
+    });
+  }
+});
+
+// node-tar performs its filesystem work in raw fs callbacks. A fault raised
+// there — `fs.lstat`/`fs.mkdir` throwing ERR_INVALID_ARG_VALUE for a path
+// node-tar derived that contains a NUL byte, for instance — is thrown on the
+// event loop, NOT into the promise `tar.extract` returned. That promise then
+// never settles: the process aborted with a raw stack trace, extraction's
+// cleanup never ran, and a `.<name>.fs-XXXXXX` staging directory was left
+// beside the destination. Every fault shape must instead become a truthful
+// CliError with the staging tree removed.
+test("an escaped extractor fault becomes a truthful CliError and cleans staging", async () => {
+  const extract = await import("../src/extract.js");
+  const bytes = gzipSync(rawTarEntry("inside.txt", "content"));
+  const baseline = {
+    uncaught: process.listenerCount("uncaughtException"),
+    unhandled: process.listenerCount("unhandledRejection"),
+  };
+
+  const faults: Array<{
+    name: string;
+    runExtract: () => Promise<void>;
+  }> = [
+    {
+      name: "synchronous throw",
+      runExtract: () => {
+        throw new TypeError("injected synchronous extractor fault");
+      },
+    },
+    {
+      name: "asynchronous rejection",
+      runExtract: async () => {
+        await new Promise((resolve) => setTimeout(resolve, 1));
+        throw new TypeError("injected asynchronous extractor fault");
+      },
+    },
+  ];
+
+  for (const fault of faults) {
+    const room = await mkdtemp(join(scratch, "fault-"));
+    const archivePath = join(room, "a.tar.gz");
+    await writeFile(archivePath, bytes);
+    const destination = join(room, "dest");
+
+    await assert.rejects(
+      extract.extractArchive(archivePath, destination, false, {
+        runExtract: fault.runExtract,
+      }),
+      (error: unknown) => {
+        assert.equal((error as { name?: string }).name, "CliError", fault.name);
+        assert.equal((error as { code?: string }).code, "EXTRACT_FAILED");
+        assert.equal((error as { exitCode?: number }).exitCode, 1);
+        assert.match((error as Error).message, /injected/);
+        assert.doesNotMatch((error as Error).message, /at Object|at Unpack/);
+        return true;
+      },
+      fault.name,
+    );
+
+    // No staging residue, no backup residue, no destination.
+    assert.deepEqual(
+      (await readdir(room)).sort(),
+      ["a.tar.gz"],
+      `${fault.name} left residue`,
+    );
+  }
+
+  // Containment is scoped to the extraction: no listener survives it, so no
+  // later command's failure mode or exit code is masked.
+  assert.deepEqual(
+    {
+      uncaught: process.listenerCount("uncaughtException"),
+      unhandled: process.listenerCount("unhandledRejection"),
+    },
+    baseline,
+  );
+
+  // Ordinary exit codes still work afterwards.
+  const item = service.seed(
+    { name: "ok.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const room = await mkdtemp(join(scratch, "fault-after-"));
+  const good = await cli(["down", item.id, "--extract", "-o", join(room, "dest")]);
+  assert.equal(good.code, 0);
+  const missing = await cli(["info", "0000000"]);
+  assert.equal(missing.code, 4);
+});
+
+// The real vector: node-tar derives a path holding NUL bytes from a ustar
+// prefix whose hidden suffix is NUL-padded. The scanner now refuses it before
+// extraction, so the crash is unreachable — proven end to end through the
+// shipped command, with no residue beside the destination.
+test("the real NUL-in-path prefix archive fails closed with no residue", async () => {
+  const prefixBytes = Buffer.alloc(155);
+  Buffer.from("dir\0\nCON", "utf8").copy(prefixBytes);
+  const bytes = gzipSync(rawTarEntry("inner.txt", "x", { prefixBytes }));
+  const item = service.seed(
+    { name: "nul-path.tar.gz", archive: "tar.gz", size: bytes.length },
+    bytes,
+  );
+  const room = await mkdtemp(join(scratch, "nul-path-"));
+  const destination = join(room, "dest");
+  const result = await cli(["down", item.id, "--extract", "-o", destination]);
+  assert.equal(result.code, 1);
+  assert.match(result.stderr.text, /unsafe path/i);
+  assert.doesNotMatch(result.stderr.text, /ERR_INVALID_ARG_VALUE/);
+  assert.deepEqual(await readdir(room), []);
+});
+
+// The fault shape that actually escapes: thrown from an fs callback, so the
+// extract promise never settles. node:test installs its own uncaughtException
+// handling, so this one is exercised in a real child process — which is also
+// the environment the guarantee is about.
+test("a fault escaping the extract promise is contained in a real process", async () => {
+  const { execFile } = await import("node:child_process");
+  const { promisify } = await import("node:util");
+  const room = await mkdtemp(join(scratch, "escape-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, gzipSync(rawTarEntry("inside.txt", "content")));
+  const script = join(room, "escape.mts");
+  await writeFile(
+    script,
+    [
+      `const { extractArchive } = await import(${JSON.stringify(join(process.cwd(), "src/extract.ts"))});`,
+      `try {`,
+      `  await extractArchive(${JSON.stringify(archivePath)}, ${JSON.stringify(join(room, "dest"))}, false, {`,
+      `    runExtract: () =>`,
+      `      new Promise(() => {`,
+      `        setImmediate(() => {`,
+      `          throw new TypeError("injected escaped extractor fault");`,
+      `        });`,
+      `      }),`,
+      `  });`,
+      `  console.log("RESOLVED");`,
+      `} catch (error) {`,
+      `  console.log(JSON.stringify({ name: error.name, code: error.code, exitCode: error.exitCode, message: error.message }));`,
+      `}`,
+    ].join("\n"),
+  );
+
+  const { stdout } = await promisify(execFile)(
+    process.execPath,
+    ["--import", "tsx", script],
+    { cwd: process.cwd() },
+  );
+  const outcome = JSON.parse(stdout.trim());
+  assert.equal(outcome.name, "CliError");
+  assert.equal(outcome.code, "EXTRACT_FAILED");
+  assert.equal(outcome.exitCode, 1);
+  assert.match(outcome.message, /injected escaped extractor fault/);
+
+  // The staging tree is gone and the destination was never published.
+  assert.deepEqual((await readdir(room)).sort(), ["a.tar.gz", "escape.mts"]);
+});
+
+// The CLI decoder must be the same expression as the server's and as
+// node-tar's, so a divergence can never be introduced on one side only.
+test("decodeTarString mirrors node-tar decString byte for byte", async () => {
+  const { decodeTarString } = await import("../src/tar-scan.js");
+  // Copied verbatim from cli/node_modules/tar/dist/esm/header.js.
+  const nodeTarDecString = (buffer: Buffer): string =>
+    buffer.toString("utf8").replace(/\0.*/, "");
+
+  const patterns: Buffer[] = [
+    Buffer.from("plain.txt"),
+    Buffer.from("plain.txt\0\0\0\0"),
+    Buffer.from("a".repeat(100)),
+    Buffer.alloc(0),
+    Buffer.from("\0"),
+    Buffer.from("\0\nCON.txt"),
+    Buffer.from("good.txt\0\nCON.txt"),
+    Buffer.from("good.txt\0\rCON.txt"),
+    Buffer.from("good.txt\0\u2028CON.txt"),
+    Buffer.from("good.txt\0\u2029CON.txt"),
+    Buffer.from("good.txt\0\nCON.txt\0\0\0"),
+    Buffer.from("good.txt\0\nfirst\0\nsecond"),
+    Buffer.from("café.txt\0\néCON"),
+    Buffer.from([0x61, 0x80, 0x2e, 0x74, 0x78, 0x74]),
+    Buffer.from([0x61, 0x00, 0x0a, 0xf0, 0x9f, 0x98, 0x80]),
+    Buffer.from([0x61, 0x00, 0x0a, 0xed, 0xa0, 0x80]),
+  ];
+  for (const pattern of patterns) {
+    assert.equal(
+      decodeTarString(pattern),
+      nodeTarDecString(pattern),
+      JSON.stringify(pattern.toString("latin1")),
+    );
+  }
+
+  // Deterministic PRNG so a disagreement is always reproducible.
+  let state = 0x2545f491;
+  const next = () => {
+    state = (state * 1103515245 + 12345) & 0x7fffffff;
+    return state;
+  };
+  const alphabet = [
+    0x00, 0x0a, 0x0d, 0x2f, 0x41, 0x7f, 0x80, 0xc3, 0xa9, 0xe2, 0x80, 0xa8,
+    0xf0, 0x9f, 0x98, 0x80,
+  ];
+  for (let round = 0; round < 20_000; round += 1) {
+    const field = Buffer.alloc(1 + (next() % 100));
+    for (let index = 0; index < field.length; index += 1) {
+      field[index] = alphabet[next() % alphabet.length]!;
+    }
+    assert.equal(decodeTarString(field), nodeTarDecString(field));
+  }
+});
+
+// Beyond the string fields: the walker must not read any other header field
+// differently from node-tar either. Failing closed is acceptable; deriving a
+// meaning node-tar does not share is not.
+test("adjacent header fields are read the way node-tar reads them", async () => {
+  const { scanTarGzArchive } = await import("../src/tar-scan.js");
+  const room = await mkdtemp(join(scratch, "adjacent-"));
+  const probe = async (bytes: Buffer, label: string) => {
+    const archivePath = join(room, `${label}.tar.gz`);
+    await writeFile(archivePath, bytes);
+    return scanTarGzArchive(archivePath, bytes.length);
+  };
+
+  // A NUL typeflag means a regular file on both sides.
+  const nulType = await probe(
+    gzipSync(rawTarEntry("nul-type.txt", "x", { type: "\0" })),
+    "nul-type",
+  );
+  assert.deepEqual(nulType.entries, ["nul-type.txt"]);
+
+  // Every other typeflag node-tar maps to Unsupported — or to a type this
+  // contract does not carry, such as ContiguousFile ("7") — rejects.
+  for (const type of ["\n", "\u0080", "7", "3", "6"]) {
+    await assert.rejects(
+      probe(
+        gzipSync(rawTarEntry("t.txt", "x", { type })),
+        `type-${type.charCodeAt(0)}`,
+      ),
+      (error: unknown) => {
+        assert.match(
+          (error as Error).message,
+          /unsupported archive entry type/i,
+        );
+        return true;
+      },
+      `type ${type.charCodeAt(0)}`,
+    );
+  }
+
+  // node-tar reads numeric fields with `/\0.*$/` + parseInt, which stops at
+  // the first NUL exactly as this walker's truncation does. A field starting
+  // with a NUL yields `undefined` there and 0 here, and ReadEntry turns that
+  // `undefined` into 0 too, so both frame the entry at zero bytes.
+  const whole = rawTarEntry("num.txt", "");
+  Buffer.from("\0\n0000000012", "latin1").copy(whole, 124);
+  whole.fill(0x20, 148, 156);
+  let sum = 0;
+  for (let index = 0; index < 512; index += 1) sum += whole[index]!;
+  whole.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+  const numeric = await probe(gzipSync(whole), "numeric");
+  assert.deepEqual(numeric.entries, ["num.txt"]);
 });

@@ -454,6 +454,103 @@ describe("archive upload contract", { concurrency: false }, () => {
     }
   });
 
+  it("rejects header fields hiding a suffix behind a NUL, with no persistence", async () => {
+    const { nulHiddenField, tarTrailer } = await import("./tar-fixtures");
+    // node-tar reads header strings with `decString`, which drops only the
+    // run from the first NUL to the next line terminator. A benign prefix
+    // therefore hid a DOS device name, an ADS colon, a control character or a
+    // traversal inside the name node-tar really publishes — and the server
+    // certified and stored the archive.
+    const fixtures: Array<[string, Buffer]> = [
+      [
+        "name-device",
+        Buffer.concat([
+          tarEntry("ignored", "", {
+            nameBytes: nulHiddenField("good.txt", "\n", "CON.txt"),
+          }),
+          tarTrailer(),
+        ]),
+      ],
+      [
+        "name-ads",
+        Buffer.concat([
+          tarEntry("ignored", "", {
+            nameBytes: nulHiddenField("ok.txt", "\n", "a:b.txt"),
+          }),
+          tarTrailer(),
+        ]),
+      ],
+      [
+        "name-nul-padded",
+        Buffer.concat([
+          tarEntry("ignored", "", {
+            nameBytes: nulHiddenField("good.txt", "\n", "CON.txt", 0),
+          }),
+          tarTrailer(),
+        ]),
+      ],
+      [
+        "linkpath",
+        Buffer.concat([
+          tarEntry("real.txt", "x"),
+          tarEntry("lnk", "", {
+            type: "2",
+            linknameBytes: nulHiddenField("real.txt", "\n", "COM1.log"),
+          }),
+          tarTrailer(),
+        ]),
+      ],
+      [
+        "ustar-prefix",
+        Buffer.concat([
+          tarEntry("inner.txt", "x", {
+            prefixBytes: (() => {
+              const field = Buffer.alloc(155);
+              Buffer.from("dir\0\nCON", "utf8").copy(field);
+              return field;
+            })(),
+          }),
+          tarTrailer(),
+        ]),
+      ],
+      [
+        "gnu-long-name",
+        Buffer.concat([
+          tarEntry("././@LongLink", "good.txt\0\nCON.txt", { type: "L" }),
+          tarEntry("truncated.txt", "x"),
+          tarTrailer(),
+        ]),
+      ],
+      [
+        "gnu-long-link",
+        Buffer.concat([
+          tarEntry("real.txt", "x"),
+          tarEntry("././@LongLink", "real.txt\0\nCOM1.log", { type: "K" }),
+          tarEntry("lnk", "", { type: "2", linkname: "real.txt" }),
+          tarTrailer(),
+        ]),
+      ],
+    ];
+    for (const [label, fixture] of fixtures) {
+      const beforeState = await storeState();
+      await assert.rejects(
+        service.upload(
+          stream(gzipSync(fixture)),
+          uploadOptions(`hidden-${label}.tar.gz`),
+        ),
+        (error: unknown) => {
+          assert.ok(error instanceof AppError, label);
+          assert.equal(error.status, 400);
+          assert.equal(error.code, "invalid_archive");
+          assert.match(error.message, /unsafe (entry path|link target)/u);
+          return true;
+        },
+        label,
+      );
+      assert.deepEqual(await storeState(), beforeState, label);
+    }
+  });
+
   it("rejects pax payloads hiding a second record, with no persistence", async () => {
     const { tarTrailer } = await import("./tar-fixtures");
     function paxRecord(key: string, value: string): string {

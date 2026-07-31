@@ -108,11 +108,62 @@ export async function verifyExtractionCompleteness(
 // disjoint from the `.<name>.fs-<unique>` staging spelling.
 const BACKUP_INFIX = ".fs-backup-";
 
-// Failure-injection seams for the publish steps; production always uses the
-// real fs operations.
+// Failure-injection seams for the publish and extraction steps; production
+// always uses the real fs operations and the real node-tar extractor.
 export interface PublishHooks {
   publishRename?: (from: string, to: string) => Promise<void>;
   removeBackup?: (backupRoot: string) => Promise<void>;
+  runExtract?: (options: {
+    file: string;
+    cwd: string;
+    onwarn: (code: string, message: string) => void;
+  }) => Promise<void>;
+}
+
+function asExtractionFailure(error: unknown): CliError {
+  if (error instanceof CliError) return error;
+  return new CliError(
+    `Archive extraction failed: ${error instanceof Error ? error.message : String(error)}`,
+    EXIT.general,
+    "EXTRACT_FAILED",
+  );
+}
+
+// node-tar performs its filesystem work in raw fs callbacks. A fault raised
+// there — `fs.lstat`/`fs.mkdir` throwing ERR_INVALID_ARG_VALUE for a path
+// node-tar derived that contains a NUL byte, for instance — is thrown on the
+// event loop, not into the promise `tar.extract` returned. That promise then
+// never settles, so awaiting it would abort the process with a raw stack
+// trace, skip the caller's cleanup, and leave a `.<name>.fs-XXXXXX` staging
+// directory beside the destination.
+//
+// Racing the extraction against listeners installed only for its duration
+// turns any escaped fault back into an ordinary rejection, so the caller's
+// `finally` still removes the staging tree and the user still gets a truthful
+// CliError. The listeners are removed immediately afterwards, so no other
+// command's failure mode or exit code is affected.
+async function runContainedExtraction(run: () => Promise<void>): Promise<void> {
+  let escape: ((error: unknown) => void) | undefined;
+  const escaped = new Promise<never>((_, reject) => {
+    escape = reject;
+  });
+  // Whichever side loses the race must not become an unhandled rejection.
+  escaped.catch(() => {});
+  const onEscape = (error: unknown) => escape?.(error);
+  process.on("uncaughtException", onEscape);
+  process.on("unhandledRejection", onEscape);
+  try {
+    // Wrapping in an async IIFE turns a synchronous throw into a rejection,
+    // so the listeners below are always removed.
+    const attempt = (async () => run())();
+    attempt.catch(() => {});
+    await Promise.race([attempt, escaped]);
+  } catch (error) {
+    throw asExtractionFailure(error);
+  } finally {
+    process.off("uncaughtException", onEscape);
+    process.off("unhandledRejection", onEscape);
+  }
 }
 
 // Detect and resolve backups a crashed prior invocation left behind: if the
@@ -190,14 +241,20 @@ export async function extractArchive(
     // belt-and-braces collector so nothing downgraded to a warning can slip
     // through. Either path aborts before the destination is touched.
     const warnings: string[] = [];
-    await tar.extract({
-      file: archivePath,
-      cwd: staging,
-      preservePaths: false,
-      unlink: true,
-      strict: true,
-      onwarn: (code, message) => warnings.push(`${code}: ${message}`),
-    });
+    const onwarn = (code: string, message: string) =>
+      warnings.push(`${code}: ${message}`);
+    await runContainedExtraction(() =>
+      hooks.runExtract
+        ? hooks.runExtract({ file: archivePath, cwd: staging, onwarn })
+        : tar.extract({
+            file: archivePath,
+            cwd: staging,
+            preservePaths: false,
+            unlink: true,
+            strict: true,
+            onwarn,
+          }),
+    );
     throwIfExtractionWarnings(warnings);
     await verifyExtractionCompleteness(
       staging,

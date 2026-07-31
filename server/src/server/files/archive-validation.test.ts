@@ -6,8 +6,14 @@ import { describe, it } from "node:test";
 import { gzipSync } from "node:zlib";
 
 import { AppError } from "./errors";
-import { TarGzArchiveValidator } from "./archive-validation";
-import { tarEntry, tarHeader, tarTrailer, validTarGz } from "./tar-fixtures";
+import { decodeTarString, TarGzArchiveValidator } from "./archive-validation";
+import {
+  nulHiddenField,
+  tarEntry,
+  tarHeader,
+  tarTrailer,
+  validTarGz,
+} from "./tar-fixtures";
 
 async function validate(
   bytes: Buffer,
@@ -46,6 +52,119 @@ function paxRecord(key: string, value: string): string {
     length = next;
   }
 }
+
+// node-tar's own decoder, copied verbatim from
+// cli/node_modules/tar/dist/esm/header.js so the mirror is compared against
+// the real expression rather than against a restatement of it.
+const nodeTarDecString = (buffer: Buffer): string =>
+  buffer.toString("utf8").replace(/\0.*/, "");
+
+describe("decodeTarString mirrors node-tar decString", () => {
+  it("agrees on every documented byte pattern", () => {
+    const patterns: Buffer[] = [
+      Buffer.from("plain.txt"),
+      Buffer.from("plain.txt\0\0\0\0"),
+      Buffer.from("a".repeat(100)),
+      Buffer.alloc(0),
+      Buffer.from("\0"),
+      Buffer.from("\0\nCON.txt"),
+      Buffer.from("good.txt\0\nCON.txt"),
+      Buffer.from("good.txt\0\rCON.txt"),
+      Buffer.from("good.txt\0\u2028CON.txt"),
+      Buffer.from("good.txt\0\u2029CON.txt"),
+      Buffer.from("good.txt\0\nCON.txt\0\0\0"),
+      Buffer.from("good.txt\0\nfirst\0\nsecond"),
+      Buffer.from("caf\u00e9.txt\0\n\u00e9CON"),
+      Buffer.from([0x61, 0x80, 0x2e, 0x74, 0x78, 0x74]),
+      Buffer.from([0x61, 0x00, 0x0a, 0xf0, 0x9f, 0x98, 0x80]),
+      Buffer.from([0x61, 0x00, 0x0a, 0xed, 0xa0, 0x80]),
+    ];
+    for (const pattern of patterns) {
+      assert.equal(
+        decodeTarString(pattern),
+        nodeTarDecString(pattern),
+        JSON.stringify(pattern.toString("latin1")),
+      );
+    }
+  });
+
+  it("agrees on randomized 100-byte fields", () => {
+    // Deterministic PRNG so a disagreement is always reproducible.
+    let state = 0x2545f491;
+    const next = () => {
+      state = (state * 1103515245 + 12345) & 0x7fffffff;
+      return state;
+    };
+    const alphabet = [
+      0x00, 0x0a, 0x0d, 0x2f, 0x41, 0x7f, 0x80, 0xc3, 0xa9, 0xe2, 0x80, 0xa8,
+      0xf0, 0x9f, 0x98, 0x80,
+    ];
+    for (let round = 0; round < 20_000; round += 1) {
+      const field = Buffer.alloc(1 + (next() % 100));
+      for (let index = 0; index < field.length; index += 1) {
+        field[index] = alphabet[next() % alphabet.length]!;
+      }
+      assert.equal(decodeTarString(field), nodeTarDecString(field));
+    }
+  });
+});
+
+// Beyond the string fields, the walker must not derive a different meaning
+// than node-tar for any other header field it acts on. These pin the
+// re-audited boundaries so the same interpretation class cannot reappear
+// somewhere else in the header.
+describe("adjacent header field interpretation", () => {
+  it("fails closed on every typeflag node-tar reads differently", async () => {
+    // node-tar decodes the typeflag with decString too. A NUL byte means a
+    // regular file on both sides; every other byte it maps to Unsupported or
+    // to a type this contract does not carry must reject here, never the
+    // other way around.
+    await validate(
+      gzipSync(
+        Buffer.concat([
+          tarEntry("nul-type.txt", "x", { type: "\0" }),
+          tarTrailer(),
+        ]),
+      ),
+    );
+    for (const type of ["\n", "\u0080", "7", "3", "6"]) {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([tarEntry("t.txt", "x", { type }), tarTrailer()]),
+        ),
+        /unsupported archive entry type/u,
+      );
+    }
+  });
+
+  it("frames a size field the way node-tar's decNumber does", async () => {
+    // node-tar reads numeric fields with `/\0.*$/` + parseInt, which stops at
+    // the first NUL just as this walker's first-NUL truncation does; a field
+    // that starts with a NUL yields `undefined` there and 0 here, and
+    // ReadEntry turns that `undefined` into 0 as well. Both therefore frame
+    // this entry at zero bytes, so the trailer lands where both expect it.
+    const block = tarHeader("num.txt", 0);
+    Buffer.from("\0\n0000000012", "latin1").copy(block, 124);
+    block.fill(0x20, 148, 156);
+    let sum = 0;
+    for (const byte of block) sum += byte;
+    block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+    await validate(gzipSync(Buffer.concat([block, tarTrailer()])));
+  });
+
+  it("rejects a base-256 size node-tar decodes as negative", async () => {
+    const block = tarHeader("neg.bin", 0);
+    block.fill(0xff, 124, 136);
+    block.fill(0x20, 148, 156);
+    let sum = 0;
+    for (const byte of block) sum += byte;
+    block.write(`${sum.toString(8).padStart(6, "0")}\0 `, 148, 8, "latin1");
+    await rejectsInvalid(
+      gzipSync(Buffer.concat([block, tarTrailer()])),
+      /invalid size field/u,
+    );
+  });
+});
 
 describe("TarGzArchiveValidator", () => {
   it("accepts a valid archive at any chunk boundary", async () => {
@@ -2158,6 +2277,273 @@ describe("TarGzArchiveValidator", () => {
               type: "g",
             }),
             tarEntry("inner.txt", "content"),
+            tarTrailer(),
+          ]),
+        ),
+      );
+    });
+  });
+
+  // node-tar reads every header string field with `decString`
+  // (dist/esm/header.js): `.toString("utf8").replace(/\0.*/, "")`. The regex
+  // is NON-global and `.` never matches a line terminator, so only the run
+  // from the FIRST NUL to the next line terminator is dropped — every byte
+  // after that terminator survives into the path or link target the
+  // extractor actually publishes. The GNU `L`/`K` metadata payload gets the
+  // same rule (dist/esm/parse.js `[EMITMETA]`). Decoding these fields as C
+  // strings would let a benign prefix hide a hostile suffix from the whole
+  // portable-name, collision, and containment policy.
+  describe("header string decoding matches node-tar decString", () => {
+    // Every class the portable policy exists to forbid, smuggled behind a
+    // NUL that the extractor steps over.
+    const HOSTILE_SUFFIXES: Array<[string, string]> = [
+      ["DOS device basename", "CON.txt"],
+      ["alternate data stream colon", "a:b.txt"],
+      ["trailing space", "bad "],
+      ["trailing dot", "bad."],
+      ["control character", "tab\there.txt"],
+      ["parent traversal", "../escape.txt"],
+      ["case collision with a declared entry", "GOOD.TXT"],
+    ];
+
+    for (const [label, suffix] of HOSTILE_SUFFIXES) {
+      it(`rejects a name field hiding a ${label} behind a NUL`, async () => {
+        await rejectsInvalid(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("good.txt", "declared"),
+              tarEntry("ignored", "", {
+                nameBytes: nulHiddenField("good2.txt", "\n", suffix),
+              }),
+              tarTrailer(),
+            ]),
+          ),
+          /unsafe entry path|conflicting entry paths/u,
+        );
+      });
+    }
+
+    it("sees the surviving suffix for every line terminator that ends the NUL run", async () => {
+      // `.` excludes LF, CR, U+2028 and U+2029, so each of them leaves the
+      // suffix in the name the extractor publishes. LF and CR are control
+      // characters, so the derived name rejects outright.
+      for (const separator of ["\n", "\r"]) {
+        await rejectsInvalid(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("ignored", "", {
+                nameBytes: nulHiddenField("good.txt", separator, "CON.txt"),
+              }),
+              tarTrailer(),
+            ]),
+          ),
+          /unsafe entry path/u,
+        );
+      }
+      // U+2028/U+2029 are not control characters and are not separators on
+      // any consumer OS, so the joined name is an ordinary portable one.
+      // Accepting is correct precisely BECAUSE the whole string is now the
+      // validated one: the basename is `good.txt\u2028CON.txtYYY…`, not the
+      // reserved `CON.txt`. The CLI suite pins the same bytes against a real
+      // node-tar extraction to prove the manifest is what gets published.
+      for (const separator of ["\u2028", "\u2029"]) {
+        await validate(
+          gzipSync(
+            Buffer.concat([
+              tarEntry("ignored", "", {
+                nameBytes: nulHiddenField("good.txt", separator, "CON.txt"),
+              }),
+              tarTrailer(),
+            ]),
+          ),
+        );
+      }
+      // The suffix behind a U+2028 is genuinely judged, not skipped: the
+      // same spelling carrying a traversal segment still rejects.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("ignored", "", {
+              nameBytes: nulHiddenField("dir", "\u2028", "/../escape.txt"),
+            }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("rejects a NUL-padded field whose surviving suffix carries NUL bytes", async () => {
+      // With ordinary NUL padding the extractor derives a path containing
+      // NUL bytes, which `fs.lstat` refuses outright.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("ignored", "", {
+              nameBytes: nulHiddenField("good.txt", "\n", "CON.txt", 0),
+            }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("rejects a raw linkpath field hiding a hostile suffix", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "x"),
+            tarEntry("lnk", "", {
+              type: "2",
+              linknameBytes: nulHiddenField("real.txt", "\n", "COM1.log"),
+            }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "x"),
+            tarEntry("hard", "", {
+              type: "1",
+              linknameBytes: nulHiddenField("real.txt", "\n", "QQQ"),
+            }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("rejects a ustar prefix field hiding a hostile suffix", async () => {
+      const prefixBytes = Buffer.alloc(155);
+      Buffer.from("dir\0\nCON", "utf8").copy(prefixBytes);
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("inner.txt", "x", { prefixBytes }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("rejects a GNU long-name payload hiding a hostile suffix", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("././@LongLink", "good.txt\0\nCON.txt", { type: "L" }),
+            tarEntry("truncated.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("rejects a GNU long-link payload hiding a hostile suffix", async () => {
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "x"),
+            tarEntry("././@LongLink", "real.txt\0\nCOM1.log", { type: "K" }),
+            tarEntry("lnk", "", { type: "2", linkname: "real.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("rejects a hidden suffix in a GNU payload masked by a benign pax override", async () => {
+      // Every override the extractor could apply is validated in full, so
+      // the true GNU value still rejects even though the pax `path` wins.
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("././@LongLink", "good.txt\0\nCON.txt", { type: "L" }),
+            tarEntry("PaxHeader/x", paxRecord("path", "benign.txt"), {
+              type: "x",
+            }),
+            tarEntry("truncated.txt", "x"),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("real.txt", "x"),
+            tarEntry("././@LongLink", "real.txt\0\nCOM1.log", { type: "K" }),
+            tarEntry("GlobalHead", paxRecord("linkpath", "real.txt"), {
+              type: "g",
+            }),
+            tarEntry("lnk", "", { type: "2", linkname: "real.txt" }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe link target/u,
+      );
+    });
+
+    it("keeps a masked raw field judged for containment only", async () => {
+      // The extractor publishes the pax `path`, and the raw 100-byte field
+      // is the lossy truncation every long-path writer emits — so a hidden
+      // suffix there is not the published name and only has to stay
+      // contained. A `..` SEGMENT still rejects.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "report.name.txt"), {
+              type: "x",
+            }),
+            tarEntry("ignored", "x", {
+              nameBytes: nulHiddenField("report.", "\n", "CON.txt"),
+            }),
+            tarTrailer(),
+          ]),
+        ),
+      );
+      await rejectsInvalid(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("PaxHeader/x", paxRecord("path", "report.name.txt"), {
+              type: "x",
+            }),
+            tarEntry("ignored", "x", {
+              nameBytes: nulHiddenField("report", "\n", "/../escape.txt"),
+            }),
+            tarTrailer(),
+          ]),
+        ),
+        /unsafe entry path/u,
+      );
+    });
+
+    it("keeps ordinary NUL-terminated fields decoding unchanged", async () => {
+      // No line terminator after the NUL means decString and C-string
+      // truncation agree, so every real archive keeps its current meaning —
+      // including a 100-byte field with no NUL at all.
+      await validate(
+        gzipSync(
+          Buffer.concat([
+            tarEntry("dir/", "", { type: "5" }),
+            tarEntry("ignored", "x", {
+              nameBytes: nulHiddenField("dir/plain.txt", "", "", 0),
+            }),
+            tarEntry("ignored", "", {
+              type: "2",
+              nameBytes: nulHiddenField("dir/lnk", "", "", 0),
+              linknameBytes: nulHiddenField("plain.txt", "", "", 0),
+            }),
+            tarEntry("ignored", "x", {
+              nameBytes: Buffer.from("d".repeat(91).concat("/full.txt")),
+            }),
             tarTrailer(),
           ]),
         ),

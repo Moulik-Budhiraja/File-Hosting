@@ -15,6 +15,27 @@ export interface TarHeaderOptions {
   prefix?: string;
   prefixBytes?: Buffer;
   magic?: string;
+  // Verbatim field writers. `Buffer.write(…, "utf8")` can never emit a NUL,
+  // so the fields node-tar decodes with `decString` — which keeps the bytes
+  // after a NUL that is followed by a line terminator — can only be
+  // exercised by writing the raw bytes.
+  nameBytes?: Buffer;
+  linknameBytes?: Buffer;
+}
+
+// A 100-byte header field holding `prefix`, a NUL, a line terminator, and a
+// suffix the extractor keeps but a C-string decoder discards. `fill` is the
+// remaining padding byte; NUL padding is the spelling that makes node-tar
+// derive a path containing NUL bytes.
+export function nulHiddenField(
+  prefix: string,
+  separator: string,
+  suffix: string,
+  fill = 0x59,
+): Buffer {
+  const field = Buffer.alloc(100, fill);
+  Buffer.from(`${prefix}\0${separator}${suffix}`, "utf8").copy(field);
+  return field;
 }
 
 export function tarHeader(
@@ -23,7 +44,8 @@ export function tarHeader(
   options: TarHeaderOptions = {},
 ): Buffer {
   const block = Buffer.alloc(BLOCK);
-  block.write(name, 0, 100, "utf8");
+  if (options.nameBytes) options.nameBytes.copy(block, 0, 0, 100);
+  else block.write(name, 0, 100, "utf8");
   block.write("0000644\0", 100, 8, "latin1");
   block.write("0000000\0", 108, 8, "latin1");
   block.write("0000000\0", 116, 8, "latin1");
@@ -31,7 +53,8 @@ export function tarHeader(
   block.write("00000000000\0", 136, 12, "latin1");
   block.write("        ", 148, 8, "latin1");
   block.write(options.type ?? "0", 156, 1, "latin1");
-  if (options.linkname) block.write(options.linkname, 157, 100, "utf8");
+  if (options.linknameBytes) options.linknameBytes.copy(block, 157, 0, 100);
+  else if (options.linkname) block.write(options.linkname, 157, 100, "utf8");
   block.write(options.magic ?? "ustar\u000000", 257, 8, "latin1");
   if (options.prefix) block.write(options.prefix, 345, 155, "utf8");
   if (options.prefixBytes) options.prefixBytes.copy(block, 345);

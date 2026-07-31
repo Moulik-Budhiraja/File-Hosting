@@ -47,9 +47,23 @@ function parseNumeric(field: Buffer): number | null {
   return Number.isSafeInteger(value) ? value : null;
 }
 
-function cString(buffer: Buffer): string {
-  const end = buffer.indexOf(0);
-  return buffer.subarray(0, end === -1 ? buffer.length : end).toString("utf8");
+// Exact mirror of node-tar's `decString` (dist/esm/header.js):
+//
+//   buf.subarray(off, off + size).toString("utf8").replace(/\0.*/, "")
+//
+// This is NOT C-string truncation. The regex is non-global and `.` never
+// matches a line terminator, so only the run from the FIRST NUL up to the
+// next LF/CR/U+2028/U+2029 is dropped — every byte after that terminator
+// (including further NULs) survives into the path or link target the
+// extractor publishes. Reading these fields as C strings would let a benign
+// prefix hide a hostile suffix from the entire portable-name, collision, and
+// containment policy. The `u` flag does not change the match: `.` still
+// excludes exactly the four line terminators.
+//
+// The same rule applies to the GNU `L`/`K` metadata payload, which
+// dist/esm/parse.js `[EMITMETA]` reduces with the identical expression.
+export function decodeTarString(buffer: Buffer): string {
+  return buffer.toString("utf8").replace(/\0.*/u, "");
 }
 
 function checksumMatches(block: Buffer): boolean {
@@ -267,12 +281,12 @@ function parseFramedPaxRecords(payload: Buffer): Map<string, string> {
 const USTAR_MAGIC = "ustar\u000000";
 
 function decodeHeaderPath(block: Buffer): string {
-  const name = cString(block.subarray(0, 100));
+  const name = decodeTarString(block.subarray(0, 100));
   if (block.subarray(257, 265).toString("binary") !== USTAR_MAGIC) return name;
   if ((block[475] ?? 0) !== 0) {
-    return `${cString(block.subarray(345, 500))}/${name}`;
+    return `${decodeTarString(block.subarray(345, 500))}/${name}`;
   }
-  const prefix = cString(block.subarray(345, 475));
+  const prefix = decodeTarString(block.subarray(345, 475));
   return prefix ? `${prefix}/${name}` : name;
 }
 
@@ -613,7 +627,7 @@ class TarWalker {
         );
       }
       frameSize = this.overrideSize ?? this.globalSize ?? size;
-      const headerLink = cString(block.subarray(157, 257));
+      const headerLink = decodeTarString(block.subarray(157, 257));
       // Backslash gate over every value the extractor could apply — the raw
       // header fields and each GNU/PAX override — so a benign override can
       // never mask a hostile spelling behind it.
@@ -779,10 +793,10 @@ class TarWalker {
     this.capture = null;
     this.captureKind = null;
     if (kind === "gnu-path") {
-      this.overridePath = cString(payload);
+      this.overridePath = decodeTarString(payload);
       this.pendingPathOverrides.push(this.overridePath);
     } else if (kind === "gnu-link") {
-      this.overrideLink = cString(payload);
+      this.overrideLink = decodeTarString(payload);
       this.pendingLinkOverrides.push(this.overrideLink);
     } else if (kind === "pax-next" || kind === "pax-global") {
       const records = parsePaxRecords(payload);
