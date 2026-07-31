@@ -4,18 +4,25 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import { apiFetch, isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { useLatest } from "@/lib/use-latest";
 import { formatDate, formatDateTime } from "@/lib/format";
-import type { ApiKeyMetadata, PublicUser } from "@/lib/types";
+import type { ApiKeyMetadata } from "@/lib/types";
 import { Dialog } from "./Dialog";
 
 interface KeyRow extends ApiKeyMetadata {
   ownerName: string | null;
 }
 
+interface AggregateKey extends ApiKeyMetadata {
+  owner_username: string;
+}
+
+const AGGREGATE_PAGE_LIMIT = 100;
+
 type ListState =
   | { kind: "loading" }
   | { kind: "error"; status: number }
-  | { kind: "ready"; keys: KeyRow[] };
+  | { kind: "ready"; keys: KeyRow[]; nextCursor: string | null };
 
 interface SecretState {
   name: string;
@@ -43,46 +50,56 @@ export function ApiKeysView() {
   const [revokeTarget, setRevokeTarget] = useState<KeyRow | null>(null);
   const [revokeError, setRevokeError] = useState<string | null>(null);
   const [revoking, setRevoking] = useState(false);
+  const [cursor, setCursor] = useState<string | null>(null);
+  const [prevCursors, setPrevCursors] = useState<Array<string | null>>([]);
   const nameId = useId();
 
+  const { begin } = useLatest();
+
   const load = useCallback(async () => {
+    const ticket = begin();
     setState({ kind: "loading" });
     try {
-      if (isAdmin) {
-        const { users } = await apiFetch<{ users: PublicUser[] }>("/api/users");
-        const perUser = await Promise.all(
-          users.map(async (owner) => {
-            const { api_keys } = await apiFetch<{
-              api_keys: ApiKeyMetadata[];
-            }>(`/api/api-keys?user_id=${encodeURIComponent(owner.id)}`);
-            return api_keys.map((key) => ({
-              ...key,
-              ownerName: owner.username,
-            }));
-          }),
-        );
+      if (isAdmin && scope === "all") {
+        // One paginated aggregate request with owner identity — never an
+        // O(users) fan-out.
+        const params = new URLSearchParams();
+        params.set("scope", "all");
+        params.set("limit", String(AGGREGATE_PAGE_LIMIT));
+        if (cursor) params.set("cursor", cursor);
+        const page = await apiFetch<{
+          api_keys: AggregateKey[];
+          next_cursor: string | null;
+        }>(`/api/api-keys?${params.toString()}`, { signal: ticket.signal });
+        if (!ticket.current()) return;
         setState({
           kind: "ready",
-          keys: perUser
-            .flat()
-            .sort((a, b) => a.created_at.localeCompare(b.created_at)),
+          keys: page.api_keys.map((key) => ({
+            ...key,
+            ownerName: key.owner_username,
+          })),
+          nextCursor: page.next_cursor,
         });
       } else {
         const { api_keys } = await apiFetch<{ api_keys: ApiKeyMetadata[] }>(
           "/api/api-keys",
+          { signal: ticket.signal },
         );
+        if (!ticket.current()) return;
         setState({
           kind: "ready",
           keys: api_keys.map((key) => ({ ...key, ownerName: user.username })),
+          nextCursor: null,
         });
       }
     } catch (error) {
+      if (!ticket.current()) return;
       setState({
         kind: "error",
         status: isApiError(error) ? error.status : 0,
       });
     }
-  }, [isAdmin, user.username]);
+  }, [begin, isAdmin, scope, cursor, user.username]);
 
   useEffect(() => {
     void load();
@@ -91,14 +108,10 @@ export function ApiKeysView() {
   const visible = useMemo(() => {
     if (state.kind !== "ready") return [];
     const query = search.trim().toLocaleLowerCase("en-US");
-    return state.keys.filter((key) => {
-      if (isAdmin && scope === "mine" && key.user_id !== user.id) return false;
-      if (query && !key.name.toLocaleLowerCase("en-US").includes(query)) {
-        return false;
-      }
-      return true;
-    });
-  }, [state, search, scope, isAdmin, user.id]);
+    return state.keys.filter(
+      (key) => !query || key.name.toLocaleLowerCase("en-US").includes(query),
+    );
+  }, [state, search]);
 
   const activeCount =
     state.kind === "ready"
@@ -198,7 +211,11 @@ export function ApiKeysView() {
               type="button"
               className={`segment-item${scope === "all" ? " segment-item-active" : ""}`}
               aria-pressed={scope === "all"}
-              onClick={() => setScope("all")}
+              onClick={() => {
+                setCursor(null);
+                setPrevCursors([]);
+                setScope("all");
+              }}
             >
               All users
             </button>
@@ -206,7 +223,11 @@ export function ApiKeysView() {
               type="button"
               className={`segment-item${scope === "mine" ? " segment-item-active" : ""}`}
               aria-pressed={scope === "mine"}
-              onClick={() => setScope("mine")}
+              onClick={() => {
+                setCursor(null);
+                setPrevCursors([]);
+                setScope("mine");
+              }}
             >
               Mine
             </button>
@@ -351,10 +372,41 @@ export function ApiKeysView() {
               ) : null}
             </tbody>
           </table>
-          <p className="table-footline">
-            {state.keys.length} keys · {activeCount} active · revoked keys stay
-            listed for audit
-          </p>
+          <div className="table-footline table-footline-split">
+            <span>
+              {state.keys.length} {state.keys.length === 1 ? "key" : "keys"} ·{" "}
+              {activeCount} active · recent revoked keys stay listed — records
+              older than 90 days or beyond the last 20 may be pruned
+            </span>
+            {isAdmin && scope === "all" ? (
+              <span className="pager">
+                <button
+                  type="button"
+                  className="button button-small"
+                  disabled={prevCursors.length === 0}
+                  onClick={() => {
+                    const previous = [...prevCursors];
+                    const target = previous.pop() ?? null;
+                    setPrevCursors(previous);
+                    setCursor(target);
+                  }}
+                >
+                  ← prev
+                </button>
+                <button
+                  type="button"
+                  className="button button-small"
+                  disabled={state.nextCursor === null}
+                  onClick={() => {
+                    setPrevCursors([...prevCursors, cursor]);
+                    setCursor(state.nextCursor);
+                  }}
+                >
+                  next →
+                </button>
+              </span>
+            ) : null}
+          </div>
         </>
       ) : null}
 
@@ -369,7 +421,11 @@ export function ApiKeysView() {
       ) : null}
 
       {createOpen ? (
-        <Dialog title="New API key" onClose={() => setCreateOpen(false)}>
+        <Dialog
+          title="New API key"
+          busy={creating}
+          onClose={() => setCreateOpen(false)}
+        >
           <form onSubmit={submitCreate} noValidate>
             <div className="field">
               <label htmlFor={nameId}>Name — where will this key live?</label>
@@ -397,6 +453,7 @@ export function ApiKeysView() {
               <button
                 type="button"
                 className="button"
+                disabled={creating}
                 onClick={() => setCreateOpen(false)}
               >
                 Cancel
@@ -481,6 +538,7 @@ export function ApiKeysView() {
         <Dialog
           title={`Revoke ${revokeTarget.name}?`}
           tone="danger"
+          busy={revoking}
           onClose={() => setRevokeTarget(null)}
         >
           <p>
@@ -503,6 +561,7 @@ export function ApiKeysView() {
             <button
               type="button"
               className="button"
+              disabled={revoking}
               onClick={() => setRevokeTarget(null)}
             >
               Cancel

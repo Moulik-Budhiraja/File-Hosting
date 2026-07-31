@@ -13,8 +13,12 @@ export default function ConsoleLayout({
 
   const onUnauthenticated = useCallback(
     (reason: UnauthenticatedReason) => {
+      // Preserve the complete task URL (path + filters/search/page) so
+      // re-authentication returns to the actual task, not just the route.
+      const taskSearch =
+        typeof window !== "undefined" ? window.location.search : "";
       const params = new URLSearchParams();
-      params.set("next", pathname || "/files");
+      params.set("next", `${pathname || "/files"}${taskSearch}`);
       if (reason === "session-expired") params.set("expired", "1");
       router.replace(`/login?${params.toString()}`);
     },

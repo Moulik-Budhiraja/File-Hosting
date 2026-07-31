@@ -33,6 +33,55 @@ export interface ApiKeyMetadata {
   revokedAt: string | null;
 }
 
+export interface OwnedApiKeyMetadata extends ApiKeyMetadata {
+  ownerUsername: string;
+}
+
+export interface ApiKeyPage {
+  apiKeys: OwnedApiKeyMetadata[];
+  nextCursor: string | null;
+}
+
+export interface ApiKeyCursor {
+  createdAt: string;
+  id: string;
+}
+
+// Revoked API keys are retained for audit context under an explicit,
+// bounded policy: at most this many revoked records per user, and none
+// older than the retention age. Pruning happens on the owner's next key
+// creation. This is bounded retention, not a durable audit log.
+export const REVOKED_KEY_RETENTION_COUNT = 20;
+export const REVOKED_KEY_RETENTION_DAYS = 90;
+
+export function encodeApiKeyCursor(cursor: ApiKeyCursor): string {
+  return Buffer.from(
+    JSON.stringify([cursor.createdAt, cursor.id]),
+    "utf8",
+  ).toString("base64url");
+}
+
+export function decodeApiKeyCursor(value: string): ApiKeyCursor {
+  try {
+    const parsed: unknown = JSON.parse(
+      Buffer.from(value, "base64url").toString("utf8"),
+    );
+    if (
+      !Array.isArray(parsed) ||
+      parsed.length !== 2 ||
+      typeof parsed[0] !== "string" ||
+      typeof parsed[1] !== "string" ||
+      !Number.isFinite(Date.parse(parsed[0])) ||
+      parsed[1].length === 0
+    ) {
+      throw new Error("invalid cursor payload");
+    }
+    return { createdAt: parsed[0], id: parsed[1] };
+  } catch (cause) {
+    throw new AppError(400, "invalid_cursor", "Cursor is invalid", { cause });
+  }
+}
+
 const AUTH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY NOT NULL,
@@ -526,9 +575,23 @@ export class AuthRepository {
     }
     const secret = `fsk_${randomBytes(32).toString("base64url")}`;
     const id = randomUUID();
+    // Prune only revoked records outside the documented retention bounds
+    // (age, then count); recent revoked context stays listed for audit.
+    const ageCutoff = new Date(
+      now.getTime() - REVOKED_KEY_RETENTION_DAYS * 24 * 60 * 60 * 1000,
+    ).toISOString();
     await this.client.execute({
-      sql: "DELETE FROM api_keys WHERE user_id = ? AND revoked_at IS NOT NULL",
-      args: [userId],
+      sql: `DELETE FROM api_keys
+        WHERE user_id = ? AND revoked_at IS NOT NULL AND (
+          revoked_at <= ?
+          OR id IN (
+            SELECT id FROM api_keys
+            WHERE user_id = ? AND revoked_at IS NOT NULL
+            ORDER BY revoked_at DESC, id DESC
+            LIMIT -1 OFFSET ?
+          )
+        )`,
+      args: [userId, ageCutoff, userId, REVOKED_KEY_RETENTION_COUNT],
     });
     const result = await this.client.execute({
       sql: `INSERT INTO api_keys
@@ -592,6 +655,59 @@ export class AuthRepository {
         typeof row.last_used_at === "string" ? row.last_used_at : null,
       revokedAt: typeof row.revoked_at === "string" ? row.revoked_at : null,
     }));
+  }
+
+  // Single-query aggregate for the admin key view: every user's keys with
+  // owner identity, keyset-paginated in SQL. Replaces the O(users) client
+  // fan-out and cannot be poisoned by one owner's failure.
+  async listAllApiKeys(options: {
+    limit: number;
+    cursor?: ApiKeyCursor;
+  }): Promise<ApiKeyPage> {
+    const limit = Math.min(Math.max(options.limit, 1), 200);
+    const where = options.cursor
+      ? "WHERE (k.created_at > ? OR (k.created_at = ? AND k.id > ?))"
+      : "";
+    const args: (string | number)[] = options.cursor
+      ? [
+          options.cursor.createdAt,
+          options.cursor.createdAt,
+          options.cursor.id,
+          limit + 1,
+        ]
+      : [limit + 1];
+    const result = await this.client.execute({
+      sql: `SELECT k.id, k.user_id, k.name, k.key_prefix, k.last_four,
+          k.created_at, k.last_used_at, k.revoked_at,
+          u.username AS owner_username
+        FROM api_keys k JOIN users u ON u.id = k.user_id
+        ${where}
+        ORDER BY k.created_at, k.id
+        LIMIT ?`,
+      args,
+    });
+    const hasMore = result.rows.length > limit;
+    const rows = result.rows.slice(0, limit);
+    const apiKeys = rows.map((row) => ({
+      id: stringColumn(row, "id"),
+      userId: stringColumn(row, "user_id"),
+      name: stringColumn(row, "name"),
+      prefix: stringColumn(row, "key_prefix"),
+      lastFour: stringColumn(row, "last_four"),
+      createdAt: stringColumn(row, "created_at"),
+      lastUsedAt:
+        typeof row.last_used_at === "string" ? row.last_used_at : null,
+      revokedAt: typeof row.revoked_at === "string" ? row.revoked_at : null,
+      ownerUsername: stringColumn(row, "owner_username"),
+    }));
+    const last = apiKeys.at(-1);
+    return {
+      apiKeys,
+      nextCursor:
+        hasMore && last
+          ? encodeApiKeyCursor({ createdAt: last.createdAt, id: last.id })
+          : null,
+    };
   }
 
   async revokeApiKey(

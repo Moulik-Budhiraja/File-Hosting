@@ -1,4 +1,4 @@
-import { cleanup, render, screen } from "@testing-library/react";
+import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
 import { afterEach, expect, test, vi } from "vitest";
 
@@ -42,12 +42,15 @@ function meRoute(url: string): Response | null {
   return null;
 }
 
-function renderAccount() {
-  return render(
-    <AuthProvider onUnauthenticated={vi.fn()}>
-      <AccountSecurity />
-    </AuthProvider>,
-  );
+function renderAccount(onPasswordChanged = vi.fn()) {
+  return {
+    onPasswordChanged,
+    ...render(
+      <AuthProvider onUnauthenticated={vi.fn()}>
+        <AccountSecurity onPasswordChanged={onPasswordChanged} />
+      </AuthProvider>,
+    ),
+  };
 }
 
 async function fillPasswords(current: string, next: string, confirm: string) {
@@ -166,11 +169,73 @@ test("server errors state nothing changed and preserve the form values", async (
   ).toBe("old password!!");
 });
 
-test("success clears the fields and announces the session consequences", async () => {
+test("success clears the fields and routes to the truthful password-changed login state", async () => {
   stubFetch((url) => {
     const known = meRoute(url);
     if (known) return known;
     return new Response(null, { status: 204 });
+  });
+  const { onPasswordChanged } = renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords("old password!!", "new password 123", "new password 123");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+  await waitFor(() => expect(onPasswordChanged).toHaveBeenCalled());
+  expect(
+    (screen.getByLabelText("New password") as HTMLInputElement).value,
+  ).toBe("");
+  // The deliberate change is never mislabeled as a session expiry.
+  expect(screen.queryByText(/session expired/i)).toBeNull();
+});
+
+test("a new password over 72 UTF-8 bytes is rejected on the new field without any request", async () => {
+  const mutations: string[] = [];
+  stubFetch((url) => {
+    const known = meRoute(url);
+    if (known) return known;
+    mutations.push(url);
+    return new Response(null, { status: 204 });
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  const emoji20 = "🔑".repeat(20); // 20 code points, 80 UTF-8 bytes
+  await userEvent.type(screen.getByLabelText("Current password"), "old pass!");
+  await userEvent.click(screen.getByLabelText("New password"));
+  await userEvent.paste(emoji20);
+  await userEvent.click(screen.getByLabelText("Confirm new password"));
+  await userEvent.paste(emoji20);
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+  expect(
+    screen.getByText(/too long — 80 of 72 maximum utf-8 bytes/i),
+  ).toBeTruthy();
+  const newField = screen.getByLabelText("New password");
+  expect(newField.getAttribute("aria-invalid")).toBe("true");
+  expect(
+    screen.getByLabelText("Current password").getAttribute("aria-invalid"),
+  ).toBeNull();
+  expect(mutations).toEqual([]);
+});
+
+test("a server invalid_password rejection maps to the new-password field", async () => {
+  stubFetch((url, init) => {
+    const known = meRoute(url);
+    if (known) return known;
+    if (url === "/api/auth/password" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: "invalid_password",
+            message:
+              "Password must be at least 12 characters and no more than 72 UTF-8 bytes",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected ${url}`);
   });
   renderAccount();
   await screen.findByText("jordan");
@@ -178,13 +243,36 @@ test("success clears the fields and announces the session consequences", async (
   await userEvent.click(
     screen.getByRole("button", { name: "Change password" }),
   );
-  expect(await screen.findByText("Password changed.")).toBeTruthy();
+  await screen.findByText(/must be at least 12 characters/i);
   expect(
-    screen.getByText(
-      /all sessions were signed out — sign in again with your new password\. api keys are unaffected\./i,
-    ),
+    screen.getByLabelText("New password").getAttribute("aria-invalid"),
+  ).toBe("true");
+  expect(
+    screen.getByLabelText("Current password").getAttribute("aria-invalid"),
+  ).toBeNull();
+});
+
+test("a failed sign-out keeps the session and shows an actionable error", async () => {
+  stubFetch((url, init) => {
+    const known = meRoute(url);
+    if (known) return known;
+    if (url === "/api/auth/logout" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          error: { code: "internal_error", message: "boom" },
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
+  expect(
+    await screen.findByText(/couldn't sign out — you are still signed in/i),
   ).toBeTruthy();
-  expect(
-    (screen.getByLabelText("New password") as HTMLInputElement).value,
-  ).toBe("");
+  // Still authenticated: the account facts remain visible for retry.
+  expect(screen.getByText("jordan")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Sign out" })).toBeTruthy();
 });

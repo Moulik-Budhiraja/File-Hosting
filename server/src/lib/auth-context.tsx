@@ -9,7 +9,12 @@ import {
   useState,
 } from "react";
 
-import { apiFetch, isApiError, onUnauthorized } from "@/lib/api";
+import { apiFetch, isApiError, onForbidden, onUnauthorized } from "@/lib/api";
+import {
+  safeStorageGet,
+  safeStorageRemove,
+  safeStorageSet,
+} from "@/lib/safe-storage";
 import type { MeResponse, PublicUser, Role } from "@/lib/types";
 
 export type UnauthenticatedReason = "signed-out" | "session-expired";
@@ -18,35 +23,31 @@ export type UnauthenticatedReason = "signed-out" | "session-expired";
 // dead cookie can be reported as "session expired" instead of "signed out".
 export const SESSION_MARKER_KEY = "fs.session-active";
 
+// Focus/visibility refreshes are best-effort; anything more frequent than
+// this is a request storm, not fresher identity.
+const BACKGROUND_REFRESH_MIN_INTERVAL_MS = 30_000;
+
 export function markSessionActive(): void {
-  try {
-    window.localStorage.setItem(SESSION_MARKER_KEY, "1");
-  } catch {
-    // Storage failures only cost the expired-session banner.
-  }
+  safeStorageSet(SESSION_MARKER_KEY, "1");
 }
 
 function clearSessionMarker(): void {
-  try {
-    window.localStorage.removeItem(SESSION_MARKER_KEY);
-  } catch {
-    // Ignore storage failures.
-  }
+  safeStorageRemove(SESSION_MARKER_KEY);
 }
 
 function hadSession(): boolean {
-  try {
-    return window.localStorage.getItem(SESSION_MARKER_KEY) === "1";
-  } catch {
-    return false;
-  }
+  return safeStorageGet(SESSION_MARKER_KEY) === "1";
+}
+
+export interface SignOutResult {
+  ok: boolean;
 }
 
 interface AuthContextValue {
   user: PublicUser;
   role: Role;
   isAdmin: boolean;
-  signOut: () => Promise<void>;
+  signOut: () => Promise<SignOutResult>;
   refresh: () => Promise<void>;
 }
 
@@ -64,8 +65,18 @@ export function AuthProvider({
   const [me, setMe] = useState<MeResponse | null>(null);
   const [failed, setFailed] = useState(false);
   const reportedRef = useRef(false);
+  const mountedRef = useRef(true);
+  const inflightRef = useRef<Promise<void> | null>(null);
+  const lastRefreshRef = useRef(0);
   const onUnauthenticatedRef = useRef(onUnauthenticated);
   onUnauthenticatedRef.current = onUnauthenticated;
+
+  useEffect(() => {
+    mountedRef.current = true;
+    return () => {
+      mountedRef.current = false;
+    };
+  }, []);
 
   const report = useCallback((reason: UnauthenticatedReason) => {
     if (reportedRef.current) return;
@@ -74,23 +85,35 @@ export function AuthProvider({
   }, []);
 
   const refresh = useCallback(async () => {
-    try {
-      const result = await apiFetch<MeResponse>("/api/auth/me", {
-        skipUnauthorizedHandler: true,
-      });
-      if (!result.user) {
-        // Legacy service credentials never reach the browser session flow.
-        report("signed-out");
-        return;
+    // Collapse concurrent refresh triggers (focus + storage + 403 can all
+    // fire together) into one request.
+    if (inflightRef.current) return inflightRef.current;
+    const task = (async () => {
+      try {
+        const result = await apiFetch<MeResponse>("/api/auth/me", {
+          skipUnauthorizedHandler: true,
+        });
+        if (!mountedRef.current) return;
+        if (!result.user) {
+          // Legacy service credentials never reach the browser session flow.
+          report("signed-out");
+          return;
+        }
+        setMe(result);
+      } catch (error) {
+        if (!mountedRef.current) return;
+        if (isApiError(error) && error.status === 401) {
+          report(hadSession() ? "session-expired" : "signed-out");
+        } else {
+          setFailed(true);
+        }
+      } finally {
+        lastRefreshRef.current = Date.now();
+        inflightRef.current = null;
       }
-      setMe(result);
-    } catch (error) {
-      if (isApiError(error) && error.status === 401) {
-        report(hadSession() ? "session-expired" : "signed-out");
-      } else {
-        setFailed(true);
-      }
-    }
+    })();
+    inflightRef.current = task;
+    return task;
   }, [report]);
 
   useEffect(() => {
@@ -99,17 +122,59 @@ export function AuthProvider({
 
   useEffect(() => onUnauthorized(() => report("session-expired")), [report]);
 
-  const signOut = useCallback(async () => {
+  // Authoritative 403s mean the server disagrees with the rendered role —
+  // refresh the identity before any further privileged rendering/fan-out.
+  useEffect(() => onForbidden(() => void refresh()), [refresh]);
+
+  // Identity can drift while this tab is inactive (role changes, another
+  // account signing in from a second tab). Refresh on focus/visibility with
+  // an interval guard, and immediately on cross-tab session-marker writes.
+  useEffect(() => {
+    const backgroundRefresh = () => {
+      if (
+        Date.now() - lastRefreshRef.current <
+        BACKGROUND_REFRESH_MIN_INTERVAL_MS
+      ) {
+        return;
+      }
+      void refresh();
+    };
+    const onFocus = () => backgroundRefresh();
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") backgroundRefresh();
+    };
+    const onStorage = (event: StorageEvent) => {
+      if (event.key === null || event.key === SESSION_MARKER_KEY) {
+        void refresh();
+      }
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onVisibility);
+    window.addEventListener("storage", onStorage);
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onVisibility);
+      window.removeEventListener("storage", onStorage);
+    };
+  }, [refresh]);
+
+  const signOut = useCallback(async (): Promise<SignOutResult> => {
     try {
       await apiFetch("/api/auth/logout", {
         method: "POST",
         skipUnauthorizedHandler: true,
       });
-    } catch {
-      // A dead session is already signed out; continue to the login page.
+    } catch (error) {
+      if (!(isApiError(error) && error.status === 401)) {
+        // Network failure or 5xx: the server session may still be alive.
+        // Stay signed in and let the caller surface an actionable error.
+        return { ok: false };
+      }
+      // 401 = the session is verifiably dead; treat as signed out.
     }
     clearSessionMarker();
     report("signed-out");
+    return { ok: true };
   }, [report]);
 
   if (failed) {

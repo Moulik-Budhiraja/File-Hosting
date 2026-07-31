@@ -9,9 +9,10 @@ import {
   useState,
 } from "react";
 
-import { apiFetch, isApiError } from "@/lib/api";
+import { apiFetch, isApiError, notifyUnauthorized } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { formatDateTime, formatSize } from "@/lib/format";
+import { useLatest } from "@/lib/use-latest";
 import type { FileMetadata, PublicUser, Visibility } from "@/lib/types";
 import { Dialog } from "./Dialog";
 import { VisibilitySelector } from "./VisibilitySelector";
@@ -25,14 +26,37 @@ type VisibilityFilter = "all" | Visibility;
 
 const PAGE_LIMIT = 50;
 
+// Task state lives in the URL so session expiry + reauth can return to
+// the exact filter/search/page the user was on.
+function readTaskParam(name: string): string | null {
+  if (typeof window === "undefined") return null;
+  return new URLSearchParams(window.location.search).get(name);
+}
+
+function initialVisibility(): VisibilityFilter {
+  const value = readTaskParam("visibility");
+  return value === "public" || value === "protected" || value === "private"
+    ? value
+    : "all";
+}
+
 export function FilesBrowser() {
   const { user, isAdmin } = useAuth();
   const [state, setState] = useState<ListState>({ kind: "loading" });
-  const [search, setSearch] = useState("");
-  const [query, setQuery] = useState("");
-  const [visibility, setVisibility] = useState<VisibilityFilter>("all");
-  const [scope, setScope] = useState<"everyone" | "mine">("everyone");
-  const [cursor, setCursor] = useState<string | null>(null);
+  const [search, setSearch] = useState(() => readTaskParam("q") ?? "");
+  const [query, setQuery] = useState(() => readTaskParam("q") ?? "");
+  const [visibility, setVisibility] =
+    useState<VisibilityFilter>(initialVisibility);
+  // Paper board IA-07: members default to Mine; admins default to
+  // Everyone. An explicit URL value wins either way.
+  const [scope, setScope] = useState<"everyone" | "mine">(() => {
+    const fromUrl = readTaskParam("scope");
+    if (fromUrl === "mine" || fromUrl === "everyone") return fromUrl;
+    return isAdmin ? "everyone" : "mine";
+  });
+  const [cursor, setCursor] = useState<string | null>(() =>
+    readTaskParam("cursor"),
+  );
   const [prevCursors, setPrevCursors] = useState<Array<string | null>>([]);
   const [owners, setOwners] = useState<Map<string, string> | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(null);
@@ -52,31 +76,58 @@ export function FilesBrowser() {
   const nameId = useId();
   const searchRef = useRef<HTMLInputElement>(null);
 
+  const { begin } = useLatest();
+
   const load = useCallback(async () => {
+    const ticket = begin();
     setState({ kind: "loading" });
     const params = new URLSearchParams();
     if (query) params.set("q", query);
     if (visibility !== "all") params.set("visibility", visibility);
+    // Owner scoping happens in SQL before pagination — "Mine" is truthful
+    // across every page, not a per-page client filter.
+    if (scope === "mine") params.set("owner", "me");
     params.set("limit", String(PAGE_LIMIT));
     if (cursor) params.set("cursor", cursor);
     try {
       const result = await apiFetch<{
         items: FileMetadata[];
         next_cursor: string | null;
-      }>(`/api/files?${params.toString()}`);
+      }>(`/api/files?${params.toString()}`, { signal: ticket.signal });
+      if (!ticket.current()) return;
       setState({
         kind: "ready",
         items: result.items,
         nextCursor: result.next_cursor,
       });
     } catch (error) {
+      if (!ticket.current()) return;
       setState({ kind: "error", status: isApiError(error) ? error.status : 0 });
     }
-  }, [query, visibility, cursor]);
+  }, [begin, query, visibility, scope, cursor]);
 
   useEffect(() => {
     void load();
   }, [load]);
+
+  // Reflect the task state into the URL (replace, not push — filters are
+  // one task, not a history trail).
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const setOrDelete = (name: string, value: string | null) => {
+      if (value) params.set(name, value);
+      else params.delete(name);
+    };
+    setOrDelete("q", query || null);
+    setOrDelete("visibility", visibility === "all" ? null : visibility);
+    setOrDelete("scope", scope === "everyone" ? null : scope);
+    setOrDelete("cursor", cursor);
+    const search = params.toString();
+    const target = `${window.location.pathname}${search ? `?${search}` : ""}`;
+    if (target !== `${window.location.pathname}${window.location.search}`) {
+      window.history.replaceState(null, "", target);
+    }
+  }, [query, visibility, scope, cursor]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -97,20 +148,20 @@ export function FilesBrowser() {
   function ownerLabel(file: FileMetadata): string {
     if (!file.owner_id) return "—";
     if (file.owner_id === user.id) return "you";
-    return owners?.get(file.owner_id) ?? `${file.owner_id.slice(0, 8)}…`;
+    const resolved = owners?.get(file.owner_id);
+    if (resolved) return resolved;
+    // Members cannot resolve other users' names (the directory is
+    // admin-only); a neutral truthful label beats a UUID stub.
+    return isAdmin ? `${file.owner_id.slice(0, 8)}…` : "another user";
   }
 
   const items = useMemo(
     () => (state.kind === "ready" ? state.items : []),
     [state],
   );
-  const visibleItems = useMemo(
-    () =>
-      scope === "mine"
-        ? items.filter((file) => file.owner_id === user.id)
-        : items,
-    [items, scope, user.id],
-  );
+  // The server already applied the owner scope; every loaded row is
+  // visible.
+  const visibleItems = items;
   const selected = items.find((file) => file.id === selectedId) ?? null;
   const canManageSelected =
     selected !== null &&
@@ -150,6 +201,16 @@ export function FilesBrowser() {
         },
         body: uploadFile,
       });
+      if (response.status === 401) {
+        // The session died mid-upload. Route through the shared reauth
+        // flow with browser-session wording — never the backend's
+        // bearer-token phrasing.
+        setUploadError(
+          "Your session expired during the upload — sign in again to continue.",
+        );
+        notifyUnauthorized();
+        return;
+      }
       if (!response.ok) {
         const payload = (await response.json().catch(() => null)) as {
           error?: { message?: string };
@@ -273,7 +334,10 @@ export function FilesBrowser() {
               type="button"
               className={`segment-item${scope === value ? " segment-item-active" : ""}`}
               aria-pressed={scope === value}
-              onClick={() => setScope(value)}
+              onClick={() => {
+                resetPaging();
+                setScope(value);
+              }}
             >
               {value === "everyone" ? "Everyone" : "Mine"}
             </button>
@@ -393,8 +457,8 @@ export function FilesBrowser() {
           </table>
           <div className="table-footline table-footline-split">
             <span>
-              {visibleItems.length} of {items.length} loaded rows shown
-              {scope === "mine" ? " · owner filter applies to loaded rows" : ""}
+              {items.length} rows loaded
+              {scope === "mine" ? " · owned by you (server-filtered)" : ""}
             </span>
             <span className="pager">
               <button
@@ -524,7 +588,11 @@ export function FilesBrowser() {
       ) : null}
 
       {uploadOpen ? (
-        <Dialog title="Upload file" onClose={() => setUploadOpen(false)}>
+        <Dialog
+          title="Upload file"
+          busy={busy}
+          onClose={() => setUploadOpen(false)}
+        >
           <form onSubmit={submitUpload} noValidate>
             <div className="field">
               <label htmlFor={fileId}>File</label>
@@ -561,6 +629,7 @@ export function FilesBrowser() {
               <button
                 type="button"
                 className="button"
+                disabled={busy}
                 onClick={() => setUploadOpen(false)}
               >
                 Cancel
@@ -580,6 +649,7 @@ export function FilesBrowser() {
       {editorOpen && selected ? (
         <Dialog
           title="Who can open this file?"
+          busy={busy}
           onClose={() => setEditorOpen(false)}
         >
           <p className="muted cell-mono">{selected.name}</p>
@@ -597,6 +667,7 @@ export function FilesBrowser() {
             <button
               type="button"
               className="button"
+              disabled={busy}
               onClick={() => setEditorOpen(false)}
             >
               Cancel
@@ -617,6 +688,7 @@ export function FilesBrowser() {
         <Dialog
           title={`Delete ${selected.name}?`}
           tone="danger"
+          busy={busy}
           onClose={() => setDeleteOpen(false)}
         >
           <p>
@@ -632,6 +704,7 @@ export function FilesBrowser() {
             <button
               type="button"
               className="button"
+              disabled={busy}
               onClick={() => setDeleteOpen(false)}
             >
               Cancel

@@ -131,3 +131,19 @@ test("AdminGate renders admin content for admins", async () => {
   );
   expect(await screen.findByText("directory")).toBeTruthy();
 });
+
+test("every console surface carries the PROPOSED rollout label until PR #7 merges", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => meResponse("admin", "ops-admin")),
+  );
+  const { ConsolePage } = await import("./ConsoleShell");
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <ConsolePage active="files" title="Files">
+        <p>content</p>
+      </ConsolePage>
+    </AuthProvider>,
+  );
+  expect(await screen.findByText("PROPOSED · BACKEND IN PR #7")).toBeTruthy();
+});

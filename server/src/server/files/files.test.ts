@@ -559,6 +559,147 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     );
   });
 
+  it("serves a branded HTML not-found page with exact status/body indistinguishability", async () => {
+    // Upload a private file owned by a real user; anonymous and
+    // unauthorized-member previews must be byte-identical to a missing id.
+    const denialOwner = await service.auth.createUser({
+      username: "denial.owner",
+      password: "a sufficiently long owner password",
+      role: "member",
+    });
+    const outsider = await service.auth.createUser({
+      username: "denial.outsider",
+      password: "a sufficiently long outsider password",
+      role: "member",
+    });
+    const outsiderKey = await service.auth.createApiKey(outsider.id, "probe");
+    const hiddenFile = await service.upload(chunks("secret"), {
+      name: "denial.txt",
+      tags: [],
+      visibility: "private",
+      archive: null,
+      ownerId: denialOwner.id,
+    });
+
+    const anonymousPrivate = await previewFile(
+      new Request(`http://localhost/${hiddenFile.id}`),
+      routeContext(hiddenFile.id),
+    );
+    const anonymousMissing = await previewFile(
+      new Request("http://localhost/0000000"),
+      routeContext("0000000"),
+    );
+    const memberPrivate = await previewFile(
+      new Request(`http://localhost/${hiddenFile.id}`, {
+        headers: { authorization: `Bearer ${outsiderKey.secret}` },
+      }),
+      routeContext(hiddenFile.id),
+    );
+
+    for (const response of [
+      anonymousPrivate,
+      anonymousMissing,
+      memberPrivate,
+    ]) {
+      assert.equal(response.status, 404);
+      assert.match(response.headers.get("content-type") ?? "", /text\/html/u);
+    }
+    const bodies = await Promise.all(
+      [anonymousPrivate, anonymousMissing, memberPrivate].map((response) =>
+        response.text(),
+      ),
+    );
+    assert.equal(bodies[0], bodies[1]);
+    assert.equal(bodies[0], bodies[2]);
+    assert.match(bodies[0]!, /404 · NOT FOUND/u);
+    assert.match(bodies[0]!, /doesn't exist or you don't have access/u);
+    // The branded page carries the same defensive headers as previews.
+    assert.equal(
+      anonymousMissing.headers.get("x-content-type-options"),
+      "nosniff",
+    );
+    assert.match(
+      anonymousMissing.headers.get("content-security-policy") ?? "",
+      /frame-ancestors 'none'/u,
+    );
+  });
+
+  it("filters by owner in SQL before cursor pagination", async () => {
+    const scopeOwner = await service.auth.createUser({
+      username: "scope.owner",
+      password: "a sufficiently long owner password",
+      role: "member",
+    });
+    const scopeOther = await service.auth.createUser({
+      username: "scope.other",
+      password: "a sufficiently long other password",
+      role: "member",
+    });
+    // The owner's single file is older than a full page of other-owned
+    // files — a client-side page filter would falsely report empty.
+    const owned = await service.upload(chunks("owned"), {
+      name: "scope-owned.txt",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      ownerId: scopeOwner.id,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      await service.upload(chunks(`noise-${index}`), {
+        name: `scope-noise-${index}.txt`,
+        tags: [],
+        visibility: "public",
+        archive: null,
+        ownerId: scopeOther.id,
+      });
+    }
+
+    // Repository level: the owner predicate applies before LIMIT.
+    const page = await service.list({
+      tags: [],
+      limit: 2,
+      owner: scopeOwner.id,
+      access: { role: "member", userId: scopeOwner.id },
+    });
+    assert.equal(page.files.length, 1);
+    assert.equal(page.files[0]!.id, owned.id);
+    assert.equal(page.nextCursor, null);
+
+    // Route level: owner=me scopes to the caller before pagination.
+    const ownerKey = await service.auth.createApiKey(scopeOwner.id, "scope");
+    const response = await listFiles(
+      new Request("http://localhost/api/files?owner=me&limit=2", {
+        headers: { authorization: `Bearer ${ownerKey.secret}` },
+      }),
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      items: Array<{ id: string }>;
+      next_cursor: string | null;
+    };
+    assert.deepEqual(
+      body.items.map((item) => item.id),
+      [owned.id],
+    );
+    assert.equal(body.next_cursor, null);
+
+    // Unsupported owner values are rejected, not silently ignored.
+    const invalid = await listFiles(
+      new Request("http://localhost/api/files?owner=someone-else", {
+        headers: { authorization: `Bearer ${ownerKey.secret}` },
+      }),
+    );
+    assert.equal(invalid.status, 400);
+
+    // The legacy service credential has no user identity for owner=me.
+    const legacy = await listFiles(
+      new Request("http://localhost/api/files?owner=me", {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      }),
+    );
+    assert.equal(legacy.status, 400);
+  });
+
   it("reports health, deletes metadata and bytes, then returns 404", async () => {
     const healthResponse = await health();
     assert.equal(healthResponse.status, 200);

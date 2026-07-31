@@ -315,3 +315,322 @@ test("load failures state the failing call and offer retry", async () => {
     await screen.findByRole("button", { name: /onboarding-runbook\.md/ }),
   ).toBeTruthy();
 });
+
+test("a stale slow response never overwrites a newer filter's results", async () => {
+  // Deliberately complete responses out of order: the unfiltered load is
+  // delayed; the Private-filtered load returns first; then the stale
+  // unfiltered response is released and must be discarded.
+  let releaseFirst!: (value: Response) => void;
+  const firstResponse = new Promise<Response>((resolve) => {
+    releaseFirst = resolve;
+  });
+  const fetchStub = vi.fn(async (input: string): Promise<Response> => {
+    if (input === "/api/auth/me") {
+      return json(200, {
+        user: admin,
+        legacy_service_credential: false,
+        role: "admin",
+      });
+    }
+    if (input === "/api/users") return json(200, { users: [admin, member] });
+    if (input.startsWith("/api/files?")) {
+      const url = new URL(input, "http://localhost");
+      if (url.searchParams.get("visibility") === "private") {
+        return json(200, { items: [file()], next_cursor: null });
+      }
+      return firstResponse;
+    }
+    throw new Error(`unexpected ${input}`);
+  });
+  vi.stubGlobal("fetch", fetchStub);
+  renderFiles();
+
+  await screen.findByRole("button", { name: "Private" });
+  await userEvent.click(screen.getByRole("button", { name: "Private" }));
+  await screen.findByRole("button", { name: /telemetry-batch-0412\.parquet/ });
+
+  releaseFirst(json(200, { items: [publicFile], next_cursor: null }));
+  // Give the stale completion every chance to (incorrectly) land.
+  await new Promise((resolve) => setTimeout(resolve, 20));
+
+  expect(
+    screen.getByRole("button", { name: /telemetry-batch-0412\.parquet/ }),
+  ).toBeTruthy();
+  expect(screen.queryByText(/onboarding-runbook\.md/)).toBeNull();
+  const privateFilter = screen.getByRole("button", { name: "Private" });
+  expect(privateFilter.getAttribute("aria-pressed")).toBe("true");
+});
+
+test("unmount aborts in-flight file loads", async () => {
+  const seenSignals: Array<AbortSignal | undefined> = [];
+  let releaseList!: (value: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    releaseList = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        seenSignals.push(init?.signal ?? undefined);
+        return pending;
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  const view = renderFiles();
+  await waitFor(() => expect(seenSignals.length).toBe(1));
+  expect(seenSignals[0]).toBeInstanceOf(AbortSignal);
+  expect(seenSignals[0]!.aborted).toBe(false);
+  view.unmount();
+  expect(seenSignals[0]!.aborted).toBe(true);
+  releaseList(json(200, { items: [], next_cursor: null }));
+});
+
+test("a 401 during a streamed upload invokes the shared reauth flow with session copy", async () => {
+  const onUnauthenticated = vi.fn();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (
+        input.startsWith("/api/files?") &&
+        (init?.method ?? "GET") === "GET"
+      ) {
+        return json(200, { items: [file()], next_cursor: null });
+      }
+      if (input.startsWith("/api/files?") && init?.method === "POST") {
+        return json(401, {
+          error: {
+            code: "unauthorized",
+            message: "A valid bearer token is required",
+          },
+        });
+      }
+      throw new Error(`unexpected ${init?.method ?? "GET"} ${input}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={onUnauthenticated}>
+      <FilesBrowser />
+    </AuthProvider>,
+  );
+
+  await userEvent.click(await screen.findByRole("button", { name: "Upload" }));
+  const fileInput = screen.getByLabelText("File") as HTMLInputElement;
+  await userEvent.upload(
+    fileInput,
+    new File(["content"], "notes.txt", { type: "text/plain" }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Upload file" }));
+
+  // The shared unauthorized flow fires (redirect to reauth)…
+  await waitFor(() => expect(onUnauthenticated).toHaveBeenCalled());
+  // …and the dialog never surfaces backend bearer-token wording.
+  expect(screen.queryByText(/bearer token/i)).toBeNull();
+});
+
+test("filters initialize from the URL so reauth returns to the actual task", async () => {
+  window.history.replaceState(
+    null,
+    "",
+    "/files?q=report&visibility=private&scope=mine",
+  );
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        requests.push(input);
+        return json(200, {
+          items: [file({ owner_id: "u-admin" })],
+          next_cursor: null,
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  renderFiles();
+  await screen.findByRole("button", { name: /telemetry/ });
+  const url = new URL(requests[0]!, "http://localhost");
+  expect(url.searchParams.get("q")).toBe("report");
+  expect(url.searchParams.get("visibility")).toBe("private");
+  const mine = screen.getByRole("button", { name: "Mine" });
+  expect(mine.getAttribute("aria-pressed")).toBe("true");
+  expect(
+    (screen.getByLabelText("Search name or tag") as HTMLInputElement).value,
+  ).toBe("report");
+  window.history.replaceState(null, "", "/files");
+});
+
+test("changing filters writes the task state into the URL", async () => {
+  window.history.replaceState(null, "", "/files");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        return json(200, { items: [file(), publicFile], next_cursor: null });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  renderFiles();
+  await screen.findByRole("button", { name: "Private" });
+  await userEvent.click(screen.getByRole("button", { name: "Private" }));
+  await waitFor(() =>
+    expect(window.location.search).toContain("visibility=private"),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Mine" }));
+  await waitFor(() => expect(window.location.search).toContain("scope=mine"));
+  window.history.replaceState(null, "", "/files");
+});
+
+test("a busy delete dialog cannot be dismissed and keeps its outcome visible", async () => {
+  let releaseDelete!: (value: Response) => void;
+  const pendingDelete = new Promise<Response>((resolve) => {
+    releaseDelete = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users") return json(200, { users: [admin, member] });
+      if (input.startsWith("/api/files?")) {
+        return json(200, { items: [file()], next_cursor: null });
+      }
+      if (input.startsWith("/api/files/") && init?.method === "DELETE") {
+        return pendingDelete;
+      }
+      throw new Error(`unexpected ${init?.method ?? "GET"} ${input}`);
+    }),
+  );
+  renderFiles();
+  await userEvent.click(
+    await screen.findByRole("button", { name: /telemetry/ }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Delete file" }));
+
+  // The DELETE is committed and in flight: Escape and Cancel must not
+  // tear down the confirmation surface.
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: /delete/i })).toBeTruthy();
+  const cancel = screen.getByRole("button", {
+    name: "Cancel",
+  }) as HTMLButtonElement;
+  expect(cancel.disabled).toBe(true);
+
+  releaseDelete(new Response(null, { status: 204 }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("members default to Mine with the owner filter applied server-side", async () => {
+  window.history.replaceState(null, "", "/files");
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: member,
+          legacy_service_credential: false,
+          role: "member",
+        });
+      }
+      if (input.startsWith("/api/files?")) {
+        requests.push(input);
+        return json(200, { items: [file()], next_cursor: null });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <FilesBrowser />
+    </AuthProvider>,
+  );
+  await screen.findByRole("button", { name: /telemetry/ });
+  const first = new URL(requests[0]!, "http://localhost");
+  expect(first.searchParams.get("owner")).toBe("me");
+  expect(
+    screen.getByRole("button", { name: "Mine" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+
+  // Switching to Everyone refetches without the owner scope.
+  await userEvent.click(screen.getByRole("button", { name: "Everyone" }));
+  await waitFor(() => {
+    const last = new URL(requests[requests.length - 1]!, "http://localhost");
+    expect(last.searchParams.get("owner")).toBeNull();
+  });
+  window.history.replaceState(null, "", "/files");
+});
+
+test("members see a neutral owner label instead of a UUID stub", async () => {
+  window.history.replaceState(null, "", "/files?scope=everyone");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string): Promise<Response> => {
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: member,
+          legacy_service_credential: false,
+          role: "member",
+        });
+      }
+      if (input.startsWith("/api/files?")) {
+        return json(200, {
+          items: [file({ owner_id: "bd87d8d8-1111-2222-3333-444455556666" })],
+          next_cursor: null,
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <FilesBrowser />
+    </AuthProvider>,
+  );
+  const row = (
+    await screen.findByRole("button", { name: /telemetry/ })
+  ).closest("tr")!;
+  expect(within(row).getAllByText("another user").length).toBeGreaterThan(0);
+  expect(within(row).queryByText(/bd87d8d8/)).toBeNull();
+  window.history.replaceState(null, "", "/files");
+});

@@ -1115,3 +1115,139 @@ main.landing code {
     flex: 1;
   }
 }
+
+/* ---- hardening pass: rollout label, sheets, wrapping, touch targets ---- */
+
+.rollout-tag {
+  font-family: var(--font-mono);
+  font-size: var(--text-label);
+  letter-spacing: var(--tracking-caps);
+  color: var(--color-warning);
+  border: 1px solid var(--color-hairline-strong);
+  border-radius: var(--radius-sm);
+  padding: 2px 6px;
+  white-space: nowrap;
+}
+
+.login-shell-header .rollout-tag {
+  margin-left: var(--space-3);
+}
+
+.banner-success::before {
+  content: "• ";
+  color: var(--color-success);
+}
+
+/* Mobile action sheet body (Users rows). */
+.sheet-actions {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-2);
+  margin: var(--space-3) 0;
+}
+
+/* The per-row overflow trigger exists for mobile only. */
+.row-overflow {
+  display: none;
+}
+
+/* Safe wrapping for every user-controlled name/title/fact: server-valid
+ * 100-byte unbroken names must never widen the page or a dialog. */
+.dialog-header {
+  min-width: 0;
+}
+
+.dialog-title,
+.detail-title,
+.page-title,
+.row-open,
+.cell-strong,
+.table-footline,
+.check-row,
+.consequence-list li {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+.fact-row dd,
+.data-table td,
+.data-table th {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+
+@media (max-width: 768px), (pointer: coarse) {
+  /* Issue #6: interactive controls are at least 44x44 on mobile. The
+   * login block previously lost to a more specific 36px rule. */
+  .login-form .button-block {
+    min-height: 44px;
+  }
+
+  .login-form input[type="text"],
+  .login-form input[type="password"] {
+    min-height: 44px;
+  }
+
+  .segment-item {
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  .link-button {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+  }
+
+  /* Users rows: inline desktop actions collapse into the ⋯ sheet. */
+  .col-desktop-inline {
+    display: none;
+  }
+
+  .row-overflow {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 44px;
+    min-height: 44px;
+    font-size: var(--text-md);
+  }
+}
+
+/* Windows High Contrast / forced colors: state emphasis must not rely on
+ * background fills that forced-colors strips. */
+@media (forced-colors: active) {
+  :focus-visible {
+    outline: 2px solid Highlight;
+    outline-offset: 2px;
+  }
+
+  .nav-item-active {
+    text-decoration: underline;
+    outline: 2px solid CanvasText;
+    outline-offset: -2px;
+  }
+
+  .segment-item-active {
+    outline: 2px solid CanvasText;
+    outline-offset: -2px;
+    text-decoration: underline;
+  }
+
+  .button,
+  .segment,
+  .dialog-panel,
+  .notice,
+  .banner,
+  .rollout-tag,
+  .tag {
+    border: 1px solid CanvasText;
+  }
+
+  .link-button,
+  .row-open {
+    text-decoration: underline;
+  }
+}

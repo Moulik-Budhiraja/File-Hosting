@@ -232,7 +232,52 @@ test("revoking asks for confirmation that names the key before deleting", async 
   await waitFor(() => expect(deletions).toEqual(["/api/api-keys/k1"]));
 });
 
-test("admins see the owner column and the subordinate legacy token note", async () => {
+test("admins load one paginated aggregate request with owner identity — no N+1 fan-out", async () => {
+  const adminUser = {
+    ...memberUser,
+    id: "u-admin",
+    username: "ops-admin",
+    role: "admin",
+  };
+  const requests: string[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit) => {
+      const method = init?.method ?? "GET";
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: adminUser,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input.startsWith("/api/api-keys") && method === "GET") {
+        requests.push(input);
+        return json(200, {
+          api_keys: [
+            { ...activeKey, owner_username: "sam-ops" },
+            { ...revokedKey, owner_username: "sam-ops" },
+          ],
+          next_cursor: null,
+        });
+      }
+      throw new Error(`unexpected ${method} ${input}`);
+    }),
+  );
+  renderKeys();
+  expect(
+    await screen.findByRole("cell", { name: "ingest-pipeline" }),
+  ).toBeTruthy();
+  expect(screen.getByText("Owner")).toBeTruthy();
+  expect(screen.getAllByText("sam-ops").length).toBeGreaterThan(0);
+  expect(screen.getByText("Legacy service token")).toBeTruthy();
+  expect(screen.getByText(/never shown/i)).toBeTruthy();
+  // Exactly one aggregate request; never /api/users plus per-user calls.
+  expect(requests).toHaveLength(1);
+  expect(requests[0]).toContain("scope=all");
+});
+
+test("the admin aggregate view pages through next cursors server-side", async () => {
   const adminUser = {
     ...memberUser,
     id: "u-admin",
@@ -250,28 +295,34 @@ test("admins see the owner column and the subordinate legacy token note", async 
           role: "admin",
         });
       }
-      if (input === "/api/users" && method === "GET") {
+      if (input.startsWith("/api/api-keys") && method === "GET") {
+        const url = new URL(input, "http://localhost");
+        if (url.searchParams.get("cursor") === "cursor-2") {
+          return json(200, {
+            api_keys: [{ ...revokedKey, owner_username: "later-owner" }],
+            next_cursor: null,
+          });
+        }
         return json(200, {
-          users: [adminUser, memberUser],
+          api_keys: [{ ...activeKey, owner_username: "sam-ops" }],
+          next_cursor: "cursor-2",
         });
-      }
-      if (input.startsWith("/api/api-keys?user_id=u-admin")) {
-        return json(200, { api_keys: [] });
-      }
-      if (input.startsWith("/api/api-keys?user_id=u-member")) {
-        return json(200, { api_keys: [activeKey] });
       }
       throw new Error(`unexpected ${method} ${input}`);
     }),
   );
   renderKeys();
+  await screen.findByRole("cell", { name: "ingest-pipeline" });
+  const next = screen.getByRole("button", { name: /next/ });
+  await userEvent.click(next);
+  expect(await screen.findByRole("cell", { name: "old-desktop" })).toBeTruthy();
+  expect(screen.getByText("later-owner")).toBeTruthy();
+  expect(screen.queryByRole("cell", { name: "ingest-pipeline" })).toBeNull();
+  // And back.
+  await userEvent.click(screen.getByRole("button", { name: /prev/ }));
   expect(
     await screen.findByRole("cell", { name: "ingest-pipeline" }),
   ).toBeTruthy();
-  expect(screen.getByText("Owner")).toBeTruthy();
-  expect(screen.getByText("sam-ops")).toBeTruthy();
-  expect(screen.getByText("Legacy service token")).toBeTruthy();
-  expect(screen.getByText(/never shown/i)).toBeTruthy();
 });
 
 test("members see no owner column and no legacy token section", async () => {
@@ -280,4 +331,29 @@ test("members see no owner column and no legacy token section", async () => {
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   expect(screen.queryByText("Owner")).toBeNull();
   expect(screen.queryByText("Legacy service token")).toBeNull();
+});
+
+test("a busy revoke dialog cannot be dismissed while the DELETE is in flight", async () => {
+  let releaseDelete!: (value: Response) => void;
+  const pendingDelete = new Promise<Response>((resolve) => {
+    releaseDelete = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(memberRoutes({ del: () => pendingDelete as unknown as Response })),
+  );
+  renderKeys();
+  await screen.findByRole("cell", { name: "ingest-pipeline" });
+  await userEvent.click(screen.getByRole("button", { name: /^Revoke/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Revoke key" }));
+
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: /revoke/i })).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+
+  releaseDelete(new Response(null, { status: 204 }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
 });

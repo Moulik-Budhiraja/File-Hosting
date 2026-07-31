@@ -280,6 +280,69 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     );
   });
 
+  it("serves the aggregate key listing to admins only, with owner identity", async () => {
+    await service.auth.createUser({
+      username: "aggregate.member",
+      password: "a sufficiently long member password",
+      role: "member",
+    });
+    const adminLogin = await login(
+      new Request("http://localhost/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://files.example.test",
+          "x-real-ip": "192.0.2.201",
+        },
+        body: JSON.stringify({
+          username: "admin",
+          password: "a sufficiently long admin password",
+        }),
+      }),
+    );
+    assert.equal(adminLogin.status, 200);
+    const adminCookie = adminLogin.headers.get("set-cookie")!.split(";")[0]!;
+
+    const aggregate = await listKeys(
+      new Request("http://localhost/api/api-keys?scope=all&limit=100", {
+        headers: { cookie: adminCookie },
+      }),
+    );
+    assert.equal(aggregate.status, 200);
+    const body = (await aggregate.json()) as {
+      api_keys: Array<{ owner_username?: string; user_id: string }>;
+      next_cursor: string | null;
+    };
+    for (const key of body.api_keys) {
+      assert.equal(typeof key.owner_username, "string");
+    }
+    assert.equal(body.next_cursor, null);
+
+    // Members must not reach the aggregate view.
+    const memberLogin = await login(
+      new Request("http://localhost/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://files.example.test",
+          "x-real-ip": "192.0.2.202",
+        },
+        body: JSON.stringify({
+          username: "aggregate.member",
+          password: "a sufficiently long member password",
+        }),
+      }),
+    );
+    assert.equal(memberLogin.status, 200);
+    const memberCookie = memberLogin.headers.get("set-cookie")!.split(";")[0]!;
+    const denied = await listKeys(
+      new Request("http://localhost/api/api-keys?scope=all", {
+        headers: { cookie: memberCookie },
+      }),
+    );
+    assert.equal(denied.status, 403);
+  });
+
   it("uses legacy bearer as admin and returns API key secrets only once", async (t) => {
     const logged: unknown[][] = [];
     const originalConsoleError = console.error;

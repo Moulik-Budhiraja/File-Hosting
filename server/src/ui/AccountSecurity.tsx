@@ -6,24 +6,36 @@ import { useId, useState } from "react";
 import { apiFetch, isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { formatDate } from "@/lib/format";
-
-const MIN_PASSWORD_CHARS = 12;
+import {
+  MAX_PASSWORD_UTF8_BYTES,
+  MIN_PASSWORD_CODE_POINTS,
+  checkPassword,
+} from "@/lib/password-policy";
 
 type FormState =
   | { kind: "idle" }
   | { kind: "submitting" }
   | { kind: "current-rejected"; message: string }
-  | { kind: "server-error"; status: number }
-  | { kind: "success" };
+  | { kind: "new-rejected"; message: string }
+  | { kind: "server-error"; status: number };
 
-export function AccountSecurity() {
+interface AccountSecurityProps {
+  // Invoked after the backend confirms the change (which revokes every
+  // session, including this one). The page routes to the truthful
+  // "password changed — sign in again" login state.
+  onPasswordChanged: () => void;
+}
+
+export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
   const { user, signOut } = useAuth();
   const [currentPassword, setCurrentPassword] = useState("");
   const [newPassword, setNewPassword] = useState("");
   const [confirmPassword, setConfirmPassword] = useState("");
-  const [tooShort, setTooShort] = useState(false);
+  const [newError, setNewError] = useState<string | null>(null);
   const [mismatch, setMismatch] = useState(false);
   const [state, setState] = useState<FormState>({ kind: "idle" });
+  const [signOutFailed, setSignOutFailed] = useState(false);
+  const [signingOut, setSigningOut] = useState(false);
   const currentId = useId();
   const newId = useId();
   const confirmId = useId();
@@ -31,16 +43,22 @@ export function AccountSecurity() {
   const confirmErrorId = useId();
   const currentErrorId = useId();
 
-  const newPasswordLength = [...newPassword].length;
+  const newFieldInvalid = newError !== null || state.kind === "new-rejected";
 
   async function submit(event: React.FormEvent) {
     event.preventDefault();
     if (state.kind === "submitting") return;
-    const short = newPasswordLength < MIN_PASSWORD_CHARS;
+    const check = checkPassword(newPassword);
     const differs = confirmPassword !== newPassword;
-    setTooShort(short);
+    setNewError(
+      check.ok
+        ? null
+        : check.reason === "too-short"
+          ? `Too short — ${check.codePoints} of ${MIN_PASSWORD_CODE_POINTS} minimum characters.`
+          : `Too long — ${check.bytes} of ${MAX_PASSWORD_UTF8_BYTES} maximum UTF-8 bytes.`,
+    );
     setMismatch(differs);
-    if (short || differs) return;
+    if (!check.ok || differs) return;
     setState({ kind: "submitting" });
     try {
       await apiFetch("/api/auth/password", {
@@ -51,16 +69,25 @@ export function AccountSecurity() {
         },
         skipUnauthorizedHandler: true,
       });
-      setState({ kind: "success" });
       setCurrentPassword("");
       setNewPassword("");
       setConfirmPassword("");
+      setState({ kind: "idle" });
+      onPasswordChanged();
     } catch (error) {
       if (isApiError(error) && error.status === 401) {
         setState({
           kind: "current-rejected",
           message: "Current password is invalid.",
         });
+      } else if (
+        isApiError(error) &&
+        error.status === 400 &&
+        error.code === "invalid_password"
+      ) {
+        // The server judged the NEW password invalid — the error belongs
+        // to the new-password field, not the current-credential field.
+        setState({ kind: "new-rejected", message: `${error.message}.` });
       } else if (isApiError(error) && error.status === 400) {
         setState({ kind: "current-rejected", message: `${error.message}.` });
       } else {
@@ -70,6 +97,15 @@ export function AccountSecurity() {
         });
       }
     }
+  }
+
+  async function handleSignOut() {
+    if (signingOut) return;
+    setSigningOut(true);
+    setSignOutFailed(false);
+    const result = await signOut();
+    setSigningOut(false);
+    if (!result.ok) setSignOutFailed(true);
   }
 
   return (
@@ -84,15 +120,6 @@ export function AccountSecurity() {
                 The server couldn&apos;t complete the request (
                 {state.status || "network"}). Your current password still works.
                 Try again.
-              </p>
-            </div>
-          ) : null}
-          {state.kind === "success" ? (
-            <div className="notice notice-success">
-              <p className="notice-title">Password changed.</p>
-              <p>
-                All sessions were signed out — sign in again with your new
-                password. API keys are unaffected.
               </p>
             </div>
           ) : null}
@@ -124,21 +151,22 @@ export function AccountSecurity() {
               type="password"
               autoComplete="new-password"
               value={newPassword}
-              aria-invalid={tooShort || undefined}
-              aria-describedby={tooShort ? newErrorId : undefined}
+              aria-invalid={newFieldInvalid || undefined}
+              aria-describedby={newFieldInvalid ? newErrorId : undefined}
               onChange={(event) => {
                 setNewPassword(event.target.value);
-                setTooShort(false);
+                setNewError(null);
+                if (state.kind === "new-rejected") setState({ kind: "idle" });
               }}
             />
-            {tooShort ? (
+            {newFieldInvalid ? (
               <p className="field-error" id={newErrorId}>
-                Too short — {newPasswordLength} of {MIN_PASSWORD_CHARS} minimum
-                characters.
+                {state.kind === "new-rejected" ? state.message : newError}
               </p>
             ) : (
               <p className="field-hint">
-                min 12 characters · stored as salted bcrypt hash
+                min 12 characters · max 72 UTF-8 bytes · stored as salted bcrypt
+                hash
               </p>
             )}
           </div>
@@ -202,8 +230,21 @@ export function AccountSecurity() {
             </dd>
           </div>
         </dl>
-        <button type="button" className="button" onClick={() => void signOut()}>
-          Sign out
+        <div aria-live="polite">
+          {signOutFailed ? (
+            <p className="notice notice-danger" role="alert">
+              Couldn&apos;t sign out — you are still signed in. Check your
+              connection and try again.
+            </p>
+          ) : null}
+        </div>
+        <button
+          type="button"
+          className="button"
+          disabled={signingOut}
+          onClick={() => void handleSignOut()}
+        >
+          {signingOut ? "Signing out…" : "Sign out"}
         </button>
       </aside>
     </div>

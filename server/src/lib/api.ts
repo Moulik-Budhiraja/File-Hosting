@@ -19,10 +19,25 @@ export interface ApiFetchOptions {
 type UnauthorizedHandler = () => void;
 
 const unauthorizedHandlers = new Set<UnauthorizedHandler>();
+const forbiddenHandlers = new Set<UnauthorizedHandler>();
 
 export function onUnauthorized(handler: UnauthorizedHandler): () => void {
   unauthorizedHandlers.add(handler);
   return () => unauthorizedHandlers.delete(handler);
+}
+
+// A 403 on a session request is authoritative evidence of role drift
+// (e.g. this admin was demoted in another tab). Subscribers refresh the
+// identity before rendering any further privileged UI.
+export function onForbidden(handler: UnauthorizedHandler): () => void {
+  forbiddenHandlers.add(handler);
+  return () => forbiddenHandlers.delete(handler);
+}
+
+// Lets non-JSON call sites (streamed uploads) route their 401s through the
+// same session-expiry flow as apiFetch.
+export function notifyUnauthorized(): void {
+  for (const handler of unauthorizedHandlers) handler();
 }
 
 export function isApiError(value: unknown): value is ApiError {
@@ -59,6 +74,9 @@ export async function apiFetch<T = unknown>(
     }
     if (response.status === 401 && !options.skipUnauthorizedHandler) {
       for (const handler of unauthorizedHandlers) handler();
+    }
+    if (response.status === 403) {
+      for (const handler of forbiddenHandlers) handler();
     }
     throw new ApiError(response.status, code, message);
   }

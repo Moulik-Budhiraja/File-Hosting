@@ -8,7 +8,12 @@ import { createClient } from "@libsql/client";
 
 import { loadConfig } from "../files/config";
 import { AppError } from "../files/errors";
-import { AuthRepository } from "./database";
+import {
+  AuthRepository,
+  decodeApiKeyCursor,
+  REVOKED_KEY_RETENTION_COUNT,
+  REVOKED_KEY_RETENTION_DAYS,
+} from "./database";
 import {
   hashPassword,
   normalizeUsername,
@@ -377,6 +382,162 @@ describe("user repository", () => {
     }
   });
 
+  it("retains revoked keys across creations and prunes only beyond the retention bounds", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-api-key-retention-bounds-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const member = await repository.createUser({
+        username: "retention.member",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const now = new Date("2026-07-31T12:00:00.000Z");
+
+      // revoke -> create -> list keeps the revoked record.
+      const first = await repository.createApiKey(member.id, "first", now);
+      await repository.revokeApiKey(first.id, member.id, false, now);
+      await repository.createApiKey(member.id, "second", now);
+      const afterCreate = await repository.listApiKeys(member.id);
+      assert.equal(
+        afterCreate.filter((key) => key.revokedAt !== null).length,
+        1,
+      );
+
+      // Count bound: only the most recent REVOKED_KEY_RETENTION_COUNT
+      // revoked records survive the next creation.
+      for (let index = 0; index < REVOKED_KEY_RETENTION_COUNT + 5; index += 1) {
+        const later = new Date(now.getTime() + (index + 1) * 1000);
+        const key = await repository.createApiKey(
+          member.id,
+          `churn-${index}`,
+          later,
+        );
+        await repository.revokeApiKey(key.id, member.id, false, later);
+      }
+      await repository.createApiKey(
+        member.id,
+        "post-churn",
+        new Date(now.getTime() + 100_000),
+      );
+      const bounded = await repository.listApiKeys(member.id);
+      assert.equal(
+        bounded.filter((key) => key.revokedAt !== null).length,
+        REVOKED_KEY_RETENTION_COUNT,
+      );
+      // The retained revoked records are the most recent ones.
+      const revokedNames = bounded
+        .filter((key) => key.revokedAt !== null)
+        .map((key) => key.name);
+      assert.equal(revokedNames.includes("first"), false);
+      assert.equal(
+        revokedNames.includes(`churn-${REVOKED_KEY_RETENTION_COUNT + 4}`),
+        true,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("prunes revoked keys older than the retention age on the next creation", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-api-key-retention-age-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const member = await repository.createUser({
+        username: "retention.age.member",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const now = new Date("2026-07-31T12:00:00.000Z");
+      const dayMs = 24 * 60 * 60 * 1000;
+      const old = new Date(
+        now.getTime() - (REVOKED_KEY_RETENTION_DAYS + 1) * dayMs,
+      );
+      const recent = new Date(
+        now.getTime() - (REVOKED_KEY_RETENTION_DAYS - 1) * dayMs,
+      );
+
+      const ancient = await repository.createApiKey(member.id, "ancient", old);
+      await repository.revokeApiKey(ancient.id, member.id, false, old);
+      const fresh = await repository.createApiKey(member.id, "fresh", recent);
+      await repository.revokeApiKey(fresh.id, member.id, false, recent);
+
+      await repository.createApiKey(member.id, "trigger-prune", now);
+      const retained = await repository.listApiKeys(member.id);
+      const revokedNames = retained
+        .filter((key) => key.revokedAt !== null)
+        .map((key) => key.name);
+      assert.deepEqual(revokedNames, ["fresh"]);
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("lists all users' keys in one paginated aggregate with owner identity", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-api-key-aggregate-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const owners = [];
+      const base = new Date("2026-07-01T00:00:00.000Z");
+      for (let index = 0; index < 5; index += 1) {
+        const owner = await repository.createUser({
+          username: `aggregate.owner.${index}`,
+          password: MEMBER_CREDENTIAL,
+          role: "member",
+        });
+        owners.push(owner);
+        for (let key = 0; key < 3; key += 1) {
+          await repository.createApiKey(
+            owner.id,
+            `owner-${index}-key-${key}`,
+            new Date(base.getTime() + (index * 3 + key) * 1000),
+          );
+        }
+      }
+
+      // Traverse every page with a small limit and verify completeness,
+      // owner attribution, and cursor round-trips.
+      const collected = [];
+      let cursor;
+      for (;;) {
+        const page = await repository.listAllApiKeys({ limit: 4, cursor });
+        collected.push(...page.apiKeys);
+        if (!page.nextCursor) break;
+        cursor = decodeApiKeyCursor(page.nextCursor);
+      }
+      assert.equal(collected.length, 15);
+      assert.equal(new Set(collected.map((key) => key.id)).size, 15);
+      for (const key of collected) {
+        assert.match(key.ownerUsername, /^aggregate\.owner\.[0-4]$/u);
+      }
+      // One slow/broken owner cannot poison the aggregate — it is a single
+      // SQL join, not a fan-out; verify a mid-list page is stable.
+      const single = await repository.listAllApiKeys({ limit: 100 });
+      assert.equal(single.apiKeys.length, 15);
+      assert.equal(single.nextCursor, null);
+      assert.throws(
+        () => decodeApiKeyCursor("not-a-cursor"),
+        (error) => error instanceof AppError && error.code === "invalid_cursor",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not purge another user's revoked API-key audit record", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-api-key-owner-retention-test-"),
@@ -408,7 +569,7 @@ describe("user repository", () => {
     }
   });
 
-  it("caps active API keys and purges revoked history", async () => {
+  it("caps active API keys while retaining recent revoked records", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-api-key-cap-test-"),
     );
@@ -434,11 +595,11 @@ describe("user repository", () => {
       await repository.revokeApiKey(keys[0]!.id, member.id, false);
       await repository.createApiKey(member.id, "replacement");
       const retained = await repository.listApiKeys(member.id);
-      assert.equal(retained.length, 10);
-      assert.equal(
-        retained.every((key) => key.revokedAt === null),
-        true,
-      );
+      // The active cap counts active keys only; the revoked record stays
+      // listed for audit context under bounded retention.
+      assert.equal(retained.length, 11);
+      assert.equal(retained.filter((key) => key.revokedAt === null).length, 10);
+      assert.equal(retained.filter((key) => key.revokedAt !== null).length, 1);
     } finally {
       await repository.close();
       await rm(directory, { recursive: true, force: true });

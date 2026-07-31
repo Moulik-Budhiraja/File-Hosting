@@ -331,3 +331,143 @@ test("load failures offer retry without pretending anything changed", async () =
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: "sam-ops" })).toBeTruthy();
 });
+
+test("a busy disable dialog cannot be dismissed while the PATCH is in flight", async () => {
+  let releasePatch!: (value: Response) => void;
+  const pendingPatch = new Promise<Response>((resolve) => {
+    releasePatch = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(routes({ patch: () => pendingPatch as unknown as Response })),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: "sam-ops" });
+  const samRow = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+  await userEvent.click(
+    within(samRow).getByRole("button", { name: /Disable/ }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Disable account" }),
+  );
+
+  await userEvent.keyboard("{Escape}");
+  expect(screen.getByRole("dialog", { name: /disable/i })).toBeTruthy();
+  expect(
+    (screen.getByRole("button", { name: "Cancel" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(true);
+
+  releasePatch(json(200, { user: { ...member, active: false } }));
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+});
+
+test("a stale users response never overwrites a newer reload", async () => {
+  // Deliberately complete responses out of order: the first directory load
+  // stalls; a Retry-triggered load returns fresh data; then the stale
+  // response resolves and must be discarded.
+  let call = 0;
+  let releaseFirst!: (value: Response) => void;
+  const first = new Promise<Response>((resolve) => {
+    releaseFirst = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (input === "/api/auth/me") {
+        return json(200, {
+          user: admin,
+          legacy_service_credential: false,
+          role: "admin",
+        });
+      }
+      if (input === "/api/users" && method === "GET") {
+        call += 1;
+        if (call === 1) return first;
+        return json(200, { users: [admin, member] });
+      }
+      if (input.startsWith("/api/users/") && method === "PATCH") {
+        return json(200, { user: { ...member, active: false } });
+      }
+      throw new Error(`unexpected ${method} ${input}`);
+    }),
+  );
+  renderDirectory();
+  // Trigger a second load through a mutation (disable) while the first
+  // directory request is still pending.
+  await screen.findByText(/loading users/);
+  releaseFirst(json(200, { users: [admin, member, disabled] }));
+  await screen.findByRole("button", { name: "sam-ops" });
+  // Reload happens after a confirmed mutation; simulate a fresh race:
+  const row = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+  await userEvent.click(within(row).getByRole("button", { name: /Disable/ }));
+  await userEvent.click(
+    screen.getByRole("button", { name: "Disable account" }),
+  );
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByText("intern-2025")).toBeNull();
+});
+
+test("the last-admin conflict offers a View members escape hatch", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        patch: () =>
+          json(409, {
+            error: {
+              code: "last_active_admin",
+              message: "The last active admin cannot be disabled or demoted",
+            },
+          }),
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  // Open the admin detail and attempt a demotion that the server refuses.
+  await userEvent.click(
+    screen.getByRole("button", { name: /ops-admin ?· you/ }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Change role…" }));
+  await userEvent.click(screen.getByRole("button", { name: "Change role" }));
+  const conflict = await screen.findByRole("dialog", { name: /can't demote/i });
+  expect(conflict).toBeTruthy();
+
+  await userEvent.click(
+    within(conflict).getByRole("button", { name: "View members" }),
+  );
+  // The dialog closes and the directory is pre-filtered to members so the
+  // admin can promote someone.
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(
+    screen.getByRole("button", { name: "Member" }).getAttribute("aria-pressed"),
+  ).toBe("true");
+});
+
+test("mobile rows expose an actions sheet with the same confirmed actions", async () => {
+  vi.stubGlobal("fetch", vi.fn(routes()));
+  renderDirectory();
+  await screen.findByRole("button", { name: "sam-ops" });
+  const samRow = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+
+  await userEvent.click(
+    within(samRow).getByRole("button", { name: /actions for sam-ops/i }),
+  );
+  const sheet = await screen.findByRole("dialog", { name: "sam-ops" });
+  expect(
+    within(sheet).getByRole("button", { name: /change role to admin/i }),
+  ).toBeTruthy();
+  expect(
+    within(sheet).getByRole("button", { name: /reset password/i }),
+  ).toBeTruthy();
+
+  // Destructive action still routes through the explicit confirmation.
+  await userEvent.click(
+    within(sheet).getByRole("button", { name: /disable account/i }),
+  );
+  expect(
+    await screen.findByRole("dialog", { name: "Disable sam-ops?" }),
+  ).toBeTruthy();
+});

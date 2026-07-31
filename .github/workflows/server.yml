@@ -1,0 +1,78 @@
+name: Server
+
+on:
+  pull_request:
+    paths:
+      - "server/**"
+      - "tests/**"
+      - "cli/**"
+      - "compose.yaml"
+      - ".github/workflows/server.yml"
+  push:
+    branches: [main]
+    paths:
+      - "server/**"
+      - "tests/**"
+      - "cli/**"
+      - "compose.yaml"
+      - ".github/workflows/server.yml"
+
+permissions:
+  contents: read
+
+jobs:
+  server:
+    name: Lint, test, build, production browser tests
+    runs-on: ubuntu-latest
+    env:
+      FS_TOKEN: ci-synthetic-service-token
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            cli/package-lock.json
+      - name: Install server dependencies
+        working-directory: server
+        run: npm ci
+      - name: Lint
+        working-directory: server
+        run: npm run lint
+      - name: Typecheck
+        working-directory: server
+        run: npm run typecheck
+      - name: Backend tests
+        working-directory: server
+        run: npm test
+      - name: Frontend unit tests
+        working-directory: server
+        run: npm run test:ui
+      - name: Format check
+        working-directory: server
+        run: npm run format:check
+      - name: Production build (includes standalone packaging)
+        working-directory: server
+        run: npm run build
+      - name: Standalone asset smoke check
+        working-directory: server
+        run: |
+          test -f .next/standalone/server.js
+          test -d .next/standalone/.next/static
+          test -d .next/standalone/public
+      - name: Install Playwright Chromium
+        working-directory: server
+        run: npx playwright install --with-deps chromium
+      - name: Production browser tests (standalone server)
+        working-directory: server
+        run: npm run test:e2e
+      - name: Build CLI for root E2E
+        working-directory: cli
+        run: npm ci && npm run build
+      - name: Root end-to-end tests
+        run: node --test tests/e2e.test.mjs
+      - name: Production dependency audit
+        working-directory: server
+        run: npm audit --omit=dev

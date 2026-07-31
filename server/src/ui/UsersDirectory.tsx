@@ -6,6 +6,7 @@ import Link from "next/link";
 
 import { apiFetch, isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
+import { useLatest } from "@/lib/use-latest";
 import { formatDate } from "@/lib/format";
 import { generateTempPassword } from "@/lib/password";
 import type { PublicUser, Role } from "@/lib/types";
@@ -52,18 +53,26 @@ export function UsersDirectory() {
   const [confirmError, setConfirmError] = useState<string | null>(null);
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [secret, setSecret] = useState<SecretResult | null>(null);
+  const [sheetUser, setSheetUser] = useState<PublicUser | null>(null);
   const searchId = useId();
   const usernameId = useId();
 
+  const { begin } = useLatest();
+
   const load = useCallback(async () => {
+    const ticket = begin();
     setState({ kind: "loading" });
     try {
-      const { users } = await apiFetch<{ users: PublicUser[] }>("/api/users");
+      const { users } = await apiFetch<{ users: PublicUser[] }>("/api/users", {
+        signal: ticket.signal,
+      });
+      if (!ticket.current()) return;
       setState({ kind: "ready", users });
     } catch (error) {
+      if (!ticket.current()) return;
       setState({ kind: "error", status: isApiError(error) ? error.status : 0 });
     }
-  }, []);
+  }, [begin]);
 
   useEffect(() => {
     void load();
@@ -323,7 +332,15 @@ export function UsersDirectory() {
                     <td className="col-actions">
                       <button
                         type="button"
-                        className="link-button"
+                        className="link-button row-overflow"
+                        aria-label={`Actions for ${user.username}`}
+                        onClick={() => setSheetUser(user)}
+                      >
+                        ⋯
+                      </button>
+                      <button
+                        type="button"
+                        className="link-button col-desktop-inline"
                         onClick={() => {
                           setConfirmError(null);
                           setConfirm({ kind: "reset", user });
@@ -335,13 +352,15 @@ export function UsersDirectory() {
                           password for {user.username}
                         </span>
                       </button>
-                      {" · "}
+                      <span className="col-desktop-inline">{" · "}</span>
                       {isLastAdmin ? (
-                        <span className="muted">last admin · protected</span>
+                        <span className="muted col-desktop-inline">
+                          last admin · protected
+                        </span>
                       ) : user.active ? (
                         <button
                           type="button"
-                          className="link-button"
+                          className="link-button col-desktop-inline"
                           onClick={() => {
                             setConfirmError(null);
                             setConfirm({ kind: "disable", user });
@@ -356,7 +375,7 @@ export function UsersDirectory() {
                       ) : (
                         <button
                           type="button"
-                          className="link-button"
+                          className="link-button col-desktop-inline"
                           onClick={() => {
                             setConfirmError(null);
                             setConfirm({ kind: "enable", user });
@@ -494,7 +513,11 @@ export function UsersDirectory() {
       ) : null}
 
       {createOpen ? (
-        <Dialog title="New user" onClose={() => setCreateOpen(false)}>
+        <Dialog
+          title="New user"
+          busy={busy}
+          onClose={() => setCreateOpen(false)}
+        >
           <form onSubmit={submitCreate} noValidate>
             <div className="field">
               <label htmlFor={usernameId}>Username</label>
@@ -542,6 +565,7 @@ export function UsersDirectory() {
               <button
                 type="button"
                 className="button"
+                disabled={busy}
                 onClick={() => setCreateOpen(false)}
               >
                 Cancel
@@ -558,10 +582,84 @@ export function UsersDirectory() {
         </Dialog>
       ) : null}
 
+      {sheetUser ? (
+        <Dialog title={sheetUser.username} onClose={() => setSheetUser(null)}>
+          <p className="muted">
+            {sheetUser.role} · {sheetUser.active ? "active" : "disabled"} ·{" "}
+            {formatDate(sheetUser.created_at)}
+          </p>
+          <div className="sheet-actions">
+            <button
+              type="button"
+              className="button button-block"
+              onClick={() => {
+                setSheetUser(null);
+                setConfirmError(null);
+                setConfirm({
+                  kind: "role",
+                  user: sheetUser,
+                  nextRole: sheetUser.role === "admin" ? "member" : "admin",
+                });
+              }}
+            >
+              Change role to {sheetUser.role === "admin" ? "member" : "admin"}…
+            </button>
+            <button
+              type="button"
+              className="button button-block"
+              onClick={() => {
+                setSheetUser(null);
+                setConfirmError(null);
+                setConfirm({ kind: "reset", user: sheetUser });
+              }}
+            >
+              Reset password…
+            </button>
+            {sheetUser.id === lastAdminId ? (
+              <p className="muted">last admin · protected — cannot disable</p>
+            ) : sheetUser.active ? (
+              <button
+                type="button"
+                className="button button-block button-danger-outline"
+                onClick={() => {
+                  setSheetUser(null);
+                  setConfirmError(null);
+                  setConfirm({ kind: "disable", user: sheetUser });
+                }}
+              >
+                Disable account…
+              </button>
+            ) : (
+              <button
+                type="button"
+                className="button button-block"
+                onClick={() => {
+                  setSheetUser(null);
+                  setConfirmError(null);
+                  setConfirm({ kind: "enable", user: sheetUser });
+                }}
+              >
+                Enable account…
+              </button>
+            )}
+          </div>
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="button"
+              onClick={() => setSheetUser(null)}
+            >
+              Close
+            </button>
+          </div>
+        </Dialog>
+      ) : null}
+
       {confirm?.kind === "disable" ? (
         <Dialog
           title={`Disable ${confirm.user.username}?`}
           tone="danger"
+          busy={busy}
           onClose={() => setConfirm(null)}
         >
           <p>
@@ -583,6 +681,7 @@ export function UsersDirectory() {
             <button
               type="button"
               className="button"
+              disabled={busy}
               onClick={() => setConfirm(null)}
             >
               Cancel
@@ -602,6 +701,7 @@ export function UsersDirectory() {
       {confirm?.kind === "enable" ? (
         <Dialog
           title={`Enable ${confirm.user.username}?`}
+          busy={busy}
           onClose={() => setConfirm(null)}
         >
           <p>
@@ -618,6 +718,7 @@ export function UsersDirectory() {
             <button
               type="button"
               className="button"
+              disabled={busy}
               onClick={() => setConfirm(null)}
             >
               Cancel
@@ -637,6 +738,7 @@ export function UsersDirectory() {
       {confirm?.kind === "role" ? (
         <Dialog
           title={`Make ${confirm.user.username} ${confirm.nextRole === "admin" ? "an admin" : "a member"}?`}
+          busy={busy}
           onClose={() => setConfirm(null)}
         >
           {confirm.nextRole === "admin" ? (
@@ -664,6 +766,7 @@ export function UsersDirectory() {
             <button
               type="button"
               className="button"
+              disabled={busy}
               onClick={() => setConfirm(null)}
             >
               Cancel
@@ -683,6 +786,7 @@ export function UsersDirectory() {
       {confirm?.kind === "reset" ? (
         <Dialog
           title={`Reset password for ${confirm.user.username}?`}
+          busy={busy}
           onClose={() => setConfirm(null)}
         >
           <p>
@@ -699,6 +803,7 @@ export function UsersDirectory() {
             <button
               type="button"
               className="button"
+              disabled={busy}
               onClick={() => setConfirm(null)}
             >
               Cancel
@@ -730,6 +835,19 @@ export function UsersDirectory() {
           </p>
           <p>Promote another member to admin first, then retry.</p>
           <div className="dialog-actions">
+            <button
+              type="button"
+              className="button"
+              onClick={() => {
+                // Escape hatch: land on the member list so another admin
+                // can be promoted immediately.
+                setConflict(null);
+                setRoleFilter("member");
+                setSelectedId(null);
+              }}
+            >
+              View members
+            </button>
             <button
               type="button"
               className="button button-primary"

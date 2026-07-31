@@ -78,11 +78,29 @@ export async function GET(request: Request): Promise<Response> {
     const visibility = visibilityValue
       ? parseVisibility(visibilityValue)
       : undefined;
+    // Backward-compatible owner scope: only the literal "me" is accepted,
+    // resolved server-side so the filter runs in SQL before pagination.
+    const ownerValue = params.get("owner");
+    let owner: string | undefined;
+    if (ownerValue !== null) {
+      if (ownerValue !== "me") {
+        throw new AppError(400, "invalid_owner", "owner must be 'me'");
+      }
+      if (!principal.userId) {
+        throw new AppError(
+          400,
+          "invalid_owner",
+          "owner=me requires a user credential",
+        );
+      }
+      owner = principal.userId;
+    }
     const result = await service.list({
       q: params.get("q") ?? undefined,
       name: params.get("name") ?? undefined,
       tags: validateTags(params.getAll("tag")),
       visibility,
+      owner,
       access: { role: principal.role, userId: principal.userId },
       limit: parseLimit(params.get("limit")),
       cursor: params.get("cursor")

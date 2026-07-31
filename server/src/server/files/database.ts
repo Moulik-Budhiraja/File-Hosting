@@ -364,6 +364,10 @@ export class FileRepository {
       where.push("f.visibility = ?");
       args.push(options.visibility);
     }
+    if (options.owner) {
+      where.push("f.owner_id = ?");
+      args.push(options.owner);
+    }
     for (const tag of options.tags) {
       where.push(`EXISTS (
         SELECT 1 FROM file_tags filter_ft

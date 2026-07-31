@@ -1,42 +1,23 @@
-const WORDS = [
-  "anchor",
-  "basalt",
-  "canyon",
-  "delta",
-  "ember",
-  "fjord",
-  "garnet",
-  "harbor",
-  "island",
-  "juniper",
-  "kestrel",
-  "lantern",
-  "meadow",
-  "nickel",
-  "orchid",
-  "pumice",
-  "quartz",
-  "ridge",
-  "summit",
-  "timber",
-  "umbra",
-  "violet",
-  "walnut",
-  "yonder",
-];
+// 64-symbol URL-safe alphabet: 6 bits per character. 256 % 64 === 0, so
+// masking a uniform byte to 6 bits is exactly uniform — no modulo bias.
+const ALPHABET =
+  "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
 
-function pick(values: Uint32Array, index: number, bound: number): number {
-  return values[index]! % bound;
-}
+const TEMP_PASSWORD_LENGTH = 22;
 
-// Generates a shown-once temporary password: three words plus a two-digit
-// suffix, always comfortably above the 12-character server minimum.
+// 22 characters × 6 bits = 132 bits of entropy, above the 128-bit target
+// and well under the 72-UTF-8-byte backend limit (all symbols are ASCII).
+export const TEMP_PASSWORD_ENTROPY_BITS = TEMP_PASSWORD_LENGTH * 6;
+
+// Generates a shown-once temporary credential. The value is uniform over
+// 64^22 possibilities; nothing about expiry or forced rotation is implied
+// because the backend implements neither.
 export function generateTempPassword(): string {
-  const values = new Uint32Array(4);
-  crypto.getRandomValues(values);
-  const words = [0, 1, 2].map(
-    (index) => WORDS[pick(values, index, WORDS.length)],
-  );
-  const digits = String(pick(values, 3, 90) + 10);
-  return `${words.join("-")}-${digits}`;
+  const bytes = new Uint8Array(TEMP_PASSWORD_LENGTH);
+  crypto.getRandomValues(bytes);
+  let password = "";
+  for (const byte of bytes) {
+    password += ALPHABET[byte & 63]!;
+  }
+  return password;
 }

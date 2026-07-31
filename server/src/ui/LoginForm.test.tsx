@@ -133,11 +133,107 @@ test("server errors state that nothing changed and keep the form usable", async 
 });
 
 test("session-expired mode shows the banner and prefills the username", () => {
-  render(<LoginForm onSuccess={vi.fn()} expired initialUsername="ops-admin" />);
+  render(
+    <LoginForm
+      onSuccess={vi.fn()}
+      notice="session-expired"
+      initialUsername="ops-admin"
+    />,
+  );
   expect(
     screen.getByText("Session expired — sign in again to continue."),
   ).toBeTruthy();
   expect((screen.getByLabelText("Username") as HTMLInputElement).value).toBe(
     "ops-admin",
   );
+});
+
+test("password-changed mode states the true reason and never claims expiry", () => {
+  render(
+    <LoginForm
+      onSuccess={vi.fn()}
+      notice="password-changed"
+      initialUsername="ops-admin"
+    />,
+  );
+  expect(
+    screen.getByText(
+      "Password changed — sign in again with your new password.",
+    ),
+  ).toBeTruthy();
+  expect(screen.queryByText(/session expired/i)).toBeNull();
+});
+
+test("throttled sign-in clears and refocuses the password field", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse(429, {
+        error: {
+          code: "login_throttled",
+          message: "Too many login attempts; try again later",
+        },
+      }),
+    ),
+  );
+  render(<LoginForm onSuccess={vi.fn()} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "wrong password!!");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  const password = screen.getByLabelText("Password") as HTMLInputElement;
+  expect(password.value).toBe("");
+  expect(document.activeElement).toBe(password);
+});
+
+test("throttle warning says try again later without a fabricated countdown", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse(429, {
+        error: {
+          code: "login_throttled",
+          message: "Too many login attempts; try again later",
+        },
+      }),
+    ),
+  );
+  render(<LoginForm onSuccess={vi.fn()} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "wrong password!!");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(screen.getByText(/try again later/i)).toBeTruthy();
+  expect(screen.queryByText(/\d+\s*(min|s\b|second)/i)).toBeNull();
+});
+
+test("editing after a throttle keeps the truthful lock warning but re-enables retry", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () =>
+      jsonResponse(429, {
+        error: {
+          code: "login_throttled",
+          message: "Too many login attempts; try again later",
+        },
+      }),
+    ),
+  );
+  render(<LoginForm onSuccess={vi.fn()} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "wrong password!!");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  await userEvent.type(screen.getByLabelText("Password"), "another try!!");
+
+  // The server lock has not lifted just because the user typed — the
+  // warning stays visible; only the submit becomes available again.
+  expect(screen.getByText("Too many attempts.")).toBeTruthy();
+  const submit = screen.getByRole("button", {
+    name: "Sign in",
+  }) as HTMLButtonElement;
+  expect(submit.disabled).toBe(false);
 });

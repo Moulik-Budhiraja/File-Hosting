@@ -1,4 +1,8 @@
-import type { ApiKeyMetadata } from "@/server/auth/database";
+import {
+  decodeApiKeyCursor,
+  type ApiKeyMetadata,
+  type OwnedApiKeyMetadata,
+} from "@/server/auth/database";
 import { assertCsrf, jsonObject, requirePrincipal } from "@/server/auth/http";
 import { AppError } from "@/server/files/errors";
 import { errorResponse, json } from "@/server/files/http";
@@ -19,10 +23,42 @@ function keyMetadata(key: ApiKeyMetadata) {
   };
 }
 
+const DEFAULT_AGGREGATE_LIMIT = 100;
+
+function ownedKeyMetadata(key: OwnedApiKeyMetadata) {
+  return { ...keyMetadata(key), owner_username: key.ownerUsername };
+}
+
 export async function GET(request: Request): Promise<Response> {
   try {
     const { service, principal } = await requirePrincipal(request);
-    const requestedUser = new URL(request.url).searchParams.get("user_id");
+    const params = new URL(request.url).searchParams;
+    if (params.get("scope") === "all") {
+      // Aggregate admin view: one paginated SQL join instead of a
+      // per-user fan-out; includes owner identity.
+      if (principal.role !== "admin") {
+        throw new AppError(
+          403,
+          "forbidden",
+          "Administrator access is required",
+        );
+      }
+      const rawLimit = Number(params.get("limit") ?? DEFAULT_AGGREGATE_LIMIT);
+      const limit =
+        Number.isSafeInteger(rawLimit) && rawLimit > 0
+          ? rawLimit
+          : DEFAULT_AGGREGATE_LIMIT;
+      const cursorValue = params.get("cursor");
+      const page = await service.auth.listAllApiKeys({
+        limit,
+        cursor: cursorValue ? decodeApiKeyCursor(cursorValue) : undefined,
+      });
+      return json({
+        api_keys: page.apiKeys.map(ownedKeyMetadata),
+        next_cursor: page.nextCursor,
+      });
+    }
+    const requestedUser = params.get("user_id");
     const userId =
       principal.role === "admin"
         ? (requestedUser ?? principal.userId ?? undefined)

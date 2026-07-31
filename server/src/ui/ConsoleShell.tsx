@@ -3,6 +3,7 @@
 import Link from "next/link";
 
 import { useAuth } from "@/lib/auth-context";
+import { RolloutTag } from "./RolloutTag";
 
 export type ConsoleSection = "files" | "users" | "keys" | "account";
 
@@ -93,6 +94,7 @@ export function ConsolePage({
             {subtitle ? <p className="page-subtitle">{subtitle}</p> : null}
           </div>
           <div className="page-header-side">
+            <RolloutTag />
             {headerNote ? (
               <span className="page-header-note">{headerNote}</span>
             ) : null}
