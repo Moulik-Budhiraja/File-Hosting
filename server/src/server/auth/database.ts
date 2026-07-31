@@ -17,6 +17,11 @@ export interface User {
   updatedAt: string;
 }
 
+export interface PasswordAuthentication {
+  user: User;
+  passwordHash: string;
+}
+
 export interface ApiKeyMetadata {
   id: string;
   userId: string;
@@ -49,6 +54,8 @@ CREATE TABLE IF NOT EXISTS sessions (
   revoked_at TEXT
 );
 CREATE INDEX IF NOT EXISTS sessions_user_active_idx ON sessions(user_id, expires_at, revoked_at);
+CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
+CREATE INDEX IF NOT EXISTS sessions_revoked_idx ON sessions(revoked_at);
 
 CREATE TABLE IF NOT EXISTS api_keys (
   id TEXT PRIMARY KEY NOT NULL,
@@ -257,23 +264,39 @@ export class AuthRepository {
     id: string,
     password: string,
     now = new Date(),
+    expectedPasswordHash?: string,
   ): Promise<User> {
     const user = await this.getUser(id);
     if (!user) throw new AppError(404, "user_not_found", "User not found");
     const passwordHash = await hashPassword(password);
-    await this.client.batch(
-      [
-        {
-          sql: "UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?",
-          args: [passwordHash, now.toISOString(), id],
-        },
-        {
-          sql: "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
-          args: [now.toISOString(), id],
-        },
-      ],
-      "write",
-    );
+    const transaction = await this.client.transaction("write");
+    try {
+      const result = await transaction.execute({
+        sql: `UPDATE users SET password_hash = ?, updated_at = ? WHERE id = ?${
+          expectedPasswordHash ? " AND password_hash = ?" : ""
+        }`,
+        args: expectedPasswordHash
+          ? [passwordHash, now.toISOString(), id, expectedPasswordHash]
+          : [passwordHash, now.toISOString(), id],
+      });
+      if (result.rowsAffected === 0) {
+        throw new AppError(
+          401,
+          "invalid_credentials",
+          "Credentials changed; please try again",
+        );
+      }
+      await transaction.execute({
+        sql: "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+        args: [now.toISOString(), id],
+      });
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    } finally {
+      transaction.close();
+    }
     return { ...user, updatedAt: now.toISOString() };
   }
 
@@ -287,20 +310,22 @@ export class AuthRepository {
       args: [id],
     });
     const row = result.rows[0];
-    if (
-      !row ||
-      !(await verifyPassword(
-        currentPassword,
-        stringColumn(row, "password_hash"),
-      ))
-    ) {
+    if (!row) {
       throw new AppError(
         401,
         "invalid_credentials",
         "Current password is invalid",
       );
     }
-    return this.setPassword(id, newPassword);
+    const passwordHash = stringColumn(row, "password_hash");
+    if (!(await verifyPassword(currentPassword, passwordHash))) {
+      throw new AppError(
+        401,
+        "invalid_credentials",
+        "Current password is invalid",
+      );
+    }
+    return this.setPassword(id, newPassword, new Date(), passwordHash);
   }
 
   async authenticatePassword(
@@ -308,7 +333,7 @@ export class AuthRepository {
     password: string,
     remoteAddress: string,
     now = new Date(),
-  ): Promise<User> {
+  ): Promise<PasswordAuthentication> {
     let username = "invalid-user";
     try {
       username = normalizeUsername(usernameInput);
@@ -320,18 +345,14 @@ export class AuthRepository {
       sql: "DELETE FROM login_failures WHERE window_started_at <= ?",
       args: [new Date(now.getTime() - LOGIN_WINDOW_MS).toISOString()],
     });
-    const failure = await this.client.execute({
-      sql: "SELECT failures, window_started_at FROM login_failures WHERE throttle_key = ?",
-      args: [throttleKey],
+    const reservation = await this.client.execute({
+      sql: `INSERT INTO login_failures (throttle_key, failures, window_started_at)
+        VALUES (?, 1, ?)
+        ON CONFLICT(throttle_key) DO UPDATE SET failures = login_failures.failures + 1
+        RETURNING failures`,
+      args: [throttleKey, now.toISOString()],
     });
-    const failureRow = failure.rows[0];
-    if (
-      failureRow &&
-      Number(failureRow.failures) >= MAX_LOGIN_FAILURES &&
-      now.getTime() -
-        Date.parse(stringColumn(failureRow, "window_started_at")) <
-        LOGIN_WINDOW_MS
-    ) {
+    if (Number(reservation.rows[0]?.failures) > MAX_LOGIN_FAILURES) {
       throw new AppError(
         429,
         "login_throttled",
@@ -351,23 +372,6 @@ export class AuthRepository {
       row ? stringColumn(row, "password_hash") : dummyHash,
     );
     if (!row || !matches || Number(row.active) !== 1) {
-      const startedAt = failureRow
-        ? stringColumn(failureRow, "window_started_at")
-        : now.toISOString();
-      const expired = now.getTime() - Date.parse(startedAt) >= LOGIN_WINDOW_MS;
-      await this.client.execute({
-        sql: `INSERT INTO login_failures (throttle_key, failures, window_started_at)
-          VALUES (?, 1, ?)
-          ON CONFLICT(throttle_key) DO UPDATE SET
-            failures = CASE WHEN ? THEN 1 ELSE login_failures.failures + 1 END,
-            window_started_at = CASE WHEN ? THEN excluded.window_started_at ELSE login_failures.window_started_at END`,
-        args: [
-          throttleKey,
-          now.toISOString(),
-          expired ? 1 : 0,
-          expired ? 1 : 0,
-        ],
-      });
       throw new AppError(
         401,
         "invalid_credentials",
@@ -378,21 +382,51 @@ export class AuthRepository {
       sql: "DELETE FROM login_failures WHERE throttle_key = ?",
       args: [throttleKey],
     });
-    return userFromRow(row);
+    return {
+      user: userFromRow(row),
+      passwordHash: stringColumn(row, "password_hash"),
+    };
   }
 
   async createSession(
-    userId: string,
+    subject: string | PasswordAuthentication,
     now = new Date(),
   ): Promise<{ token: string; expiresAt: string }> {
+    const authentication = typeof subject === "string" ? null : subject;
+    const userId = typeof subject === "string" ? subject : subject.user.id;
+    await this.client.execute({
+      sql: "DELETE FROM sessions WHERE expires_at <= ? OR revoked_at IS NOT NULL",
+      args: [now.toISOString()],
+    });
     const token = randomBytes(32).toString("base64url");
     const expiresAt = new Date(now.getTime() + SESSION_TTL_MS).toISOString();
-    await this.client.execute({
-      sql: `INSERT INTO sessions
-        (id, user_id, token_digest, created_at, expires_at, revoked_at)
-        VALUES (?, ?, ?, ?, ?, NULL)`,
-      args: [randomUUID(), userId, digest(token), now.toISOString(), expiresAt],
+    const result = await this.client.execute({
+      sql: authentication
+        ? `INSERT INTO sessions
+          (id, user_id, token_digest, created_at, expires_at, revoked_at)
+          SELECT ?, id, ?, ?, ?, NULL FROM users
+          WHERE id = ? AND password_hash = ? AND active = 1`
+        : `INSERT INTO sessions
+          (id, user_id, token_digest, created_at, expires_at, revoked_at)
+          VALUES (?, ?, ?, ?, ?, NULL)`,
+      args: authentication
+        ? [
+            randomUUID(),
+            digest(token),
+            now.toISOString(),
+            expiresAt,
+            userId,
+            authentication.passwordHash,
+          ]
+        : [randomUUID(), userId, digest(token), now.toISOString(), expiresAt],
     });
+    if (authentication && result.rowsAffected === 0) {
+      throw new AppError(
+        401,
+        "invalid_credentials",
+        "Credentials changed; please log in again",
+      );
+    }
     return { token, expiresAt };
   }
 

@@ -90,6 +90,151 @@ describe("user repository", () => {
     }
   });
 
+  it("does not issue a password session after the verified hash changes", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-session-race-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const user = await repository.bootstrapAdmin({
+        username: "race.admin",
+        password: ADMIN_CREDENTIAL,
+      });
+      const authentication = await repository.authenticatePassword(
+        user.username,
+        ADMIN_CREDENTIAL,
+        "192.0.2.30",
+      );
+      await repository.setPassword(user.id, OTHER_CREDENTIAL);
+
+      await assert.rejects(
+        repository.createSession(authentication),
+        /credentials changed/iu,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("does not overwrite an administrator reset with an in-flight self-service change", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-password-race-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const user = await repository.bootstrapAdmin({
+        username: "recovery.admin",
+        password: ADMIN_CREDENTIAL,
+      });
+      const inFlightChange = repository.changePassword(
+        user.id,
+        ADMIN_CREDENTIAL,
+        OTHER_CREDENTIAL,
+      );
+      await repository.setPassword(user.id, SECOND_ADMIN_CREDENTIAL);
+
+      await assert.rejects(inFlightChange, /credentials changed/iu);
+      const recovered = await repository.authenticatePassword(
+        user.username,
+        SECOND_ADMIN_CREDENTIAL,
+        "192.0.2.31",
+      );
+      assert.equal(recovered.user.id, user.id);
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("atomically limits concurrent password attempts before bcrypt", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-concurrent-throttle-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      await repository.bootstrapAdmin({
+        username: "throttle.admin",
+        password: ADMIN_CREDENTIAL,
+      });
+      const attempts = await Promise.allSettled(
+        Array.from({ length: 10 }, () =>
+          repository.authenticatePassword(
+            "throttle.admin",
+            WRONG_CREDENTIAL,
+            "192.0.2.40",
+          ),
+        ),
+      );
+      const codes = attempts.map((attempt) =>
+        attempt.status === "rejected" &&
+        typeof attempt.reason === "object" &&
+        attempt.reason !== null &&
+        "code" in attempt.reason
+          ? String((attempt.reason as { code: unknown }).code)
+          : "unexpected",
+      );
+      assert.equal(
+        codes.filter((code) => code === "invalid_credentials").length,
+        5,
+      );
+      assert.equal(
+        codes.filter((code) => code === "login_throttled").length,
+        5,
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("purges expired and revoked sessions before creating a new session", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-session-retention-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const repository = await AuthRepository.create(databaseUrl);
+    try {
+      const user = await repository.bootstrapAdmin({
+        username: "sessions.admin",
+        password: ADMIN_CREDENTIAL,
+      });
+      const start = new Date("2025-01-01T00:00:00.000Z");
+      await repository.createSession(user.id, start);
+      const revoked = await repository.createSession(
+        user.id,
+        new Date(start.getTime() + 1000),
+      );
+      await repository.revokeSession(
+        revoked.token,
+        new Date(start.getTime() + 2000),
+      );
+      await repository.createSession(
+        user.id,
+        new Date(start.getTime() + 8 * 24 * 60 * 60 * 1000),
+      );
+
+      const inspection = createClient({ url: databaseUrl, intMode: "number" });
+      try {
+        const result = await inspection.execute(
+          "SELECT COUNT(*) AS count FROM sessions",
+        );
+        assert.equal(Number(result.rows[0]?.count), 1);
+      } finally {
+        inspection.close();
+      }
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("purges expired login throttle records", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-throttle-test-"),
@@ -207,7 +352,7 @@ describe("user repository", () => {
         MEMBER_CREDENTIAL,
         "192.0.2.10",
       );
-      assert.equal(authenticated.id, member.id);
+      assert.equal(authenticated.user.id, member.id);
       await assert.rejects(
         repository.authenticatePassword(
           "missing-user",

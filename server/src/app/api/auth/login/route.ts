@@ -33,12 +33,13 @@ export async function POST(request: Request): Promise<Response> {
       request.headers.get("x-real-ip") ??
       request.headers.get("x-forwarded-for")?.split(",", 1)[0]?.trim() ??
       "unknown";
-    const user = await service.auth.authenticatePassword(
+    const authentication = await service.auth.authenticatePassword(
       body.username,
       body.password,
       remoteAddress,
     );
-    const session = await service.auth.createSession(user.id);
+    const session = await service.auth.createSession(authentication);
+    const { user } = authentication;
     const secure = new URL(service.config.publicUrl).protocol === "https:";
     const cookie = `${SESSION_COOKIE}=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor((Date.parse(session.expiresAt) - Date.now()) / 1000)}${secure ? "; Secure" : ""}`;
     return json(

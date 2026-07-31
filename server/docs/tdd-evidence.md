@@ -55,5 +55,27 @@ src/server/auth/auth.test.ts` observed two retained rows instead of one (`2 !== 
       expired windows through an indexed timestamp cleanup before recording the
       current failure.
 
+11. Password-reset/login session race
+    - RED: the focused `does not issue a password session` test reached SQLite with
+      a stale authentication result instead of rejecting it as changed credentials.
+    - GREEN: password authentication now carries the verified hash into a
+      conditional session insert, so a reset either prevents issuance or revokes a
+      session inserted first.
+12. Administrator-reset/self-service race
+    - RED: the focused `does not overwrite an administrator reset` test reported
+      a missing rejection from the in-flight self-service change.
+    - GREEN: self-service updates now condition their transactional password update
+      on the exact hash they verified, preserving a concurrent administrator reset.
+13. Concurrent login throttling
+    - RED: the focused `atomically limits concurrent password attempts` test let all
+      10 requests reach invalid-credential handling (`10 !== 5`).
+    - GREEN: an atomic pre-bcrypt reservation now admits five attempts and rejects
+      the other five before expensive password verification.
+14. Session retention
+    - RED: the focused `purges expired and revoked sessions` test retained three
+      rows instead of only the newly active session (`3 !== 1`).
+    - GREEN: indexed cleanup before session creation now removes expired and revoked
+      rows.
+
 Final full-suite commands and results are recorded in the pull request
 validation section.
