@@ -2,8 +2,10 @@ import { execFile } from "node:child_process";
 
 export const RASTER_WORKER_LIMITS = Object.freeze({
   maxConcurrent: 2,
+  maxQueued: 16,
   maxOldSpaceMiB: 256,
   maxOutputBytes: 8 * 1024 * 1024,
+  queueTimeoutMs: 2_500,
   wallTimeoutMs: 2_500,
 });
 
@@ -80,8 +82,60 @@ try {
 }
 `;
 
-let activeWorkers = 0;
-const workerWaiters: Array<() => void> = [];
+interface WorkerWaiter {
+  resolve: () => void;
+  reject: (error: Error) => void;
+  timeout: NodeJS.Timeout;
+}
+
+export class BoundedWorkerPool {
+  private activeWorkers = 0;
+  private readonly workerWaiters: WorkerWaiter[] = [];
+
+  constructor(
+    private readonly maxConcurrent: number,
+    private readonly maxQueued: number,
+    private readonly queueTimeoutMs: number,
+  ) {}
+
+  async acquire(): Promise<void> {
+    if (this.activeWorkers < this.maxConcurrent) {
+      this.activeWorkers += 1;
+      return;
+    }
+    if (this.workerWaiters.length >= this.maxQueued) {
+      throw new Error("raster worker queue is full");
+    }
+    await new Promise<void>((resolve, reject) => {
+      const waiter: WorkerWaiter = {
+        resolve,
+        reject,
+        timeout: setTimeout(() => {
+          const index = this.workerWaiters.indexOf(waiter);
+          if (index >= 0) this.workerWaiters.splice(index, 1);
+          reject(new Error("raster worker queue wait timed out"));
+        }, this.queueTimeoutMs),
+      };
+      this.workerWaiters.push(waiter);
+    });
+  }
+
+  release(): void {
+    const next = this.workerWaiters.shift();
+    if (next) {
+      clearTimeout(next.timeout);
+      next.resolve();
+      return;
+    }
+    this.activeWorkers -= 1;
+  }
+}
+
+const workerPool = new BoundedWorkerPool(
+  RASTER_WORKER_LIMITS.maxConcurrent,
+  RASTER_WORKER_LIMITS.maxQueued,
+  RASTER_WORKER_LIMITS.queueTimeoutMs,
+);
 const WORKER_ENVIRONMENT_KEYS = [
   "PATH",
   "HOME",
@@ -104,29 +158,12 @@ function rasterWorkerEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
-async function acquireWorkerSlot(): Promise<void> {
-  if (activeWorkers < RASTER_WORKER_LIMITS.maxConcurrent) {
-    activeWorkers += 1;
-    return;
-  }
-  await new Promise<void>((resolve) => workerWaiters.push(resolve));
-}
-
-function releaseWorkerSlot(): void {
-  const next = workerWaiters.shift();
-  if (next) {
-    next();
-    return;
-  }
-  activeWorkers -= 1;
-}
-
 async function runRasterWorker(
   mode: "metadata" | "thumbnail",
   filePath: string,
   mimeType: string,
 ): Promise<Buffer> {
-  await acquireWorkerSlot();
+  await workerPool.acquire();
   try {
     return await new Promise<Buffer>((resolve, reject) => {
       execFile(
@@ -165,7 +202,7 @@ async function runRasterWorker(
       );
     });
   } finally {
-    releaseWorkerSlot();
+    workerPool.release();
   }
 }
 

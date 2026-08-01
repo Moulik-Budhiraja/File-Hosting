@@ -6,7 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import sharp from "sharp";
 
-import { RASTER_WORKER_LIMITS } from "./raster-worker";
+import { BoundedWorkerPool, RASTER_WORKER_LIMITS } from "./raster-worker";
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
 import {
@@ -140,10 +140,25 @@ describe("raster safety envelope", () => {
   it("isolates anonymous decoding behind bounded worker resources", () => {
     assert.deepEqual(RASTER_WORKER_LIMITS, {
       maxConcurrent: 2,
+      maxQueued: 16,
       maxOldSpaceMiB: 256,
       maxOutputBytes: 8 * 1024 * 1024,
+      queueTimeoutMs: 2_500,
       wallTimeoutMs: 2_500,
     });
+  });
+
+  it("rejects excess and stale raster worker waiters", async () => {
+    const pool = new BoundedWorkerPool(2, 1, 20);
+    await pool.acquire();
+    await pool.acquire();
+    const queued = pool.acquire();
+
+    await assert.rejects(pool.acquire(), /queue is full/u);
+    await assert.rejects(queued, /queue wait timed out/u);
+
+    pool.release();
+    pool.release();
   });
 
   it("enforces the inclusive 20 MiB and 40 megapixel boundaries", () => {
