@@ -107,7 +107,7 @@ test("throttled sign-in states the lock in words and disables the submit", async
   expect(locked.disabled).toBe(true);
 });
 
-test("server errors state that nothing changed and keep the form usable", async () => {
+test("delivered server errors name the status and keep the form usable", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () =>
@@ -130,6 +130,119 @@ test("server errors state that nothing changed and keep the form usable", async 
     (screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement)
       .disabled,
   ).toBe(false);
+});
+
+test("a committed login whose response is lost verifies the session and completes sign-in", async () => {
+  const fetchMock = vi.fn(async (input: string) => {
+    if (input === "/api/auth/login") {
+      // The POST reached the server and the session cookie was applied,
+      // but the response body was lost in transit.
+      throw new TypeError("network response lost");
+    }
+    if (input === "/api/auth/me") {
+      return jsonResponse(200, {
+        user,
+        legacy_service_credential: false,
+        role: "admin",
+      });
+    }
+    throw new Error(`unexpected ${input}`);
+  });
+  vi.stubGlobal("fetch", fetchMock);
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "OPS-ADMIN");
+  await userEvent.type(screen.getByLabelText("Password"), "correct horse batt");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  // The authoritative session record confirms the intended user — the
+  // login completes through the normal success path.
+  expect(onSuccess).toHaveBeenCalledWith(
+    expect.objectContaining({ username: "ops-admin" }),
+    undefined,
+  );
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+});
+
+test("an unreachable server yields a truthful unknown outcome, never an absolute claim", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async () => {
+      throw new TypeError("network down");
+    }),
+  );
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "correct horse batt");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(onSuccess).not.toHaveBeenCalled();
+  expect(
+    screen.getByText(/couldn't confirm whether sign-in completed/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+  expect(
+    (screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+
+test("a lost response with no committed session reports not signed in and offers retry", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      if (input === "/api/auth/login") throw new TypeError("network drop");
+      if (input === "/api/auth/me") {
+        return jsonResponse(401, {
+          error: { code: "unauthorized", message: "unauthorized" },
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "correct horse batt");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(onSuccess).not.toHaveBeenCalled();
+  // The authoritative probe found no session: truthful "not signed in"
+  // wording, still no absolute claim about what the server did.
+  expect(screen.getByText(/you're not signed in/i)).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+});
+
+test("a session for a different user never completes the intended sign-in", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      if (input === "/api/auth/login") throw new TypeError("network drop");
+      if (input === "/api/auth/me") {
+        return jsonResponse(200, {
+          user: { ...user, username: "someone-else" },
+          legacy_service_credential: false,
+          role: "member",
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "correct horse batt");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(onSuccess).not.toHaveBeenCalled();
+  expect(
+    screen.getByText(/couldn't confirm whether sign-in completed/i),
+  ).toBeTruthy();
 });
 
 test("session-expired mode shows the banner and prefills the username", () => {

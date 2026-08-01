@@ -164,7 +164,7 @@ test("a lost activation response reconciles idempotently and the key works exact
   await expect(page.getByText("SHOWN ONLY ONCE")).toBeVisible();
   const secret = (await page.locator(".secret-value").innerText()).trim();
   expect(secret).toMatch(/^fsk_/);
-  await expect(page.getByText(/NOT active yet/i)).toBeVisible();
+  await expect(page.getByText(/may not be active/i)).toBeVisible();
 
   // Retrying reconciles against the already-committed activation.
   await page.getByRole("button", { name: /retry activation/i }).click();

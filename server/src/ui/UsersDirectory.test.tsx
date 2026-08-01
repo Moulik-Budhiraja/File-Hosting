@@ -341,6 +341,259 @@ test("resetting a password confirms, patches, and shows the new secret once", as
   expect(within(shown).getByText(sentPassword)).toBeTruthy();
 });
 
+test("a lost create response reconciles via the request id and shows the retained candidate password", async () => {
+  const record: Recorded[] = [];
+  let posts = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        record,
+        post: (body) => {
+          posts += 1;
+          if (posts === 1) {
+            // The request reaches the server (it commits) but the
+            // response is lost in transit.
+            throw new TypeError("network response lost");
+          }
+          return json(200, {
+            user: {
+              id: "u-new",
+              username: (body as { username: string }).username,
+              role: "member",
+              active: true,
+              created_at: "2026-07-31T09:00:00.000Z",
+              updated_at: "2026-07-31T09:00:00.000Z",
+            },
+            created: false,
+          });
+        },
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  await userEvent.click(screen.getByRole("button", { name: "New user" }));
+  await userEvent.type(screen.getByLabelText("Username"), "nadia.r");
+  await userEvent.click(screen.getByRole("button", { name: "Create user" }));
+
+  // The retry reconciled: the show-once dialog appears with the SAME
+  // candidate password the client retained.
+  expect(
+    await screen.findByRole("dialog", { name: /User created — nadia\.r/ }),
+  ).toBeTruthy();
+  const sent = record.filter(
+    (entry) => entry.method === "POST" && entry.url === "/api/users",
+  );
+  expect(sent.length).toBe(2);
+  const first = sent[0]!.body as { request_id: string; password: string };
+  const second = sent[1]!.body as { request_id: string; password: string };
+  expect(first.request_id).toBeTruthy();
+  expect(second.request_id).toBe(first.request_id);
+  expect(second.password).toBe(first.password);
+  expect(screen.getByText(first.password)).toBeTruthy();
+});
+
+test("an unreachable create reports an ambiguous outcome and reuses the request id on manual retry", async () => {
+  const record: Recorded[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        record,
+        post: () => {
+          throw new TypeError("network down");
+        },
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  await userEvent.click(screen.getByRole("button", { name: "New user" }));
+  await userEvent.type(screen.getByLabelText("Username"), "nadia.r");
+  await userEvent.click(screen.getByRole("button", { name: "Create user" }));
+
+  // Truthful ambiguity — never an absolute "nothing was changed" claim.
+  expect(
+    await screen.findByText(/may or may not have been created/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+
+  // A manual retry reuses the same request id and candidate password so
+  // reconciliation stays possible.
+  await userEvent.click(screen.getByRole("button", { name: "Create user" }));
+  await screen.findAllByText(/may or may not have been created/i);
+  const sent = record.filter((entry) => entry.method === "POST");
+  expect(sent.length).toBe(4);
+  const ids = new Set(
+    sent.map((entry) => (entry.body as { request_id: string }).request_id),
+  );
+  const passwords = new Set(
+    sent.map((entry) => (entry.body as { password: string }).password),
+  );
+  expect(ids.size).toBe(1);
+  expect(passwords.size).toBe(1);
+});
+
+test("a lost reset response reconciles idempotently and shows the original candidate password", async () => {
+  const record: Recorded[] = [];
+  let patches = 0;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        record,
+        patch: (id, body) => {
+          patches += 1;
+          if (patches === 1) throw new TypeError("network response lost");
+          // The replay applies nothing and reports so.
+          expect((body as { request_id: string }).request_id).toBeTruthy();
+          return json(200, {
+            user: { ...member, updated_at: "2026-07-31T10:00:00.000Z" },
+            password_applied: false,
+          });
+        },
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  const samRow = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+  await userEvent.click(within(samRow).getByRole("button", { name: /Reset/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Reset password" }));
+
+  const shown = await screen.findByRole("dialog", {
+    name: /Password reset — sam-ops/,
+  });
+  const sent = record.filter((entry) => entry.method === "PATCH");
+  expect(sent.length).toBe(2);
+  const first = sent[0]!.body as { request_id: string; password: string };
+  const second = sent[1]!.body as { request_id: string; password: string };
+  expect(second.request_id).toBe(first.request_id);
+  expect(second.password).toBe(first.password);
+  // The shown one-time credential is the one that actually committed.
+  expect(within(shown).getByText(first.password)).toBeTruthy();
+});
+
+test("an unreachable reset reports an ambiguous outcome and keeps the retry idempotent", async () => {
+  const record: Recorded[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        record,
+        patch: () => {
+          throw new TypeError("network down");
+        },
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  const samRow = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+  await userEvent.click(within(samRow).getByRole("button", { name: /Reset/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Reset password" }));
+
+  expect(
+    await screen.findByText(/may or may not have been applied/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+
+  // Retrying from the same dialog reuses the same request id + candidate.
+  await userEvent.click(screen.getByRole("button", { name: "Reset password" }));
+  await screen.findAllByText(/may or may not have been applied/i);
+  const sent = record.filter((entry) => entry.method === "PATCH");
+  expect(sent.length).toBe(4);
+  expect(
+    new Set(
+      sent.map((entry) => (entry.body as { request_id: string }).request_id),
+    ).size,
+  ).toBe(1);
+  expect(
+    new Set(sent.map((entry) => (entry.body as { password: string }).password))
+      .size,
+  ).toBe(1);
+});
+
+test("a committed disable whose response is lost reconciles against the authoritative record", async () => {
+  const record: Recorded[] = [];
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        record,
+        // The PATCH commits server-side; only the response is lost.
+        patch: () => {
+          throw new TypeError("network response lost");
+        },
+        users: () =>
+          json(200, {
+            users: [
+              admin,
+              record.some((entry) => entry.method === "PATCH")
+                ? { ...member, active: false }
+                : member,
+              disabled,
+            ],
+          }),
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  const samRow = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+  await userEvent.click(
+    within(samRow).getByRole("button", { name: /Disable/ }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Disable account" }),
+  );
+  // The desired state is present on the server: reconciled success, the
+  // dialog closes, and no false "nothing was changed" claim appears.
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(
+    await screen.findByText(/change confirmed after reconnect/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+});
+
+test("an unverifiable status change says the outcome is unknown and offers retry", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        // Pre-commit failure: the PATCH dies and the record still shows
+        // the old state.
+        patch: () => {
+          throw new TypeError("network down");
+        },
+      }),
+    ),
+  );
+  renderDirectory();
+  await screen.findByRole("button", { name: /ops-admin ?· you/ });
+  const samRow = screen.getByRole("button", { name: "sam-ops" }).closest("tr")!;
+  await userEvent.click(
+    within(samRow).getByRole("button", { name: /Disable/ }),
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Disable account" }),
+  );
+
+  expect(
+    await screen.findByText(/may or may not have been applied/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+  // The dialog stays open with an enabled retry.
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Disable account",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+});
+
 test("load failures offer retry without pretending anything changed", async () => {
   let failures = 1;
   vi.stubGlobal(

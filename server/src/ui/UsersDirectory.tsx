@@ -61,6 +61,7 @@ export function UsersDirectory() {
   const [conflict, setConflict] = useState<Conflict | null>(null);
   const [secret, setSecret] = useState<SecretResult | null>(null);
   const [sheetUser, setSheetUser] = useState<PublicUser | null>(null);
+  const [reconcileNotice, setReconcileNotice] = useState<string | null>(null);
   const searchId = useId();
   const usernameId = useId();
   const usernameErrorId = useId();
@@ -71,6 +72,26 @@ export function UsersDirectory() {
   function failCreate(message: string) {
     setCreateError(message);
     usernameRef.current?.focus();
+  }
+
+  // In-flight idempotent attempts: the opaque request id and the
+  // client-generated candidate password are retained across retries so a
+  // lost response can be reconciled truthfully — the server applies each
+  // request id at most once and never returns the plaintext.
+  const createAttemptRef = useRef<{
+    requestId: string;
+    password: string;
+  } | null>(null);
+  const resetAttemptRef = useRef<{
+    userId: string;
+    requestId: string;
+    password: string;
+  } | null>(null);
+
+  // Definitive server rejections (4xx) mean this request id never
+  // committed; ambiguous transport/5xx failures keep the attempt alive.
+  function isDefinitiveRejection(error: unknown): boolean {
+    return isApiError(error) && error.status < 500;
   }
 
   const { begin } = useLatest();
@@ -120,27 +141,88 @@ export function UsersDirectory() {
     if (busy) return;
     setBusy(true);
     setCreateError(null);
-    const password = generateTempPassword();
-    try {
-      const { user } = await apiFetch<{ user: PublicUser }>("/api/users", {
+    const attempt = createAttemptRef.current ?? {
+      requestId: crypto.randomUUID(),
+      password: generateTempPassword(),
+    };
+    createAttemptRef.current = attempt;
+    const create = () =>
+      apiFetch<{ user: PublicUser }>("/api/users", {
         method: "POST",
-        body: { username: createUsername.trim(), password, role: createRole },
+        body: {
+          username: createUsername.trim(),
+          password: attempt.password,
+          role: createRole,
+          request_id: attempt.requestId,
+        },
       });
+    try {
+      let result: { user: PublicUser };
+      try {
+        result = await create();
+      } catch (error) {
+        if (isDefinitiveRejection(error)) throw error;
+        // The request may have committed and only the response was lost.
+        // The same request id reconciles to the same user — never a
+        // duplicate — so the retained candidate password stays truthful.
+        result = await create();
+      }
+      createAttemptRef.current = null;
       setCreateOpen(false);
       setCreateUsername("");
       setCreateRole("member");
-      setSecret({ kind: "created", username: user.username, password });
+      setSecret({
+        kind: "created",
+        username: result.user.username,
+        password: attempt.password,
+      });
       void load();
     } catch (error) {
       if (isApiError(error) && error.code === "username_exists") {
+        createAttemptRef.current = null;
         failCreate("That username is already taken.");
-      } else if (isApiError(error)) {
-        failCreate(`${error.message}.`);
+      } else if (isDefinitiveRejection(error)) {
+        createAttemptRef.current = null;
+        failCreate(`${error instanceof Error ? error.message : "Rejected"}.`);
       } else {
-        failCreate("The server couldn't create the user. Nothing was changed.");
+        // Ambiguous: keep the attempt so a manual retry reconciles with
+        // the same request id and candidate password.
+        failCreate(
+          "The server didn't confirm — the user may or may not have been created. Retry (the same request is applied at most once) or reload to check.",
+        );
       }
     } finally {
       setBusy(false);
+    }
+  }
+
+  // Desired-state mutation with truthful ambiguity handling: when the
+  // transport fails after the server may have committed, the authoritative
+  // record decides — reconciled success if the desired state is present,
+  // an explicit unknown outcome otherwise. Never "nothing was changed".
+  async function patchDesiredState(
+    userId: string,
+    body: Record<string, unknown>,
+    isDesired: (user: PublicUser) => boolean,
+  ): Promise<boolean> {
+    try {
+      await apiFetch(`/api/users/${encodeURIComponent(userId)}`, {
+        method: "PATCH",
+        body,
+      });
+      return false;
+    } catch (error) {
+      if (isDefinitiveRejection(error)) throw error;
+      let verified: PublicUser | undefined;
+      try {
+        const { users } = await apiFetch<{ users: PublicUser[] }>("/api/users");
+        verified = users.find((user) => user.id === userId);
+      } catch {
+        verified = undefined;
+      }
+      if (!verified || !isDesired(verified)) throw error;
+      // The desired state is confirmed on the server — reconciled.
+      return true;
     }
   }
 
@@ -148,25 +230,55 @@ export function UsersDirectory() {
     if (!confirm || busy) return;
     setBusy(true);
     setConfirmError(null);
+    setReconcileNotice(null);
     const target = confirm.user;
     try {
       if (confirm.kind === "disable" || confirm.kind === "enable") {
-        await apiFetch(`/api/users/${encodeURIComponent(target.id)}`, {
-          method: "PATCH",
-          body: { active: confirm.kind === "enable" },
-        });
+        const active = confirm.kind === "enable";
+        const reconciled = await patchDesiredState(
+          target.id,
+          { active },
+          (user) => user.active === active,
+        );
+        if (reconciled) setReconcileNotice("Change confirmed after reconnect.");
       } else if (confirm.kind === "role") {
-        await apiFetch(`/api/users/${encodeURIComponent(target.id)}`, {
-          method: "PATCH",
-          body: { role: confirm.nextRole },
-        });
+        const nextRole = confirm.nextRole;
+        const reconciled = await patchDesiredState(
+          target.id,
+          { role: nextRole },
+          (user) => user.role === nextRole,
+        );
+        if (reconciled) setReconcileNotice("Change confirmed after reconnect.");
       } else {
-        const password = generateTempPassword();
-        await apiFetch(`/api/users/${encodeURIComponent(target.id)}`, {
-          method: "PATCH",
-          body: { password },
+        const attempt =
+          resetAttemptRef.current?.userId === target.id
+            ? resetAttemptRef.current
+            : {
+                userId: target.id,
+                requestId: crypto.randomUUID(),
+                password: generateTempPassword(),
+              };
+        resetAttemptRef.current = attempt;
+        const reset = () =>
+          apiFetch(`/api/users/${encodeURIComponent(target.id)}`, {
+            method: "PATCH",
+            body: { password: attempt.password, request_id: attempt.requestId },
+          });
+        try {
+          await reset();
+        } catch (error) {
+          if (isDefinitiveRejection(error)) throw error;
+          // The reset may have committed with a lost response. The same
+          // request id applies the candidate at most once, so this retry
+          // can never set a second unseen password.
+          await reset();
+        }
+        resetAttemptRef.current = null;
+        setSecret({
+          kind: "reset",
+          username: target.username,
+          password: attempt.password,
         });
-        setSecret({ kind: "reset", username: target.username, password });
       }
       setConfirm(null);
       void load();
@@ -178,10 +290,20 @@ export function UsersDirectory() {
           username: target.username,
         });
       } else if (isApiError(error) && error.status === 404) {
+        if (confirm.kind === "reset") resetAttemptRef.current = null;
         setConfirmError("User not found — reload the directory.");
+      } else if (isDefinitiveRejection(error)) {
+        if (confirm.kind === "reset") resetAttemptRef.current = null;
+        setConfirmError(
+          `${error instanceof Error ? error.message : "Rejected"}.`,
+        );
+      } else if (confirm.kind === "reset") {
+        setConfirmError(
+          "The server didn't confirm — the reset may or may not have been applied. Retrying is safe: the same reset is applied at most once.",
+        );
       } else {
         setConfirmError(
-          "The server couldn't complete the request. Nothing was changed.",
+          "The server didn't confirm — the change may or may not have been applied. Retry, or reload the directory to check.",
         );
       }
     } finally {
@@ -196,6 +318,11 @@ export function UsersDirectory() {
         active · {users.filter((user) => user.role === "admin").length} admin ·
         bcrypt password storage
       </p>
+      {reconcileNotice ? (
+        <p className="notice notice-success" role="status">
+          {reconcileNotice}
+        </p>
+      ) : null}
       <div className="toolbar">
         <input
           id={searchId}
@@ -248,6 +375,7 @@ export function UsersDirectory() {
           className="button button-primary"
           onClick={() => {
             setCreateError(null);
+            createAttemptRef.current = null;
             setCreateOpen(true);
           }}
         >
@@ -547,6 +675,8 @@ export function UsersDirectory() {
                 onChange={(event) => {
                   setCreateUsername(event.target.value);
                   setCreateError(null);
+                  // Edited intent = a new operation; drop the old attempt.
+                  createAttemptRef.current = null;
                 }}
               />
               <p className="field-hint">a–z 0–9 . - _ · 3–64 chars · unique</p>
@@ -563,7 +693,10 @@ export function UsersDirectory() {
                   type="radio"
                   name="role"
                   checked={createRole === "member"}
-                  onChange={() => setCreateRole("member")}
+                  onChange={() => {
+                    setCreateRole("member");
+                    createAttemptRef.current = null;
+                  }}
                 />
                 Member — manages own files, own API keys, own password
               </label>
@@ -572,7 +705,10 @@ export function UsersDirectory() {
                   type="radio"
                   name="role"
                   checked={createRole === "admin"}
-                  onChange={() => setCreateRole("admin")}
+                  onChange={() => {
+                    setCreateRole("admin");
+                    createAttemptRef.current = null;
+                  }}
                 />
                 Admin — full control of files, users and keys
               </label>

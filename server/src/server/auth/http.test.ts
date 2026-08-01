@@ -593,6 +593,147 @@ describe("authentication HTTP routes", { concurrency: false }, () => {
     );
   });
 
+  it("honors idempotency request ids on user creation and password reset", async () => {
+    const loginResponse = await login(
+      new Request("https://files.example.test/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://files.example.test",
+          "x-real-ip": "10.77.0.1",
+        },
+        body: JSON.stringify({
+          username: "admin",
+          password: "a sufficiently long admin password",
+        }),
+      }),
+    );
+    assert.equal(loginResponse.status, 200);
+    const cookie = loginResponse.headers.get("set-cookie")!.split(";", 1)[0]!;
+    const jsonHeaders = {
+      "content-type": "application/json",
+      origin: "https://files.example.test",
+      cookie,
+    };
+
+    // Create with a request id commits once…
+    const createBody = {
+      username: "idem.http.member",
+      password: "idem-http-member-password-1",
+      role: "member",
+      request_id: "http-req-create-1",
+    };
+    const created = await createUser(
+      new Request("https://files.example.test/api/users", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify(createBody),
+      }),
+    );
+    assert.equal(created.status, 201);
+    const createdJson = (await created.json()) as {
+      user: { id: string; username: string };
+      created: boolean;
+    };
+    assert.equal(createdJson.created, true);
+
+    // …and a retry with the same request id reconciles to the SAME user.
+    const retried = await createUser(
+      new Request("https://files.example.test/api/users", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify(createBody),
+      }),
+    );
+    assert.equal(retried.status, 200);
+    const retriedJson = (await retried.json()) as {
+      user: { id: string };
+      created: boolean;
+    };
+    assert.equal(retriedJson.created, false);
+    assert.equal(retriedJson.user.id, createdJson.user.id);
+
+    // A malformed request id is rejected before any write.
+    const badRequestId = await createUser(
+      new Request("https://files.example.test/api/users", {
+        method: "POST",
+        headers: jsonHeaders,
+        body: JSON.stringify({ ...createBody, request_id: 7 }),
+      }),
+    );
+    assert.equal(badRequestId.status, 400);
+
+    // Password reset with a request id applies exactly once…
+    const resetBody = {
+      password: "idem-http-reset-password-1",
+      request_id: "http-req-reset-1",
+    };
+    const reset = await updateUser(
+      new Request(
+        `https://files.example.test/api/users/${createdJson.user.id}`,
+        {
+          method: "PATCH",
+          headers: jsonHeaders,
+          body: JSON.stringify(resetBody),
+        },
+      ),
+      routeContext(createdJson.user.id),
+    );
+    assert.equal(reset.status, 200);
+    assert.equal(
+      ((await reset.json()) as { password_applied: boolean }).password_applied,
+      true,
+    );
+    const resetReplay = await updateUser(
+      new Request(
+        `https://files.example.test/api/users/${createdJson.user.id}`,
+        {
+          method: "PATCH",
+          headers: jsonHeaders,
+          body: JSON.stringify(resetBody),
+        },
+      ),
+      routeContext(createdJson.user.id),
+    );
+    assert.equal(resetReplay.status, 200);
+    assert.equal(
+      ((await resetReplay.json()) as { password_applied: boolean })
+        .password_applied,
+      false,
+    );
+
+    // …and the committed candidate authenticates.
+    const memberLogin = await login(
+      new Request("https://files.example.test/api/auth/login", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          origin: "https://files.example.test",
+          "x-real-ip": "10.77.0.2",
+        },
+        body: JSON.stringify({
+          username: "idem.http.member",
+          password: "idem-http-reset-password-1",
+        }),
+      }),
+    );
+    assert.equal(memberLogin.status, 200);
+
+    // request_id is only meaningful for the password reset patch.
+    const requestIdAlone = await updateUser(
+      new Request(
+        `https://files.example.test/api/users/${createdJson.user.id}`,
+        {
+          method: "PATCH",
+          headers: jsonHeaders,
+          body: JSON.stringify({ request_id: "http-req-lonely" }),
+        },
+      ),
+      routeContext(createdJson.user.id),
+    );
+    assert.equal(requestIdAlone.status, 400);
+  });
+
   it("uses legacy bearer as admin and returns API key secrets only once", async (t) => {
     const logged: unknown[][] = [];
     const originalConsoleError = console.error;

@@ -95,6 +95,29 @@ function renderKeys() {
   );
 }
 
+test("an ambiguous revoke failure never claims the key is still active", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      memberRoutes({
+        del: () => {
+          // The DELETE may have committed; only the response was lost.
+          throw new TypeError("network response lost");
+        },
+      }),
+    ),
+  );
+  renderKeys();
+  await screen.findByRole("cell", { name: "ingest-pipeline" });
+  await userEvent.click(screen.getByRole("button", { name: /^Revoke/ }));
+  await userEvent.click(screen.getByRole("button", { name: "Revoke key" }));
+
+  expect(
+    await screen.findByText(/may or may not have been revoked/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/still active/i)).toBeNull();
+});
+
 test("lists key metadata only — masked prefix and tail, explicit status words", async () => {
   vi.stubGlobal("fetch", vi.fn(memberRoutes()));
   renderKeys();
@@ -370,7 +393,7 @@ test("a lost activation response is retried idempotently from the secret dialog"
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   await screen.findByText("fsk_TESTSECRET-not-a-real-key");
   // Truthful: the key is not active yet.
-  await screen.findByText(/not active/i);
+  await screen.findByText(/may not be active/i);
   await userEvent.click(
     screen.getByRole("button", { name: /retry activation/i }),
   );
@@ -872,7 +895,7 @@ test("the show-once flow persists only the safe pending id — never the secret"
   );
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   await screen.findByText("fsk_TESTSECRET-not-a-real-key");
-  await screen.findByText(/NOT active/i);
+  await screen.findByText(/may not be active/i);
   // While the show-once dialog is open pre-activation, the URL carries
   // only the opaque key id — never secret material.
   await waitFor(() => expect(window.location.search).toContain("pend=k-safe"));

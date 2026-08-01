@@ -385,11 +385,18 @@ export function ApiKeysView() {
       setRevokeTarget(null);
       void load();
     } catch (error) {
-      setRevokeError(
-        isApiError(error) && error.status === 404
-          ? "API key not found — it may already be revoked."
-          : "The server couldn't revoke the key. It is still active.",
-      );
+      if (isApiError(error) && error.status === 404) {
+        setRevokeError("API key not found — it may already be revoked.");
+      } else if (isApiError(error) && error.status < 500) {
+        setRevokeError(`${error.message}.`);
+      } else {
+        // Ambiguous transport/5xx failure: the revoke may have committed.
+        setRevokeError(
+          revokeTarget.status === "pending"
+            ? "The server didn't confirm — the pending key may or may not have been cancelled. Retry; a pending key never authenticates either way."
+            : "The server didn't confirm — the key may or may not have been revoked. Retry (revoking again is safe) or reload the list.",
+        );
+      }
     } finally {
       setRevoking(false);
     }
@@ -413,7 +420,7 @@ export function ApiKeysView() {
       setReconcileError(
         isApiError(error) && error.code === "pending_expired"
           ? "This pending key has expired — cancel it and create a new one."
-          : "Activation didn't complete. The key stays pending and never authenticates; try again or cancel it.",
+          : "Activation wasn't confirmed — it may or may not have completed. Retry is safe (activation is idempotent), or cancel the key.",
       );
     } finally {
       setReconciling(false);
@@ -441,7 +448,7 @@ export function ApiKeysView() {
         return;
       }
       setReconcileError(
-        "The server couldn't cancel the key. It stays pending and never authenticates.",
+        "The cancellation wasn't confirmed — the key may or may not remain listed. Either way a pending key never authenticates; try again.",
       );
     } finally {
       setReconciling(false);
@@ -795,7 +802,7 @@ export function ApiKeysView() {
             </p>
           ) : (
             <p className="field-error" role="alert">
-              This key is NOT active yet — the activation didn&apos;t complete.
+              This key may not be active — the activation wasn&apos;t confirmed.
               It cannot authenticate until activated.{" "}
               <button
                 type="button"

@@ -75,6 +75,13 @@ export interface ApiKeyCursor {
 export const REVOKED_KEY_RETENTION_COUNT = 20;
 export const REVOKED_KEY_RETENTION_DAYS = 90;
 
+// Ambiguous non-key mutations (admin user creation, admin password reset)
+// accept an opaque idempotency request id so a client that lost the
+// response can retry and truthfully reconcile against the original commit.
+// Only opaque metadata is retained — never plaintext — bounded by this
+// window; rows also die with their user via ON DELETE CASCADE.
+export const IDEMPOTENT_OPERATION_RETENTION_MS = 24 * 60 * 60 * 1000;
+
 // Pending (phase-1) keys are short-lived and bounded per user; expired
 // rows are pruned on the next key creation touch.
 export const PENDING_API_KEY_TTL_MS = 10 * 60 * 1000;
@@ -108,6 +115,25 @@ export function decodeApiKeyCursor(value: string): ApiKeyCursor {
   }
 }
 
+// Column DDL shared verbatim by fresh creation and the legacy-upgrade
+// rebuild so every database — new or migrated — carries the exact same
+// semantic constraints (including the status CHECK).
+const API_KEYS_COLUMNS = `
+  id TEXT PRIMARY KEY NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  name TEXT NOT NULL,
+  key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+  key_prefix TEXT NOT NULL,
+  last_four TEXT NOT NULL,
+  created_at TEXT NOT NULL,
+  last_used_at TEXT,
+  expires_at TEXT,
+  revoked_at TEXT,
+  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('pending', 'active')),
+  request_id TEXT,
+  pending_expires_at TEXT
+`;
+
 const AUTH_SCHEMA = `
 CREATE TABLE IF NOT EXISTS users (
   id TEXT PRIMARY KEY NOT NULL,
@@ -132,22 +158,19 @@ CREATE INDEX IF NOT EXISTS sessions_user_active_idx ON sessions(user_id, expires
 CREATE INDEX IF NOT EXISTS sessions_expires_idx ON sessions(expires_at);
 CREATE INDEX IF NOT EXISTS sessions_revoked_idx ON sessions(revoked_at);
 
-CREATE TABLE IF NOT EXISTS api_keys (
-  id TEXT PRIMARY KEY NOT NULL,
-  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-  name TEXT NOT NULL,
-  key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
-  key_prefix TEXT NOT NULL,
-  last_four TEXT NOT NULL,
-  created_at TEXT NOT NULL,
-  last_used_at TEXT,
-  expires_at TEXT,
-  revoked_at TEXT,
-  status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('pending', 'active')),
-  request_id TEXT,
-  pending_expires_at TEXT
-);
+CREATE TABLE IF NOT EXISTS api_keys (${API_KEYS_COLUMNS});
 CREATE INDEX IF NOT EXISTS api_keys_user_active_idx ON api_keys(user_id, revoked_at);
+
+CREATE TABLE IF NOT EXISTS idempotent_operations (
+  operation TEXT NOT NULL CHECK(operation IN ('user_create', 'password_reset')),
+  actor_key TEXT NOT NULL,
+  request_id TEXT NOT NULL,
+  user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (operation, actor_key, request_id)
+);
+CREATE INDEX IF NOT EXISTS idempotent_operations_created_idx ON idempotent_operations(created_at);
+CREATE INDEX IF NOT EXISTS idempotent_operations_user_idx ON idempotent_operations(user_id);
 
 CREATE TABLE IF NOT EXISTS login_failures (
   throttle_key TEXT PRIMARY KEY NOT NULL,
@@ -193,24 +216,95 @@ export class AuthRepository {
     await client.execute("PRAGMA foreign_keys = ON");
     await client.execute("PRAGMA busy_timeout = 5000");
     await client.executeMultiple(AUTH_SCHEMA);
-    // Migrate databases created before the two-phase key columns existed.
-    // Legacy rows read as status='active' via the column default.
-    const columns = await client.execute("PRAGMA table_info(api_keys)");
-    const names = new Set(
-      columns.rows.map((row) => (typeof row.name === "string" ? row.name : "")),
-    );
-    if (!names.has("status")) {
-      await client.executeMultiple(`
-        ALTER TABLE api_keys ADD COLUMN status TEXT NOT NULL DEFAULT 'active';
-        ALTER TABLE api_keys ADD COLUMN request_id TEXT;
-        ALTER TABLE api_keys ADD COLUMN pending_expires_at TEXT;
-      `);
-    }
+    await AuthRepository.migrateApiKeysSchema(client);
     await client.execute(
       `CREATE UNIQUE INDEX IF NOT EXISTS api_keys_request_idx
         ON api_keys(request_id) WHERE request_id IS NOT NULL`,
     );
     return new AuthRepository(client);
+  }
+
+  // Upgrade api_keys tables created before the two-phase columns — or
+  // upgraded by the earlier ALTER-based migration, which could not add the
+  // status CHECK — to the exact fresh schema via a transactional table
+  // rebuild. Idempotent (canonical tables are detected and skipped, also
+  // under concurrent startups), crash-safe (one write transaction), and
+  // fail-closed: unexpected status values abort the upgrade unchanged.
+  private static async migrateApiKeysSchema(client: Client): Promise<void> {
+    const tableSql = async (
+      executor: Pick<Client, "execute">,
+    ): Promise<string> => {
+      const result = await executor.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'api_keys'",
+      );
+      return typeof result.rows[0]?.sql === "string" ? result.rows[0].sql : "";
+    };
+    const canonical = "CHECK(status IN ('pending', 'active'))";
+    if ((await tableSql(client)).includes(canonical)) return;
+    const transaction = await client.transaction("write");
+    try {
+      // Re-check under the write lock: a concurrent startup may have
+      // completed the rebuild while this one waited.
+      if ((await tableSql(transaction)).includes(canonical)) {
+        await transaction.commit();
+        return;
+      }
+      const columns = await transaction.execute("PRAGMA table_info(api_keys)");
+      const names = new Set(
+        columns.rows.map((row) =>
+          typeof row.name === "string" ? row.name : "",
+        ),
+      );
+      if (names.has("status")) {
+        // Fail closed on values the constrained schema would reject —
+        // never coerce data during an upgrade.
+        const invalid = await transaction.execute(
+          `SELECT COUNT(*) AS count FROM api_keys
+            WHERE status IS NULL OR status NOT IN ('pending', 'active')`,
+        );
+        if (Number(invalid.rows[0]?.count) !== 0) {
+          throw new AppError(
+            500,
+            "invalid_api_key_status",
+            "api_keys contains status values outside ('pending', 'active'); refusing to migrate",
+          );
+        }
+      }
+      // Rebuild with the exact fresh-schema DDL, carrying every row and
+      // column across (absent legacy columns read as their defaults).
+      const statusExpr = names.has("status") ? "status" : "'active'";
+      const requestExpr = names.has("request_id") ? "request_id" : "NULL";
+      const pendingExpr = names.has("pending_expires_at")
+        ? "pending_expires_at"
+        : "NULL";
+      await transaction.execute(
+        `CREATE TABLE api_keys_rebuild (${API_KEYS_COLUMNS})`,
+      );
+      await transaction.execute(
+        `INSERT INTO api_keys_rebuild
+          (id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at, status, request_id, pending_expires_at)
+          SELECT id, user_id, name, key_digest, key_prefix, last_four, created_at, last_used_at, expires_at, revoked_at, ${statusExpr}, ${requestExpr}, ${pendingExpr}
+          FROM api_keys`,
+      );
+      await transaction.execute("DROP TABLE api_keys");
+      await transaction.execute(
+        "ALTER TABLE api_keys_rebuild RENAME TO api_keys",
+      );
+      // Recreate both api_keys indexes dropped with the old table.
+      await transaction.execute(
+        "CREATE INDEX IF NOT EXISTS api_keys_user_active_idx ON api_keys(user_id, revoked_at)",
+      );
+      await transaction.execute(
+        `CREATE UNIQUE INDEX IF NOT EXISTS api_keys_request_idx
+          ON api_keys(request_id) WHERE request_id IS NOT NULL`,
+      );
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    } finally {
+      transaction.close();
+    }
   }
 
   async close(): Promise<void> {
@@ -315,6 +409,278 @@ export class AuthRepository {
       createdAt: now,
       updatedAt: now,
     };
+  }
+
+  // Serializes this repository's multi-statement write transactions: the
+  // local libsql client rejects an overlapping BEGIN on one connection
+  // with SQLITE_BUSY instead of queueing. Cross-process writers still
+  // serialize through BEGIN IMMEDIATE + busy_timeout.
+  private writeQueue: Promise<unknown> = Promise.resolve();
+  private runExclusive<T>(task: () => Promise<T>): Promise<T> {
+    const run = this.writeQueue.then(task, task);
+    this.writeQueue = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  private validateOperationRequestId(requestId: string): void {
+    if (!requestId || requestId.length > 128) {
+      throw new AppError(
+        400,
+        "invalid_request_id",
+        "request_id must be 1-128 characters",
+      );
+    }
+  }
+
+  private async pruneIdempotentOperations(now: Date): Promise<void> {
+    await this.client.execute({
+      sql: "DELETE FROM idempotent_operations WHERE created_at <= ?",
+      args: [
+        new Date(
+          now.getTime() - IDEMPOTENT_OPERATION_RETENTION_MS,
+        ).toISOString(),
+      ],
+    });
+  }
+
+  private async findIdempotentOperation(
+    operation: "user_create" | "password_reset",
+    actorKey: string,
+    requestId: string,
+  ): Promise<string | null> {
+    const result = await this.client.execute({
+      sql: `SELECT user_id FROM idempotent_operations
+        WHERE operation = ? AND actor_key = ? AND request_id = ?`,
+      args: [operation, actorKey, requestId],
+    });
+    const row = result.rows[0];
+    return row ? stringColumn(row, "user_id") : null;
+  }
+
+  private async getUserCredential(
+    id: string,
+  ): Promise<{ user: User; passwordHash: string } | null> {
+    const result = await this.client.execute({
+      sql: `SELECT id, username, password_hash, role, active, created_at, updated_at
+        FROM users WHERE id = ?`,
+      args: [id],
+    });
+    const row = result.rows[0];
+    return row
+      ? {
+          user: userFromRow(row),
+          passwordHash: stringColumn(row, "password_hash"),
+        }
+      : null;
+  }
+
+  // Idempotent admin user creation: a retry with the same request id
+  // resolves to the SAME committed user (never a duplicate), so the
+  // client that retained the candidate password can truthfully finish the
+  // show-once credential flow after a lost response. Only the bcrypt hash
+  // is ever persisted.
+  async createUserIdempotent(
+    input: { username: string; password: string; role: UserRole },
+    actor: { userId: string | null },
+    requestId: string,
+    now = new Date(),
+  ): Promise<{ user: User; created: boolean }> {
+    this.validateOperationRequestId(requestId);
+    const actorKey = actor.userId ?? "legacy";
+    const username = normalizeUsername(input.username);
+    const passwordHash = await hashPassword(input.password);
+    await this.pruneIdempotentOperations(now);
+    const replay = async (): Promise<{ user: User; created: false } | null> => {
+      const userId = await this.findIdempotentOperation(
+        "user_create",
+        actorKey,
+        requestId,
+      );
+      if (!userId) return null;
+      const credential = await this.getUserCredential(userId);
+      if (!credential) return null;
+      if (credential.user.username !== username) {
+        throw new AppError(
+          409,
+          "request_id_conflict",
+          "request_id is already bound to another user creation",
+        );
+      }
+      if (!(await verifyPassword(input.password, credential.passwordHash))) {
+        throw new AppError(
+          409,
+          "credential_superseded",
+          "The created user's password has since changed; start a new credential flow",
+        );
+      }
+      return { user: credential.user, created: false };
+    };
+    const existing = await replay();
+    if (existing) return existing;
+    return this.runExclusive(async () => {
+      const reconciled = await replay();
+      if (reconciled) return reconciled;
+      const id = randomUUID();
+      const nowIso = now.toISOString();
+      const transaction = await this.client.transaction("write");
+      try {
+        const result = await transaction.execute({
+          sql: `INSERT INTO users
+            (id, username, password_hash, role, active, created_at, updated_at)
+            SELECT ?, ?, ?, ?, 1, ?, ?
+            WHERE ? IS NULL OR EXISTS (
+              SELECT 1 FROM users
+              WHERE id = ? AND role = 'admin' AND active = 1
+            )`,
+          args: [
+            id,
+            username,
+            passwordHash,
+            input.role,
+            nowIso,
+            nowIso,
+            actor.userId,
+            actor.userId,
+          ],
+        });
+        if (result.rowsAffected === 0) {
+          throw new AppError(
+            403,
+            "admin_revoked",
+            "Administrator access is no longer valid",
+          );
+        }
+        await transaction.execute({
+          sql: `INSERT INTO idempotent_operations
+            (operation, actor_key, request_id, user_id, created_at)
+            VALUES ('user_create', ?, ?, ?, ?)`,
+          args: [actorKey, requestId, id, nowIso],
+        });
+        await transaction.commit();
+      } catch (cause) {
+        await transaction.rollback();
+        if (String(cause).toLocaleLowerCase("en-US").includes("unique")) {
+          // Either a concurrent duplicate of this request committed first
+          // (reconcile to it) or the username is genuinely taken.
+          const raced = await replay();
+          if (raced) return raced;
+          throw new AppError(
+            409,
+            "username_exists",
+            "Username already exists",
+            { cause },
+          );
+        }
+        throw cause;
+      } finally {
+        transaction.close();
+      }
+      return {
+        user: {
+          id,
+          username,
+          role: input.role,
+          active: true,
+          createdAt: nowIso,
+          updatedAt: nowIso,
+        },
+        created: true,
+      };
+    });
+  }
+
+  // Idempotent admin password reset: the candidate password applies
+  // exactly once per request id. A replay applies NOTHING — it never
+  // generates or re-applies a password, so a retry arriving after a newer
+  // reset cannot silently overwrite the newer credential.
+  async resetPasswordIdempotent(
+    id: string,
+    password: string,
+    actorUserId: string | null,
+    requestId: string,
+    now = new Date(),
+  ): Promise<{ user: User; applied: boolean }> {
+    this.validateOperationRequestId(requestId);
+    const actorKey = actorUserId ?? "legacy";
+    const initialCredential = await this.getUserCredential(id);
+    if (!initialCredential) {
+      throw new AppError(404, "user_not_found", "User not found");
+    }
+    const user = initialCredential.user;
+    const expectedPasswordHash = initialCredential.passwordHash;
+    const passwordHash = await hashPassword(password);
+    await this.pruneIdempotentOperations(now);
+    const replay = async (): Promise<{ user: User; applied: false } | null> => {
+      const userId = await this.findIdempotentOperation(
+        "password_reset",
+        actorKey,
+        requestId,
+      );
+      if (!userId) return null;
+      if (userId !== id) {
+        throw new AppError(
+          409,
+          "request_id_conflict",
+          "request_id is already bound to another password reset",
+        );
+      }
+      const current = await this.getUserCredential(userId);
+      if (!current) return null;
+      if (!(await verifyPassword(password, current.passwordHash))) {
+        throw new AppError(
+          409,
+          "credential_superseded",
+          "A newer password is active; start a new reset",
+        );
+      }
+      return { user: current.user, applied: false };
+    };
+    const existing = await replay();
+    if (existing) return existing;
+    return this.runExclusive(async () => {
+      const reconciled = await replay();
+      if (reconciled) return reconciled;
+      const nowIso = now.toISOString();
+      const transaction = await this.client.transaction("write");
+      try {
+        await transaction.execute({
+          sql: `INSERT INTO idempotent_operations
+            (operation, actor_key, request_id, user_id, created_at)
+            VALUES ('password_reset', ?, ?, ?, ?)`,
+          args: [actorKey, requestId, id, nowIso],
+        });
+        const result = await transaction.execute({
+          sql: `UPDATE users SET password_hash = ?, updated_at = ?
+            WHERE id = ? AND password_hash = ?`,
+          args: [passwordHash, nowIso, id, expectedPasswordHash],
+        });
+        if (result.rowsAffected === 0) {
+          throw new AppError(
+            409,
+            "password_reset_conflict",
+            "The password changed while this reset was in progress; start a new reset",
+          );
+        }
+        await transaction.execute({
+          sql: "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+          args: [nowIso, id],
+        });
+        await transaction.commit();
+      } catch (cause) {
+        await transaction.rollback();
+        if (String(cause).toLocaleLowerCase("en-US").includes("unique")) {
+          const raced = await replay();
+          if (raced) return raced;
+        }
+        throw cause;
+      } finally {
+        transaction.close();
+      }
+      return { user: { ...user, updatedAt: nowIso }, applied: true };
+    });
   }
 
   async listUsers(): Promise<User[]> {
@@ -803,37 +1169,49 @@ export class AuthRepository {
     actorIsAdmin: boolean,
     now = new Date(),
   ): Promise<{ id: string; status: ApiKeyStatus }> {
-    const lookup = await this.client.execute({
-      sql: `SELECT id, user_id, status, revoked_at, pending_expires_at
-        FROM api_keys WHERE id = ?${actorIsAdmin ? "" : " AND user_id = ?"}`,
-      args: actorIsAdmin ? [id] : [id, actorUserId],
-    });
-    const row = lookup.rows[0];
-    if (!row) {
-      throw new AppError(404, "api_key_not_found", "API key not found");
-    }
-    if (typeof row.revoked_at === "string") {
-      throw new AppError(
-        409,
-        "api_key_revoked",
-        "This API key has been revoked",
-      );
-    }
+    const readRow = async () => {
+      const lookup = await this.client.execute({
+        sql: `SELECT id, user_id, status, revoked_at, pending_expires_at
+          FROM api_keys WHERE id = ?${actorIsAdmin ? "" : " AND user_id = ?"}`,
+        args: actorIsAdmin ? [id] : [id, actorUserId],
+      });
+      return lookup.rows[0];
+    };
+    const assertNotRevokedOrMissing = (row: Row | undefined): Row => {
+      if (!row) {
+        throw new AppError(404, "api_key_not_found", "API key not found");
+      }
+      if (typeof row.revoked_at === "string") {
+        throw new AppError(
+          409,
+          "api_key_revoked",
+          "This API key has been revoked",
+        );
+      }
+      return row;
+    };
+    const assertNotExpired = (row: Row): void => {
+      const expiresAt =
+        typeof row.pending_expires_at === "string"
+          ? row.pending_expires_at
+          : null;
+      if (!expiresAt || expiresAt <= now.toISOString()) {
+        throw new AppError(
+          410,
+          "pending_expired",
+          "This pending API key has expired; create a new key",
+        );
+      }
+    };
+    let row = assertNotRevokedOrMissing(await readRow());
     if (stringColumn(row, "status") === "active") {
       return { id, status: "active" };
     }
-    const expiresAt =
-      typeof row.pending_expires_at === "string"
-        ? row.pending_expires_at
-        : null;
-    if (!expiresAt || expiresAt <= now.toISOString()) {
-      throw new AppError(
-        410,
-        "pending_expired",
-        "This pending API key has expired; create a new key",
-      );
-    }
+    assertNotExpired(row);
     const userId = stringColumn(row, "user_id");
+    // The pending→active flip is one atomic conditional statement, so
+    // overlapping activations serialize at the database: exactly one
+    // affects a row; the other observes rowsAffected === 0.
     const result = await this.client.execute({
       sql: `UPDATE api_keys SET status = 'active', pending_expires_at = NULL
         WHERE id = ? AND status = 'pending' AND revoked_at IS NULL
@@ -843,11 +1221,20 @@ export class AuthRepository {
       args: [id, now.toISOString(), userId, MAX_ACTIVE_API_KEYS],
     });
     if (result.rowsAffected === 0) {
-      throw new AppError(
-        409,
-        "api_key_limit",
-        `A user can have at most ${MAX_ACTIVE_API_KEYS} active API keys`,
-      );
+      // Zero rows means the row changed after the read above — the losing
+      // update only observes state another call already committed. Re-read
+      // and report that state truthfully: idempotent active if an overlap
+      // activated it, pending_expired if it lapsed, and a limit conflict
+      // only when it is genuinely still pending under a full active cap.
+      row = assertNotRevokedOrMissing(await readRow());
+      if (stringColumn(row, "status") !== "active") {
+        assertNotExpired(row);
+        throw new AppError(
+          409,
+          "api_key_limit",
+          `A user can have at most ${MAX_ACTIVE_API_KEYS} active API keys`,
+        );
+      }
     }
     return { id, status: "active" };
   }

@@ -66,7 +66,23 @@ All routes below require a user session, user API key, or the legacy service
 credential. Admin-only routes return `403` to authenticated members.
 
 - `GET|POST /api/users` — admin list/create (`username`, `password`, `role`).
-- `PATCH /api/users/{id}` — admin role, active state, and/or replacement password.
+  Create accepts an optional opaque `request_id` (1–128 chars): creation is
+  then idempotent per actor+id — the first commit returns
+  `201 { user, created: true }` and a retry with the same id and candidate
+  returns `200 { user, created: false }` for the same user, so a client that
+  lost the response can reconcile without duplicates. If that credential has
+  since been replaced, reconciliation fails with `409 credential_superseded`
+  rather than presenting a stale candidate. Only the bcrypt hash is ever
+  stored; reconciliation metadata is pruned after 24 hours.
+- `PATCH /api/users/{id}` — admin role, active state, and/or replacement
+  password. A password reset may carry `request_id` (only together with
+  `password`): the reset applies exactly once per actor+id
+  (`password_applied: true`, sessions revoked); a replay returns
+  `password_applied: false` only while that candidate is still current. The
+  target is bound to the request id, overlapping different reset ids use a
+  password-hash conditional update (one wins; the stale write gets
+  `409 password_reset_conflict`), and a superseded replay gets
+  `409 credential_superseded`. Callers without `request_id` are unchanged.
 - `POST /api/auth/password` — member changes their own password using
   `current_password` and `new_password`; existing sessions are revoked.
 - `GET|POST /api/api-keys` — list metadata or create a named key. Admins may pass

@@ -62,9 +62,14 @@ export function FilesBrowser() {
     decodePrevCursors(readTaskParam("prev")),
   );
   const [owners, setOwners] = useState<Map<string, string> | null>(null);
+  const [reconcileNotice, setReconcileNotice] = useState<string | null>(null);
   const [selectedId, setSelectedId] = useState<string | null>(() =>
     readTaskParam("sel"),
   );
+  // A selection restored from the URL is validated once against the first
+  // completed load; a stale id is dropped (like Keys) instead of lingering
+  // in the query. Later pagination keeps in-session selections intact.
+  const restoreSelRef = useRef(readTaskParam("sel"));
   const [uploadOpen, setUploadOpen] = useState(false);
   const [uploadFile, setUploadFile] = useState<File | null>(null);
   const [uploadName, setUploadName] = useState("");
@@ -121,6 +126,16 @@ export function FilesBrowser() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  useEffect(() => {
+    if (state.kind !== "ready") return;
+    const restored = restoreSelRef.current;
+    if (!restored) return;
+    restoreSelRef.current = null;
+    if (!state.items.some((item) => item.id === restored)) {
+      setSelectedId((current) => (current === restored ? null : current));
+    }
+  }, [state]);
 
   // Reflect the task state into the URL (replace, not push — filters are
   // one task, not a history trail).
@@ -232,7 +247,9 @@ export function FilesBrowser() {
         setUploadError(
           payload?.error?.message
             ? `${payload.error.message}.`
-            : `Upload failed (${response.status}). Nothing was stored.`,
+            : response.status < 500
+              ? `Upload failed (${response.status}). Nothing was stored.`
+              : `Upload failed (${response.status}). Reload the list to check whether it was stored.`,
         );
         return;
       }
@@ -243,7 +260,9 @@ export function FilesBrowser() {
       resetPaging();
       void load();
     } catch {
-      setUploadError("Upload failed — network error. Nothing was stored.");
+      setUploadError(
+        "Upload failed — network error. The file may or may not have been stored; reload the list to check.",
+      );
     } finally {
       setBusy(false);
     }
@@ -253,11 +272,8 @@ export function FilesBrowser() {
     if (!selected || busy) return;
     setBusy(true);
     setEditorError(null);
-    try {
-      const updated = await apiFetch<FileMetadata>(
-        `/api/files/${encodeURIComponent(selected.id)}`,
-        { method: "PATCH", body: { visibility: editorValue } },
-      );
+    setReconcileNotice(null);
+    const applyUpdated = (updated: FileMetadata) => {
       setEditorOpen(false);
       setState((current) =>
         current.kind === "ready"
@@ -269,12 +285,40 @@ export function FilesBrowser() {
             }
           : current,
       );
-    } catch (error) {
-      setEditorError(
-        isApiError(error) && error.status === 404
-          ? "This file no longer exists or you don't have access. Nothing was changed."
-          : "The server couldn't save the change. Nothing was changed.",
+    };
+    try {
+      const updated = await apiFetch<FileMetadata>(
+        `/api/files/${encodeURIComponent(selected.id)}`,
+        { method: "PATCH", body: { visibility: editorValue } },
       );
+      applyUpdated(updated);
+    } catch (error) {
+      if (isApiError(error) && error.status === 404) {
+        setEditorError(
+          "This file no longer exists or you don't have access. Nothing was changed.",
+        );
+      } else if (isApiError(error) && error.status < 500) {
+        setEditorError(`${error.message}.`);
+      } else {
+        // Transport failure after the change may have committed: the
+        // authoritative record decides — reconciled success if the
+        // desired visibility is present, an explicit unknown otherwise.
+        try {
+          const current = await apiFetch<FileMetadata>(
+            `/api/files/${encodeURIComponent(selected.id)}`,
+          );
+          if (current.visibility === editorValue) {
+            applyUpdated(current);
+            setReconcileNotice("Visibility confirmed after reconnect.");
+            return;
+          }
+        } catch {
+          // Verification also failed; the outcome stays unknown.
+        }
+        setEditorError(
+          "The server didn't confirm — the change may or may not have been saved. Retry (saving the same choice again is safe) or reload to check.",
+        );
+      }
     } finally {
       setBusy(false);
     }
@@ -292,11 +336,31 @@ export function FilesBrowser() {
       setSelectedId(null);
       void load();
     } catch (error) {
-      setDeleteError(
-        isApiError(error) && error.status === 404
-          ? "This file no longer exists or you don't have access."
-          : "The server couldn't delete the file. It is still stored.",
-      );
+      if (isApiError(error) && error.status === 404) {
+        setDeleteError("This file no longer exists or you don't have access.");
+      } else if (isApiError(error) && error.status < 500) {
+        setDeleteError(`${error.message}.`);
+      } else {
+        // Ambiguous transport/5xx failure: the delete may have committed.
+        // The authoritative record decides.
+        try {
+          await apiFetch(`/api/files/${encodeURIComponent(selected.id)}`);
+          setDeleteError(
+            "The delete didn't complete — the file is still there. Try again.",
+          );
+        } catch (probeError) {
+          if (isApiError(probeError) && probeError.status === 404) {
+            // The record is gone: the delete committed — reconciled.
+            setDeleteOpen(false);
+            setSelectedId(null);
+            void load();
+          } else {
+            setDeleteError(
+              "The server didn't confirm — the file may or may not have been deleted. Reload the list to check.",
+            );
+          }
+        }
+      }
     } finally {
       setBusy(false);
     }
@@ -304,6 +368,11 @@ export function FilesBrowser() {
 
   return (
     <section aria-label="Files">
+      {reconcileNotice ? (
+        <p className="notice notice-success" role="status">
+          {reconcileNotice}
+        </p>
+      ) : null}
       <div className="toolbar">
         <form
           className="toolbar-search-form"

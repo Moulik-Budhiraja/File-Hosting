@@ -212,7 +212,7 @@ test("an interrupted show-once pending flow reconciles truthfully after reauth",
     .fill("interrupted-key");
   await page.getByRole("button", { name: "Create key" }).click();
   await expect(page.getByText("SHOWN ONLY ONCE")).toBeVisible();
-  await expect(page.getByText(/NOT active yet/i)).toBeVisible();
+  await expect(page.getByText(/may not be active/i)).toBeVisible();
   // Only the opaque pending id is in the URL — never secret material.
   await expect(page).toHaveURL(/pend=/);
   expect(page.url()).not.toContain("fsk_");

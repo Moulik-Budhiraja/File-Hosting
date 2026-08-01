@@ -24,7 +24,7 @@ export async function PATCH(
     assertCsrf(request, service, principal);
     const id = (await context.params).id;
     const body = await jsonObject(request);
-    const allowed = new Set(["role", "active", "password"]);
+    const allowed = new Set(["role", "active", "password", "request_id"]);
     if (
       Object.keys(body).length === 0 ||
       Object.keys(body).some((key) => !allowed.has(key))
@@ -32,7 +32,21 @@ export async function PATCH(
       throw new AppError(
         400,
         "invalid_user_patch",
-        "Patch may contain role, active, and password",
+        "Patch may contain role, active, password, and request_id",
+      );
+    }
+    if (body.request_id !== undefined && typeof body.request_id !== "string") {
+      throw new AppError(
+        400,
+        "invalid_request_id",
+        "request_id must be a string",
+      );
+    }
+    if (body.request_id !== undefined && body.password === undefined) {
+      throw new AppError(
+        400,
+        "invalid_user_patch",
+        "request_id applies only to password resets",
       );
     }
     if (
@@ -59,6 +73,21 @@ export async function PATCH(
       user = await service.auth.setActive(id, body.active);
     }
     if (typeof body.password === "string") {
+      if (typeof body.request_id === "string") {
+        // Idempotent reset: the candidate password applies exactly once
+        // per request id; a retry after a lost response reconciles
+        // without generating or re-applying another password.
+        const outcome = await service.auth.resetPasswordIdempotent(
+          id,
+          body.password,
+          principal.source === "legacy" ? null : principal.userId,
+          body.request_id,
+        );
+        return json({
+          user: publicUser(outcome.user),
+          password_applied: outcome.applied,
+        });
+      }
       user = await service.auth.setPassword(id, body.password);
     }
     return json({ user: publicUser(user) });

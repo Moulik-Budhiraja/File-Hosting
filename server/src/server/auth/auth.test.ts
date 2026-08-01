@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { describe, it } from "node:test";
@@ -11,6 +11,7 @@ import { AppError } from "../files/errors";
 import {
   AuthRepository,
   decodeApiKeyCursor,
+  IDEMPOTENT_OPERATION_RETENTION_MS,
   MAX_PENDING_API_KEYS,
   PENDING_API_KEY_TTL_MS,
   REVOKED_KEY_RETENTION_COUNT,
@@ -78,6 +79,57 @@ describe("password security", () => {
     );
   });
 });
+
+// Upgraded databases must end with the exact fresh-schema semantic
+// constraint on api_keys.status.
+const CANONICAL_STATUS_CHECK = /CHECK\(status IN \('pending', 'active'\)\)/u;
+
+const LEGACY_USERS_TABLE = `
+  CREATE TABLE users (
+    id TEXT PRIMARY KEY NOT NULL,
+    username TEXT NOT NULL UNIQUE COLLATE NOCASE,
+    password_hash TEXT NOT NULL,
+    role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
+    active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+  );
+`;
+
+// Original PR #7 schema: api_keys has no status/request_id/pending columns.
+async function seedLegacySchema(url: string): Promise<void> {
+  const legacy = createClient({ url });
+  await legacy.executeMultiple(`
+    ${LEGACY_USERS_TABLE}
+    CREATE TABLE api_keys (
+      id TEXT PRIMARY KEY NOT NULL,
+      user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+      name TEXT NOT NULL,
+      key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+      key_prefix TEXT NOT NULL,
+      last_four TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      last_used_at TEXT,
+      expires_at TEXT,
+      revoked_at TEXT
+    );
+    INSERT INTO users VALUES ('legacy-user', 'legacy.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+    INSERT INTO api_keys VALUES ('legacy-key', 'legacy-user', 'legacy-cli', '${"a".repeat(64)}', 'fsk_legacy00', 'zzzz', '2026-01-01T00:00:00.000Z', NULL, NULL, NULL);
+  `);
+  legacy.close();
+}
+
+async function apiKeysTableSql(url: string): Promise<string> {
+  const probe = createClient({ url });
+  try {
+    const result = await probe.execute(
+      "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'api_keys'",
+    );
+    return typeof result.rows[0]?.sql === "string" ? result.rows[0].sql : "";
+  } finally {
+    probe.close();
+  }
+}
 
 describe("user repository", () => {
   it("creates missing parent directories for a local SQLite database", async () => {
@@ -890,40 +942,402 @@ describe("user repository", () => {
     }
   });
 
+  it("user creation with a request id is idempotent and never duplicates", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-idempotent-create-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const admin = await repository.createUser({
+        username: "idem.admin",
+        password: ADMIN_CREDENTIAL,
+        role: "admin",
+      });
+
+      const first = await repository.createUserIdempotent(
+        {
+          username: "idem.member",
+          password: MEMBER_CREDENTIAL,
+          role: "member",
+        },
+        { userId: admin.id },
+        "req-create-1",
+      );
+      assert.equal(first.created, true);
+      assert.equal(first.user.username, "idem.member");
+
+      // A retry with the same request id resolves to the SAME user —
+      // never a duplicate, never a 409 — so the client that retained the
+      // candidate password can truthfully finish the show-once flow.
+      const retry = await repository.createUserIdempotent(
+        {
+          username: "idem.member",
+          password: MEMBER_CREDENTIAL,
+          role: "member",
+        },
+        { userId: admin.id },
+        "req-create-1",
+      );
+      assert.equal(retry.created, false);
+      assert.equal(retry.user.id, first.user.id);
+      assert.equal(
+        (await repository.listUsers()).filter(
+          (user) => user.username === "idem.member",
+        ).length,
+        1,
+      );
+      // The original committed password still authenticates (bcrypt only;
+      // the replay applied nothing).
+      await repository.authenticatePassword(
+        "idem.member",
+        MEMBER_CREDENTIAL,
+        "10.9.9.1",
+      );
+
+      // Reconciliation must never tell a client to show a candidate that
+      // has since been superseded by another password mutation.
+      await repository.setPassword(first.user.id, OTHER_CREDENTIAL);
+      await assert.rejects(
+        repository.createUserIdempotent(
+          {
+            username: "idem.member",
+            password: MEMBER_CREDENTIAL,
+            role: "member",
+          },
+          { userId: admin.id },
+          "req-create-1",
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "credential_superseded",
+      );
+
+      // A different request id for the same username is a real duplicate.
+      await assert.rejects(
+        repository.createUserIdempotent(
+          {
+            username: "idem.member",
+            password: OTHER_CREDENTIAL,
+            role: "member",
+          },
+          { userId: admin.id },
+          "req-create-2",
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "username_exists",
+      );
+
+      // Request ids are scoped per operation/actor: another actor reusing
+      // the same id creates its own user rather than replaying.
+      const legacyActor = await repository.createUserIdempotent(
+        {
+          username: "idem.legacy",
+          password: OTHER_CREDENTIAL,
+          role: "member",
+        },
+        { userId: null },
+        "req-create-1",
+      );
+      assert.equal(legacyActor.created, true);
+      assert.notEqual(legacyActor.user.id, first.user.id);
+
+      // Concurrent duplicates commit exactly one user.
+      const concurrent = await Promise.all([
+        repository.createUserIdempotent(
+          {
+            username: "idem.race",
+            password: MEMBER_CREDENTIAL,
+            role: "member",
+          },
+          { userId: admin.id },
+          "req-create-race",
+        ),
+        repository.createUserIdempotent(
+          {
+            username: "idem.race",
+            password: MEMBER_CREDENTIAL,
+            role: "member",
+          },
+          { userId: admin.id },
+          "req-create-race",
+        ),
+      ]);
+      assert.equal(concurrent[0].user.id, concurrent[1].user.id);
+      assert.equal(
+        (await repository.listUsers()).filter(
+          (user) => user.username === "idem.race",
+        ).length,
+        1,
+      );
+
+      // Retained metadata is bounded: past the retention window the
+      // request id no longer replays and duplicates report definitively.
+      const later = new Date(
+        Date.now() + IDEMPOTENT_OPERATION_RETENTION_MS + 60_000,
+      );
+      await assert.rejects(
+        repository.createUserIdempotent(
+          {
+            username: "idem.member",
+            password: MEMBER_CREDENTIAL,
+            role: "member",
+          },
+          { userId: admin.id },
+          "req-create-1",
+          later,
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "username_exists",
+      );
+
+      // Request ids are validated like the API-key ones.
+      await assert.rejects(
+        repository.createUserIdempotent(
+          { username: "idem.bad", password: MEMBER_CREDENTIAL, role: "member" },
+          { userId: admin.id },
+          "x".repeat(129),
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "invalid_request_id",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("password reset with a request id applies exactly once and never silently overwrites", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-idempotent-reset-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const admin = await repository.createUser({
+        username: "reset.admin",
+        password: ADMIN_CREDENTIAL,
+        role: "admin",
+      });
+      const member = await repository.createUser({
+        username: "reset.member",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const session = await repository.createSession(member.id);
+
+      const firstCandidate = credentialFixture("reset-one");
+      const first = await repository.resetPasswordIdempotent(
+        member.id,
+        firstCandidate,
+        admin.id,
+        "req-reset-1",
+      );
+      assert.equal(first.applied, true);
+      // The reset revokes existing sessions and applies the candidate.
+      assert.equal(await repository.resolveSession(session.token), null);
+      await repository.authenticatePassword(
+        "reset.member",
+        firstCandidate,
+        "10.9.9.2",
+      );
+
+      // A replayed reset applies NOTHING — no second password, no session
+      // revocation storm — and reports the reconciliation truthfully.
+      const replay = await repository.resetPasswordIdempotent(
+        member.id,
+        firstCandidate,
+        admin.id,
+        "req-reset-1",
+      );
+      assert.equal(replay.applied, false);
+      await repository.authenticatePassword(
+        "reset.member",
+        firstCandidate,
+        "10.9.9.3",
+      );
+
+      // A different, later reset wins…
+      const secondCandidate = credentialFixture("reset-two");
+      const second = await repository.resetPasswordIdempotent(
+        member.id,
+        secondCandidate,
+        admin.id,
+        "req-reset-2",
+      );
+      assert.equal(second.applied, true);
+
+      // …and replaying the FIRST request id afterwards must not silently
+      // re-apply OR falsely present the old candidate as current.
+      await assert.rejects(
+        repository.resetPasswordIdempotent(
+          member.id,
+          firstCandidate,
+          admin.id,
+          "req-reset-1",
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "credential_superseded",
+      );
+      await repository.authenticatePassword(
+        "reset.member",
+        secondCandidate,
+        "10.9.9.4",
+      );
+      await assert.rejects(
+        repository.authenticatePassword(
+          "reset.member",
+          firstCandidate,
+          "10.9.9.5",
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "invalid_credentials",
+      );
+
+      // A request id is bound to its original reset target within the
+      // actor+operation scope; reusing it for another user is a conflict.
+      const otherMember = await repository.createUser({
+        username: "reset.other",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      await assert.rejects(
+        repository.resetPasswordIdempotent(
+          otherMember.id,
+          firstCandidate,
+          admin.id,
+          "req-reset-1",
+        ),
+        (error) =>
+          error instanceof AppError && error.code === "request_id_conflict",
+      );
+
+      // Concurrent duplicates apply at most one reset.
+      const concurrent = await Promise.all([
+        repository.resetPasswordIdempotent(
+          member.id,
+          credentialFixture("reset-race"),
+          admin.id,
+          "req-reset-race",
+        ),
+        repository.resetPasswordIdempotent(
+          member.id,
+          credentialFixture("reset-race"),
+          admin.id,
+          "req-reset-race",
+        ),
+      ]);
+      assert.equal(concurrent.filter((outcome) => outcome.applied).length, 1);
+
+      // Different requests that overlap are compare-and-set mutations: one
+      // wins and the other reports a conflict instead of silently replacing
+      // a password that changed after its request began.
+      const candidateA = credentialFixture("reset-race-a");
+      const candidateB = credentialFixture("reset-race-b");
+      const competing = await Promise.allSettled([
+        repository.resetPasswordIdempotent(
+          member.id,
+          candidateA,
+          admin.id,
+          "req-reset-race-a",
+        ),
+        repository.resetPasswordIdempotent(
+          member.id,
+          candidateB,
+          admin.id,
+          "req-reset-race-b",
+        ),
+      ]);
+      assert.equal(
+        competing.filter((outcome) => outcome.status === "fulfilled").length,
+        1,
+      );
+      const rejected = competing.find(
+        (outcome): outcome is PromiseRejectedResult =>
+          outcome.status === "rejected",
+      );
+      assert.ok(rejected);
+      assert.ok(
+        rejected.reason instanceof AppError &&
+          rejected.reason.code === "password_reset_conflict",
+      );
+
+      await assert.rejects(
+        repository.resetPasswordIdempotent(
+          "missing-user",
+          firstCandidate,
+          admin.id,
+          "req-reset-missing",
+        ),
+        (error) => error instanceof AppError && error.code === "user_not_found",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("concurrent duplicate activations both report active, never a false limit", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-concurrent-activation-test-"),
+    );
+    const repository = await AuthRepository.create(
+      `file:${path.join(directory, "auth.db")}`,
+    );
+    try {
+      const owner = await repository.createUser({
+        username: "race.owner",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      // Sol P3-1 regression: two overlapping activations of the same
+      // pending key raced read-then-update and returned
+      // [active, api_key_limit] even though the key ended active. Both
+      // callers must observe the idempotent active outcome.
+      for (let iteration = 0; iteration < 5; iteration += 1) {
+        const pending = await repository.beginApiKeyCreation(
+          owner.id,
+          `race-key-${iteration}`,
+          `req-race-${iteration}`,
+        );
+        const outcomes = await Promise.all([
+          repository.activateApiKey(pending.id, owner.id, false),
+          repository.activateApiKey(pending.id, owner.id, false),
+        ]);
+        assert.deepEqual(
+          outcomes.map((outcome) => outcome.status),
+          ["active", "active"],
+          `iteration ${iteration} returned ${JSON.stringify(outcomes)}`,
+        );
+        await repository.revokeApiKey(pending.id, owner.id, false);
+      }
+      // A key whose pending window truly lapsed still reports
+      // pending_expired from the zero-row path, not a false limit.
+      const stale = await repository.beginApiKeyCreation(
+        owner.id,
+        "race-stale",
+        "req-race-stale",
+      );
+      const lapsed = new Date(Date.now() + PENDING_API_KEY_TTL_MS + 1000);
+      await assert.rejects(
+        repository.activateApiKey(stale.id, owner.id, false, lapsed),
+        (error) =>
+          error instanceof AppError && error.code === "pending_expired",
+      );
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("migrates an existing api_keys table to the two-phase schema", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-migration-test-"),
     );
     const url = `file:${path.join(directory, "auth.db")}`;
     try {
-      // Simulate a database created before the two-phase columns existed.
-      const legacy = createClient({ url });
-      await legacy.executeMultiple(`
-        CREATE TABLE users (
-          id TEXT PRIMARY KEY NOT NULL,
-          username TEXT NOT NULL UNIQUE COLLATE NOCASE,
-          password_hash TEXT NOT NULL,
-          role TEXT NOT NULL CHECK(role IN ('admin', 'member')),
-          active INTEGER NOT NULL DEFAULT 1 CHECK(active IN (0, 1)),
-          created_at TEXT NOT NULL,
-          updated_at TEXT NOT NULL
-        );
-        CREATE TABLE api_keys (
-          id TEXT PRIMARY KEY NOT NULL,
-          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
-          name TEXT NOT NULL,
-          key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
-          key_prefix TEXT NOT NULL,
-          last_four TEXT NOT NULL,
-          created_at TEXT NOT NULL,
-          last_used_at TEXT,
-          expires_at TEXT,
-          revoked_at TEXT
-        );
-        INSERT INTO users VALUES ('legacy-user', 'legacy.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
-        INSERT INTO api_keys VALUES ('legacy-key', 'legacy-user', 'legacy-cli', '${"a".repeat(64)}', 'fsk_legacy00', 'zzzz', '2026-01-01T00:00:00.000Z', NULL, NULL, NULL);
-      `);
-      legacy.close();
+      await seedLegacySchema(url);
 
       const repository = await AuthRepository.create(url);
       try {
@@ -938,11 +1352,336 @@ describe("user repository", () => {
           "req-migrated",
         );
         assert.equal(begun.status, "pending");
+        // The upgraded table carries the exact fresh-schema semantic
+        // constraint, not just the unconstrained added column.
+        assert.match(await apiKeysTableSql(url), CANONICAL_STATUS_CHECK);
       } finally {
         await repository.close();
       }
     } finally {
       await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rebuilds an intermediate status-only schema to the canonical constrained one", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-migration-intermediate-test-"),
+    );
+    const url = `file:${path.join(directory, "auth.db")}`;
+    try {
+      // Intermediate shape: status exists (unconstrained) but the
+      // request/pending columns never got added.
+      const seeded = createClient({ url });
+      await seeded.executeMultiple(`
+        ${LEGACY_USERS_TABLE}
+        CREATE TABLE api_keys (
+          id TEXT PRIMARY KEY NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+          key_prefix TEXT NOT NULL,
+          last_four TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          expires_at TEXT,
+          revoked_at TEXT,
+          status TEXT NOT NULL DEFAULT 'active'
+        );
+        INSERT INTO users VALUES ('mid-user', 'mid.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        INSERT INTO api_keys VALUES ('mid-key', 'mid-user', 'mid-cli', '${"b".repeat(64)}', 'fsk_mid00000', 'yyyy', '2026-01-02T03:04:05.000Z', NULL, NULL, NULL, 'active');
+      `);
+      seeded.close();
+
+      const repository = await AuthRepository.create(url);
+      try {
+        assert.match(await apiKeysTableSql(url), CANONICAL_STATUS_CHECK);
+        const listed = await repository.listApiKeys("mid-user");
+        assert.equal(listed.length, 1);
+        assert.equal(listed[0]?.status, "active");
+        assert.equal(listed[0]?.createdAt, "2026-01-02T03:04:05.000Z");
+        const begun = await repository.beginApiKeyCreation(
+          "mid-user",
+          "mid-pending",
+          "req-mid",
+        );
+        assert.equal(begun.status, "pending");
+      } finally {
+        await repository.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rebuilds the current unconstrained upgraded schema preserving rows, indexes, and FK behavior", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-migration-unconstrained-test-"),
+    );
+    const url = `file:${path.join(directory, "auth.db")}`;
+    try {
+      // The shape produced by the previous ALTER-based migration: all
+      // three columns exist but status carries no CHECK.
+      const seeded = createClient({ url });
+      await seeded.executeMultiple(`
+        ${LEGACY_USERS_TABLE}
+        CREATE TABLE api_keys (
+          id TEXT PRIMARY KEY NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+          key_prefix TEXT NOT NULL,
+          last_four TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          expires_at TEXT,
+          revoked_at TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          request_id TEXT,
+          pending_expires_at TEXT
+        );
+        CREATE INDEX api_keys_user_active_idx ON api_keys(user_id, revoked_at);
+        CREATE UNIQUE INDEX api_keys_request_idx ON api_keys(request_id) WHERE request_id IS NOT NULL;
+        INSERT INTO users VALUES ('up-user', 'up.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        INSERT INTO api_keys VALUES ('up-active', 'up-user', 'up-active-cli', '${"c".repeat(64)}', 'fsk_upact000', 'aaaa', '2026-02-01T00:00:00.000Z', '2026-02-02T00:00:00.000Z', NULL, NULL, 'active', NULL, NULL);
+        INSERT INTO api_keys VALUES ('up-revoked', 'up-user', 'up-revoked-cli', '${"d".repeat(64)}', 'fsk_uprev000', 'bbbb', '2026-02-03T00:00:00.000Z', NULL, NULL, '2026-02-04T00:00:00.000Z', 'active', NULL, NULL);
+        INSERT INTO api_keys VALUES ('up-pending', 'up-user', 'up-pending-ui', '${"e".repeat(64)}', 'fsk_uppen000', 'cccc', '2026-02-05T00:00:00.000Z', NULL, NULL, NULL, 'pending', 'req-up-pending', '2099-01-01T00:00:00.000Z');
+      `);
+      seeded.close();
+
+      const repository = await AuthRepository.create(url);
+      try {
+        assert.match(await apiKeysTableSql(url), CANONICAL_STATUS_CHECK);
+        // Every row survives with identical metadata.
+        const listed = await repository.listApiKeys("up-user");
+        assert.deepEqual(
+          listed.map((key) => [
+            key.id,
+            key.status,
+            key.createdAt,
+            key.lastUsedAt,
+            key.revokedAt,
+            key.pendingExpiresAt,
+          ]),
+          [
+            [
+              "up-active",
+              "active",
+              "2026-02-01T00:00:00.000Z",
+              "2026-02-02T00:00:00.000Z",
+              null,
+              null,
+            ],
+            [
+              "up-revoked",
+              "active",
+              "2026-02-03T00:00:00.000Z",
+              null,
+              "2026-02-04T00:00:00.000Z",
+              null,
+            ],
+            [
+              "up-pending",
+              "pending",
+              "2026-02-05T00:00:00.000Z",
+              null,
+              null,
+              "2099-01-01T00:00:00.000Z",
+            ],
+          ],
+        );
+        // Request-id reconciliation metadata survives the rebuild.
+        const reconciled = await repository.beginApiKeyCreation(
+          "up-user",
+          "up-pending-ui",
+          "req-up-pending",
+        );
+        assert.equal(reconciled.created, false);
+        assert.equal(reconciled.id, "up-pending");
+        assert.equal(reconciled.secret, null);
+      } finally {
+        await repository.close();
+      }
+
+      const probe = createClient({ url });
+      try {
+        await probe.execute("PRAGMA foreign_keys = ON");
+        // Both indexes (including the partial unique request index) exist.
+        const indexes = await probe.execute(
+          "SELECT name FROM sqlite_master WHERE type = 'index' AND tbl_name = 'api_keys'",
+        );
+        const names = new Set(
+          indexes.rows.map((row) =>
+            typeof row.name === "string" ? row.name : "",
+          ),
+        );
+        assert.equal(names.has("api_keys_user_active_idx"), true);
+        assert.equal(names.has("api_keys_request_idx"), true);
+        // The partial unique index still enforces request-id uniqueness…
+        await assert.rejects(
+          probe.execute(
+            `INSERT INTO api_keys (id, user_id, name, key_digest, key_prefix, last_four, created_at, status, request_id, pending_expires_at)
+             VALUES ('up-dup', 'up-user', 'dup', '${"f".repeat(64)}', 'fsk_updup000', 'dddd', '2026-02-06T00:00:00.000Z', 'pending', 'req-up-pending', '2099-01-01T00:00:00.000Z')`,
+          ),
+          /unique/iu,
+        );
+        // …the CHECK rejects invalid statuses…
+        await assert.rejects(
+          probe.execute(
+            `INSERT INTO api_keys (id, user_id, name, key_digest, key_prefix, last_four, created_at, status)
+             VALUES ('up-bad', 'up-user', 'bad', '${"a1".repeat(32)}', 'fsk_upbad000', 'eeee', '2026-02-06T00:00:00.000Z', 'revoked')`,
+          ),
+          /check/iu,
+        );
+        // …and ON DELETE CASCADE still applies to the rebuilt table.
+        await probe.execute("DELETE FROM users WHERE id = 'up-user'");
+        const remaining = await probe.execute(
+          "SELECT COUNT(*) AS count FROM api_keys",
+        );
+        assert.equal(Number(remaining.rows[0]?.count), 0);
+      } finally {
+        probe.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on invalid legacy status values without coercing them", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-migration-invalid-test-"),
+    );
+    const url = `file:${path.join(directory, "auth.db")}`;
+    try {
+      const seeded = createClient({ url });
+      await seeded.executeMultiple(`
+        ${LEGACY_USERS_TABLE}
+        CREATE TABLE api_keys (
+          id TEXT PRIMARY KEY NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+          key_prefix TEXT NOT NULL,
+          last_four TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          expires_at TEXT,
+          revoked_at TEXT,
+          status TEXT NOT NULL DEFAULT 'active',
+          request_id TEXT,
+          pending_expires_at TEXT
+        );
+        INSERT INTO users VALUES ('bad-user', 'bad.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        INSERT INTO api_keys VALUES ('bad-key', 'bad-user', 'bad-cli', '${"9".repeat(64)}', 'fsk_bad00000', 'ffff', '2026-01-01T00:00:00.000Z', NULL, NULL, NULL, 'revoked', NULL, NULL);
+      `);
+      seeded.close();
+
+      await assert.rejects(
+        AuthRepository.create(url),
+        (error) =>
+          error instanceof AppError && error.code === "invalid_api_key_status",
+      );
+
+      // Fail closed means untouched: the row keeps its original value and
+      // the table was not rebuilt or coerced.
+      const probe = createClient({ url });
+      try {
+        const row = await probe.execute(
+          "SELECT status FROM api_keys WHERE id = 'bad-key'",
+        );
+        assert.equal(row.rows[0]?.status, "revoked");
+        assert.doesNotMatch(await apiKeysTableSql(url), CANONICAL_STATUS_CHECK);
+      } finally {
+        probe.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("fails closed on a NULL legacy status without coercing it", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-migration-null-status-test-"),
+    );
+    const url = `file:${path.join(directory, "auth.db")}`;
+    try {
+      const seeded = createClient({ url });
+      await seeded.executeMultiple(`
+        ${LEGACY_USERS_TABLE}
+        CREATE TABLE api_keys (
+          id TEXT PRIMARY KEY NOT NULL,
+          user_id TEXT NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+          name TEXT NOT NULL,
+          key_digest TEXT NOT NULL UNIQUE CHECK(length(key_digest) = 64),
+          key_prefix TEXT NOT NULL,
+          last_four TEXT NOT NULL,
+          created_at TEXT NOT NULL,
+          last_used_at TEXT,
+          expires_at TEXT,
+          revoked_at TEXT,
+          status TEXT,
+          request_id TEXT,
+          pending_expires_at TEXT
+        );
+        INSERT INTO users VALUES ('null-user', 'null.user', 'x', 'member', 1, '2026-01-01T00:00:00.000Z', '2026-01-01T00:00:00.000Z');
+        INSERT INTO api_keys VALUES ('null-key', 'null-user', 'null-cli', '${"8".repeat(64)}', 'fsk_null0000', 'eeee', '2026-01-01T00:00:00.000Z', NULL, NULL, NULL, NULL, NULL, NULL);
+      `);
+      seeded.close();
+
+      await assert.rejects(
+        AuthRepository.create(url),
+        (error) =>
+          error instanceof AppError && error.code === "invalid_api_key_status",
+      );
+
+      const probe = createClient({ url });
+      try {
+        const row = await probe.execute(
+          "SELECT status FROM api_keys WHERE id = 'null-key'",
+        );
+        assert.equal(row.rows[0]?.status, null);
+        assert.doesNotMatch(await apiKeysTableSql(url), CANONICAL_STATUS_CHECK);
+      } finally {
+        probe.close();
+      }
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("is idempotent and safe under concurrent repository startup", async () => {
+    const root = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-migration-concurrent-test-"),
+    );
+    try {
+      for (let iteration = 0; iteration < 10; iteration += 1) {
+        const directory = path.join(root, String(iteration));
+        await mkdir(directory);
+        const url = `file:${path.join(directory, "auth.db")}`;
+        await seedLegacySchema(url);
+
+        const repositories = await Promise.all(
+          Array.from({ length: 4 }, () => AuthRepository.create(url)),
+        );
+        try {
+          assert.match(await apiKeysTableSql(url), CANONICAL_STATUS_CHECK);
+          const listed = await repositories[0]!.listApiKeys("legacy-user");
+          assert.equal(listed.length, 1);
+          assert.equal(listed[0]?.id, "legacy-key");
+          // A later open of the already-canonical database is a no-op.
+          const later = await AuthRepository.create(url);
+          await later.close();
+          assert.equal(
+            (await repositories[1]!.listApiKeys("legacy-user")).length,
+            1,
+          );
+        } finally {
+          await Promise.all(
+            repositories.map((repository) => repository.close()),
+          );
+        }
+      }
+    } finally {
+      await rm(root, { recursive: true, force: true });
     }
   });
 

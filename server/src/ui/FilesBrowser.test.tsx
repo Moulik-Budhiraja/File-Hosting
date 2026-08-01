@@ -228,6 +228,110 @@ test("the inspector shows the access record and saves visibility changes", async
   });
 });
 
+test("a committed visibility change whose response is lost reconciles against the file record", async () => {
+  window.history.replaceState(null, "", "/files");
+  const base = routes();
+  let patched = false;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (input === "/api/files/aB3dE9k" && method === "PATCH") {
+        // The change commits server-side; only the response is lost.
+        patched = true;
+        throw new TypeError("network response lost");
+      }
+      if (input === "/api/files/aB3dE9k" && method === "GET") {
+        return json(
+          200,
+          file({ visibility: patched ? "protected" : "private" }),
+        );
+      }
+      return base(input, init);
+    }),
+  );
+  renderFiles();
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: /telemetry-batch-0412\.parquet/,
+    }),
+  );
+  const inspector = await screen.findByRole("region", {
+    name: /object record · access/i,
+  });
+  await userEvent.click(
+    within(inspector).getByRole("button", { name: /Change…/ }),
+  );
+  const editor = await screen.findByRole("dialog", {
+    name: /Who can open this file\?/,
+  });
+  await userEvent.click(
+    within(editor).getByRole("radio", { name: /protected/ }),
+  );
+  await userEvent.click(within(editor).getByRole("button", { name: "Save" }));
+
+  // The desired state is present on the server: reconciled success — the
+  // dialog closes, the record shows it, and no absolute claim appears.
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(
+    await screen.findByText(/visibility confirmed after reconnect/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+  await waitFor(() =>
+    expect(within(inspector).getAllByText("protected").length).toBeGreaterThan(
+      0,
+    ),
+  );
+});
+
+test("an unverifiable visibility change reports an unknown outcome with retry", async () => {
+  window.history.replaceState(null, "", "/files");
+  const base = routes();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (input === "/api/files/aB3dE9k" && method === "PATCH") {
+        throw new TypeError("network down");
+      }
+      if (input === "/api/files/aB3dE9k" && method === "GET") {
+        // The authoritative record still shows the old state.
+        return json(200, file());
+      }
+      return base(input, init);
+    }),
+  );
+  renderFiles();
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: /telemetry-batch-0412\.parquet/,
+    }),
+  );
+  const inspector = await screen.findByRole("region", {
+    name: /object record · access/i,
+  });
+  await userEvent.click(
+    within(inspector).getByRole("button", { name: /Change…/ }),
+  );
+  const editor = await screen.findByRole("dialog", {
+    name: /Who can open this file\?/,
+  });
+  await userEvent.click(
+    within(editor).getByRole("radio", { name: /protected/ }),
+  );
+  await userEvent.click(within(editor).getByRole("button", { name: "Save" }));
+
+  expect(
+    await screen.findByText(/may or may not have been saved/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was changed/i)).toBeNull();
+  // The dialog stays open with an enabled Save for a safe retry.
+  expect(
+    (within(editor).getByRole("button", { name: "Save" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+
 test("members cannot change or delete files they do not own", async () => {
   vi.stubGlobal(
     "fetch",
@@ -288,6 +392,116 @@ test("deleting a managed file requires confirmation and reports the result", asy
       ),
     ).toBe(true);
   });
+});
+
+test("a committed delete whose response is lost reconciles when the record is gone", async () => {
+  window.history.replaceState(null, "", "/files");
+  const base = routes();
+  let deleted = false;
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (input === "/api/files/aB3dE9k" && method === "DELETE") {
+        deleted = true;
+        throw new TypeError("network response lost");
+      }
+      if (input === "/api/files/aB3dE9k" && method === "GET") {
+        return deleted
+          ? json(404, { error: { code: "not_found", message: "not found" } })
+          : json(200, file());
+      }
+      if (
+        (input.startsWith("/api/files?") || input === "/api/files") &&
+        deleted
+      ) {
+        return json(200, { items: [publicFile], next_cursor: null });
+      }
+      return base(input, init);
+    }),
+  );
+  renderFiles();
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: /telemetry-batch-0412\.parquet/,
+    }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete…" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: /Delete telemetry-batch-0412\.parquet\?/,
+  });
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Delete file" }),
+  );
+  // The authoritative record is gone: reconciled success — the dialog
+  // closes and no absolute "still stored" claim was made.
+  await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  expect(screen.queryByText(/still stored/i)).toBeNull();
+});
+
+test("an unverifiable delete reports an unknown outcome instead of claiming the file is still stored", async () => {
+  window.history.replaceState(null, "", "/files");
+  const base = routes();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (
+        input === "/api/files/aB3dE9k" &&
+        (method === "DELETE" || method === "GET")
+      ) {
+        throw new TypeError("network down");
+      }
+      return base(input, init);
+    }),
+  );
+  renderFiles();
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: /telemetry-batch-0412\.parquet/,
+    }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Delete…" }));
+  const dialog = await screen.findByRole("dialog", {
+    name: /Delete telemetry-batch-0412\.parquet\?/,
+  });
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Delete file" }),
+  );
+  expect(
+    await screen.findByText(/may or may not have been deleted/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/still stored/i)).toBeNull();
+});
+
+test("an upload network failure never claims nothing was stored", async () => {
+  window.history.replaceState(null, "", "/files");
+  const base = routes();
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string, init?: RequestInit): Promise<Response> => {
+      const method = init?.method ?? "GET";
+      if (input.startsWith("/api/files?") && method === "POST") {
+        throw new TypeError("network down");
+      }
+      return base(input, init);
+    }),
+  );
+  renderFiles();
+  await screen.findByRole("button", {
+    name: /telemetry-batch-0412\.parquet/,
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Upload" }));
+  const dialog = await screen.findByRole("dialog", { name: "Upload file" });
+  const chosen = new File(["synthetic"], "ambig-upload.bin");
+  await userEvent.upload(within(dialog).getByLabelText("File"), chosen);
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Upload file" }),
+  );
+  expect(
+    await screen.findByText(/may or may not have been stored/i),
+  ).toBeTruthy();
+  expect(screen.queryByText(/nothing was stored/i)).toBeNull();
 });
 
 test("load failures state the failing call and offer retry", async () => {
@@ -617,6 +831,34 @@ test("an invalid restored cursor degrades to the first page without loops", asyn
   expect(requests.length).toBe(2);
   expect(window.location.search).not.toContain("cursor=");
   window.history.replaceState(null, "", "/files");
+});
+
+test("a stale restored selection id is dropped from the URL after the lookup proves it missing", async () => {
+  window.history.replaceState(null, "", "/files?sel=defunct-id");
+  vi.stubGlobal("fetch", vi.fn(routes()));
+  renderFiles();
+  await screen.findByRole("button", {
+    name: /telemetry-batch-0412\.parquet/,
+  });
+  // Nothing is selected (no wrong record), and — like Keys — the stale
+  // sel value is actively removed from the query without a loop.
+  expect(screen.queryByRole("region", { name: /object record/i })).toBeNull();
+  await waitFor(() =>
+    expect(window.location.search).not.toContain("sel=defunct-id"),
+  );
+});
+
+test("a valid restored selection id keeps its selection and URL state", async () => {
+  window.history.replaceState(null, "", "/files?sel=aB3dE9k");
+  vi.stubGlobal("fetch", vi.fn(routes()));
+  renderFiles();
+  await screen.findByRole("button", {
+    name: /telemetry-batch-0412\.parquet/,
+  });
+  expect(
+    await screen.findByRole("region", { name: /object record/i }),
+  ).toBeTruthy();
+  expect(window.location.search).toContain("sel=aB3dE9k");
 });
 
 test("changing filters writes the task state into the URL", async () => {

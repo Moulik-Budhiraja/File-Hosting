@@ -5,6 +5,9 @@ import { useId, useRef, useState } from "react";
 import { apiFetch, isApiError } from "@/lib/api";
 import type { PublicUser } from "@/lib/types";
 
+// onSuccess may be invoked with no expiry when a lost login response is
+// reconciled through /api/auth/me (the expiry is not re-derivable there).
+
 export type LoginNotice = "session-expired" | "password-changed";
 
 interface LoginFormProps {
@@ -18,7 +21,12 @@ type LoginState =
   | { kind: "submitting" }
   | { kind: "invalid" }
   | { kind: "throttled"; edited: boolean }
-  | { kind: "server-error"; status: number };
+  | { kind: "server-error"; status: number }
+  // Transport failed and the authoritative /api/auth/me probe confirmed
+  // there is no session: not signed in (yet), retry freely.
+  | { kind: "not-signed-in" }
+  // Transport failed and the probe could not confirm either way.
+  | { kind: "unknown" };
 
 export function LoginForm({
   onSuccess,
@@ -57,14 +65,48 @@ export function LoginForm({
         setState({ kind: "invalid" });
         setPassword("");
         passwordRef.current?.focus();
+      } else if (isApiError(error)) {
+        // A delivered error status is definitive for the client: no
+        // session cookie was applied with it.
+        setState({ kind: "server-error", status: error.status });
+        setPassword("");
+        passwordRef.current?.focus();
       } else {
-        setState({
-          kind: "server-error",
-          status: isApiError(error) ? error.status : 0,
-        });
+        // A transport failure is ambiguous: the login may have committed
+        // with only the response lost (the session cookie can arrive even
+        // when the body does not). Ask the authoritative session endpoint
+        // instead of guessing.
+        setState(await reconcileAmbiguousLogin(username));
         setPassword("");
         passwordRef.current?.focus();
       }
+    }
+  }
+
+  // Returns the truthful state after an ambiguous login failure. When the
+  // server confirms a session for the intended user, sign-in completes
+  // through the normal success path (session signal + safe next
+  // navigation happen in onSuccess).
+  async function reconcileAmbiguousLogin(
+    intendedUsername: string,
+  ): Promise<LoginState> {
+    const intended = intendedUsername.trim().toLocaleLowerCase("en-US");
+    try {
+      const me = await apiFetch<{ user: PublicUser | null }>("/api/auth/me", {
+        skipUnauthorizedHandler: true,
+      });
+      if (me.user?.username.toLocaleLowerCase("en-US") === intended) {
+        onSuccess(me.user, undefined);
+        return { kind: "idle" };
+      }
+      // A session for a different identity (or a legacy credential) is
+      // not the sign-in the user asked for.
+      return me.user ? { kind: "unknown" } : { kind: "not-signed-in" };
+    } catch (error) {
+      if (isApiError(error) && error.status === 401) {
+        return { kind: "not-signed-in" };
+      }
+      return { kind: "unknown" };
     }
   }
 
@@ -139,7 +181,19 @@ export function LoginForm({
         {state.kind === "server-error" ? (
           <p className="field-error">
             The server couldn&apos;t sign you in ({state.status || "network"}).
-            Nothing was changed. Try again.
+            Try again.
+          </p>
+        ) : null}
+        {state.kind === "not-signed-in" ? (
+          <p className="field-error">
+            Sign-in didn&apos;t complete — you&apos;re not signed in. Check your
+            connection and try again.
+          </p>
+        ) : null}
+        {state.kind === "unknown" ? (
+          <p className="field-error">
+            We couldn&apos;t confirm whether sign-in completed — the server
+            didn&apos;t respond. Check your connection and try again.
           </p>
         ) : null}
       </div>
