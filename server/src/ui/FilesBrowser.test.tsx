@@ -977,6 +977,38 @@ test("members default to Mine with the owner filter applied server-side", async 
   window.history.replaceState(null, "", "/files");
 });
 
+test("a member's non-default Everyone scope persists into the URL; role defaults are never written", async () => {
+  window.history.replaceState(null, "", "/files");
+  vi.stubGlobal("fetch", vi.fn(routes({ viewer: member })));
+  const firstMount = renderFiles();
+  await screen.findByRole("button", { name: /telemetry/ });
+  // The role-relative default (member Mine) stays out of the URL, so a
+  // cross-account scrub is never undone by a default write.
+  expect(window.location.search).not.toContain("scope=");
+
+  // The non-default choice must survive a reload, so it goes in the URL.
+  await userEvent.click(screen.getByRole("button", { name: "Everyone" }));
+  await waitFor(() =>
+    expect(window.location.search).toContain("scope=everyone"),
+  );
+
+  // A real remount (the unit equivalent of reload) restores Everyone from
+  // the persisted URL rather than falling back to the member Mine default.
+  firstMount.unmount();
+  renderFiles();
+  await screen.findByRole("button", { name: /telemetry/ });
+  expect(
+    screen
+      .getByRole("button", { name: "Everyone" })
+      .getAttribute("aria-pressed"),
+  ).toBe("true");
+
+  // Returning to the default removes the parameter again.
+  await userEvent.click(screen.getByRole("button", { name: "Mine" }));
+  await waitFor(() => expect(window.location.search).not.toContain("scope="));
+  window.history.replaceState(null, "", "/files");
+});
+
 test("members see a neutral owner label instead of a UUID stub", async () => {
   window.history.replaceState(null, "", "/files?scope=everyone");
   vi.stubGlobal(

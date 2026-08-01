@@ -190,6 +190,47 @@ test("an unreachable server yields a truthful unknown outcome, never an absolute
   ).toBe(false);
 });
 
+test("a delivered reconciliation error says the server errored, never that it didn't respond", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      if (input === "/api/auth/login") throw new TypeError("network drop");
+      if (input === "/api/auth/me") {
+        // The probe response WAS delivered — it was a server failure.
+        return jsonResponse(500, {
+          error: {
+            code: "internal_error",
+            message: "An internal server error occurred",
+          },
+        });
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  const onSuccess = vi.fn();
+  render(<LoginForm onSuccess={onSuccess} />);
+
+  await userEvent.type(screen.getByLabelText("Username"), "ops-admin");
+  await userEvent.type(screen.getByLabelText("Password"), "correct horse batt");
+  await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
+
+  expect(onSuccess).not.toHaveBeenCalled();
+  // The outcome is still unknown and retry stays safe…
+  expect(
+    screen.getByText(/couldn't confirm whether sign-in completed/i),
+  ).toBeTruthy();
+  // …but the causal clause must be truthful: the server answered.
+  expect(screen.getByText(/server returned an error/i)).toBeTruthy();
+  expect(screen.queryByText(/server didn't respond/i)).toBeNull();
+  const password = screen.getByLabelText("Password") as HTMLInputElement;
+  expect(password.value).toBe("");
+  expect(document.activeElement).toBe(password);
+  expect(
+    (screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
+});
+
 test("a lost response with no committed session reports not signed in and offers retry", async () => {
   vi.stubGlobal(
     "fetch",

@@ -27,8 +27,10 @@ type LoginState =
   | { kind: "not-signed-in" }
   // The probe responded definitively with another cookie-backed identity.
   | { kind: "different-session"; username: string }
-  // Transport failed and the probe could not confirm either way.
-  | { kind: "unknown" };
+  // Transport failed and the probe could not confirm either way. The
+  // cause keeps the copy truthful: a delivered non-401 probe error means
+  // the server answered; only a dead transport means it didn't respond.
+  | { kind: "unknown"; cause: "server-error" | "unreachable" };
 
 export function LoginForm({
   onSuccess,
@@ -110,7 +112,10 @@ export function LoginForm({
       if (isApiError(error) && error.status === 401) {
         return { kind: "not-signed-in" };
       }
-      return { kind: "unknown" };
+      return {
+        kind: "unknown",
+        cause: isApiError(error) ? "server-error" : "unreachable",
+      };
     }
   }
 
@@ -203,8 +208,9 @@ export function LoginForm({
         ) : null}
         {state.kind === "unknown" ? (
           <p className="field-error">
-            We couldn&apos;t confirm whether sign-in completed — the server
-            didn&apos;t respond. Check your connection and try again.
+            {state.cause === "server-error"
+              ? "We couldn't confirm whether sign-in completed — the server returned an error. Try again."
+              : "We couldn't confirm whether sign-in completed — the server didn't respond. Check your connection and try again."}
           </p>
         ) : null}
       </div>

@@ -85,7 +85,15 @@ test("a committed create with a lost response surfaces a truthful pending outcom
     await route.continue();
   });
 
-  await page.getByRole("button", { name: "New key" }).click();
+  // Settle on the loaded empty state first: the toolbar AND empty-state
+  // "New key" actions are then both visible, deterministically, instead of
+  // racing page load (the historic strict-locator flake). The click
+  // targets the toolbar action explicitly.
+  await expect(page.getByText("No API keys yet")).toBeVisible();
+  await page
+    .locator(".toolbar")
+    .getByRole("button", { name: "New key" })
+    .click();
   await page
     .getByLabel(/Name — where will this key live\?/)
     .fill("lost-create-key");
@@ -154,7 +162,14 @@ test("a lost activation response reconciles idempotently and the key works exact
     await route.continue();
   });
 
-  await page.getByRole("button", { name: "New key" }).click();
+  // Same deterministic starting point as the lost-create case: both
+  // identically named "New key" actions are visible before the toolbar
+  // action is clicked explicitly.
+  await expect(page.getByText("No API keys yet")).toBeVisible();
+  await page
+    .locator(".toolbar")
+    .getByRole("button", { name: "New key" })
+    .click();
   await page
     .getByLabel(/Name — where will this key live\?/)
     .fill("lost-activate-key");

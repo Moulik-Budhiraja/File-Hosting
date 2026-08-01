@@ -147,10 +147,13 @@ export function FilesBrowser() {
     };
     setOrDelete("q", query || null);
     setOrDelete("visibility", visibility === "all" ? null : visibility);
-    // Only persist a non-default admin scope. Members are always scoped to
-    // their own files, so writing `scope=mine` would recreate a scrubbed old
-    // account parameter after an identity replacement.
-    setOrDelete("scope", isAdmin && scope === "mine" ? "mine" : null);
+    // Only persist the role-relative non-default scope (admin Mine, member
+    // Everyone). The default is omitted so a fresh post-scrub mount never
+    // recreates a scrubbed old-account parameter with a default write.
+    setOrDelete(
+      "scope",
+      scope === (isAdmin ? "everyone" : "mine") ? null : scope,
+    );
     setOrDelete("cursor", cursor);
     setOrDelete("prev", encodePrevCursors(prevCursors));
     setOrDelete("sel", selectedId);
