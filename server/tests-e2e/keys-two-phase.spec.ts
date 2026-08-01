@@ -85,18 +85,10 @@ test("a committed create with a lost response surfaces a truthful pending outcom
     await route.continue();
   });
 
-  // Settle on the loaded empty state first: the toolbar AND empty-state
-  // "New key" actions are then both visible, deterministically, instead of
-  // racing page load (the historic strict-locator flake). The click
-  // targets the toolbar action explicitly.
-  await expect(page.getByText("No API keys yet")).toBeVisible();
-  await page
-    .locator(".toolbar")
-    .getByRole("button", { name: "New key" })
-    .click();
-  await page
-    .getByLabel(/Name — where will this key live\?/)
-    .fill("lost-create-key");
+  // Wait for the successful empty response before opening the create dialog.
+  await expect(page.getByText("No API keys")).toBeVisible();
+  await page.getByRole("button", { name: "New key" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("lost-create-key");
   await page.getByRole("button", { name: "Create key" }).click();
 
   // Truthful reconcile: the key exists as pending; the secret is gone;
@@ -133,7 +125,9 @@ test("a committed create with a lost response surfaces a truthful pending outcom
   ).toBeVisible();
   await expect(page.getByText(/pending · never authenticates/)).toBeVisible();
   await page.getByRole("button", { name: "Cancel lost-create-key" }).click();
-  await expect(page.getByText(/never activated/i)).toBeVisible();
+  await expect(
+    page.getByText(/inactive.*cancelling removes it/i),
+  ).toBeVisible();
   await page.getByRole("button", { name: "Cancel key" }).click();
   await expect(
     page.getByRole("cell", { name: "lost-create-key", exact: true }),
@@ -162,21 +156,16 @@ test("a lost activation response reconciles idempotently and the key works exact
     await route.continue();
   });
 
-  // Same deterministic starting point as the lost-create case: both
-  // identically named "New key" actions are visible before the toolbar
-  // action is clicked explicitly.
-  await expect(page.getByText("No API keys yet")).toBeVisible();
-  await page
-    .locator(".toolbar")
-    .getByRole("button", { name: "New key" })
-    .click();
-  await page
-    .getByLabel(/Name — where will this key live\?/)
-    .fill("lost-activate-key");
+  // Wait for the successful empty response before opening the create dialog.
+  await expect(page.getByText("No API keys")).toBeVisible();
+  await page.getByRole("button", { name: "New key" }).click();
+  await page.getByLabel("Name", { exact: true }).fill("lost-activate-key");
   await page.getByRole("button", { name: "Create key" }).click();
 
-  // The secret arrived; the dialog is truthful about activation state.
-  await expect(page.getByText("SHOWN ONLY ONCE")).toBeVisible();
+  // The secret arrived with one warning at the decision point.
+  await expect(
+    page.getByText("Copy this key now. It won't be shown again."),
+  ).toBeVisible();
   const secret = (await page.locator(".secret-value").innerText()).trim();
   expect(secret).toMatch(/^fsk_/);
   await expect(page.getByText(/may not be active/i)).toBeVisible();

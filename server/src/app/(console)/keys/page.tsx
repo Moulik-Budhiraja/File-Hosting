@@ -5,11 +5,7 @@ import { ConsolePage } from "@/ui/ConsoleShell";
 
 export default function KeysPage() {
   return (
-    <ConsolePage
-      active="keys"
-      title="API Keys"
-      subtitle="secrets shown once at creation, never retrievable"
-    >
+    <ConsolePage active="keys" title="API Keys">
       <ApiKeysView />
     </ConsolePage>
   );

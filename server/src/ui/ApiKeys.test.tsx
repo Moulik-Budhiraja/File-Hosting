@@ -134,17 +134,18 @@ test("lists key metadata only — masked prefix and tail, explicit status words"
   expect(revokeButtons).toHaveLength(1);
 });
 
-test("empty state explains what keys are for", async () => {
+test("empty state has one terse status and one New key action", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(memberRoutes({ keys: () => json(200, { api_keys: [] }) })),
   );
   renderKeys();
-  expect(await screen.findByText("No API keys yet")).toBeTruthy();
-  expect(screen.getByText(/fs auth set/)).toBeTruthy();
+  expect(await screen.findByText("No API keys")).toBeTruthy();
+  expect(screen.getAllByRole("button", { name: "New key" })).toHaveLength(1);
+  expect(screen.queryByText(/Keys let the fs CLI act as you/)).toBeNull();
 });
 
-test("load failure names the call, states nothing changed, and Retry refetches", async () => {
+test("load failure reports status and Retry refetches", async () => {
   let failures = 1;
   vi.stubGlobal(
     "fetch",
@@ -163,8 +164,8 @@ test("load failure names the call, states nothing changed, and Retry refetches",
     ),
   );
   renderKeys();
-  expect(await screen.findByText("Couldn't load keys")).toBeTruthy();
-  expect(screen.getByText(/GET \/api\/api-keys → 500/)).toBeTruthy();
+  expect(await screen.findByText("Couldn't load keys (500)")).toBeTruthy();
+  expect(screen.queryByText(/GET \/api\/api-keys/)).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(
     await screen.findByRole("cell", { name: "ingest-pipeline" }),
@@ -179,14 +180,17 @@ test("create shows the secret exactly once behind an explicit acknowledgement", 
   await screen.findByRole("cell", { name: "ingest-pipeline" });
 
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "laptop-mbp",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "laptop-mbp");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
 
   expect(await screen.findByText("fsk_TESTSECRET-not-a-real-key")).toBeTruthy();
-  expect(screen.getByText(/only time the full key is shown/i)).toBeTruthy();
+  expect(
+    screen.getByText("Copy this key now. It won't be shown again."),
+  ).toBeTruthy();
+  expect(screen.getAllByText(/won't be shown again/i)).toHaveLength(1);
+  expect(
+    screen.getByRole("checkbox", { name: "I've stored this key" }),
+  ).toBeTruthy();
 
   const done = screen.getByRole("button", {
     name: "Done",
@@ -198,9 +202,7 @@ test("create shows the secret exactly once behind an explicit acknowledgement", 
   expect(await screen.findByText("copied ✓")).toBeTruthy();
 
   await userEvent.click(
-    screen.getByRole("checkbox", {
-      name: /I've stored this key — it won't be shown again\./,
-    }),
+    screen.getByRole("checkbox", { name: "I've stored this key" }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Done" }));
 
@@ -214,10 +216,7 @@ test("closing the secret dialog without acknowledging warns first", async () => 
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "laptop-mbp",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "laptop-mbp");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   await screen.findByText("fsk_TESTSECRET-not-a-real-key");
 
@@ -263,10 +262,7 @@ test("browser creation is two-phase: request id, then activation after the secre
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "laptop-mbp",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "laptop-mbp");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   await screen.findByText("fsk_TESTSECRET-not-a-real-key");
   // Phase 1 carried an idempotency request id…
@@ -316,10 +312,7 @@ test("a lost create response reconciles truthfully — never a false 'nothing ch
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "lost-key",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "lost-key");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
 
   // Both attempts shared one request id.
@@ -347,10 +340,7 @@ test("a fully lost create (retry also fails) reports an unknown outcome honestly
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "unknown-key",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "unknown-key");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   const message = await screen.findByText(/may not have reached the server/i);
   expect(message.textContent).toMatch(/pending/i);
@@ -386,10 +376,7 @@ test("a lost activation response is retried idempotently from the secret dialog"
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "laptop-mbp",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "laptop-mbp");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   await screen.findByText("fsk_TESTSECRET-not-a-real-key");
   // Truthful: the key is not active yet.
@@ -436,9 +423,10 @@ test("pending keys list truthfully and can be cancelled", async () => {
   // Truthful status wording — a pending key is not an active credential.
   expect(screen.getAllByText(/pending/i).length).toBeGreaterThan(0);
   await userEvent.click(screen.getByRole("button", { name: /^Cancel/ }));
-  // Confirmation dialog explains the never-active invariant.
+  // Confirmation dialog explains the inactive state and removal consequence.
   const dialog = await screen.findByRole("dialog");
-  expect(dialog.textContent).toMatch(/never activated/i);
+  expect(dialog.textContent).toMatch(/inactive/i);
+  expect(dialog.textContent).toMatch(/cancelling removes it/i);
   await userEvent.click(screen.getByRole("button", { name: "Cancel key" }));
   await waitFor(() =>
     expect(screen.queryByRole("cell", { name: "half-created" })).toBeNull(),
@@ -450,9 +438,7 @@ test("key-name errors are programmatically associated with the field and refocus
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  const input = screen.getByLabelText(
-    /Name — where will this key live\?/,
-  ) as HTMLInputElement;
+  const input = screen.getByLabelText("Name") as HTMLInputElement;
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   const error = await screen.findByText(
     "Name the machine or job this key is for.",
@@ -486,7 +472,8 @@ test("revoking asks for confirmation that names the key before deleting", async 
   expect(
     await screen.findByRole("dialog", { name: "Revoke ingest-pipeline?" }),
   ).toBeTruthy();
-  expect(screen.getByText(/exit 3/)).toBeTruthy();
+  expect(screen.getByText(/stops working immediately/i)).toBeTruthy();
+  expect(screen.getByText(/cannot be undone/i)).toBeTruthy();
   expect(deletions).toEqual([]);
 
   await userEvent.click(screen.getByRole("button", { name: "Revoke key" }));
@@ -531,8 +518,7 @@ test("admins load one paginated aggregate request with owner identity — no N+1
   ).toBeTruthy();
   expect(screen.getByText("Owner")).toBeTruthy();
   expect(screen.getAllByText("sam-ops").length).toBeGreaterThan(0);
-  expect(screen.getByText("Legacy service token")).toBeTruthy();
-  expect(screen.getByText(/never shown/i)).toBeTruthy();
+  expect(screen.queryByText("Legacy service token")).toBeNull();
   // Exactly one aggregate request; never /api/users plus per-user calls.
   expect(requests).toHaveLength(1);
   expect(requests[0]).toContain("scope=all");
@@ -889,10 +875,7 @@ test("the show-once flow persists only the safe pending id — never the secret"
   renderKeys();
   await screen.findByRole("cell", { name: "ingest-pipeline" });
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
-  await userEvent.type(
-    screen.getByLabelText(/Name — where will this key live\?/),
-    "laptop-mbp",
-  );
+  await userEvent.type(screen.getByLabelText("Name"), "laptop-mbp");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
   await screen.findByText("fsk_TESTSECRET-not-a-real-key");
   await screen.findByText(/may not be active/i);

@@ -207,14 +207,6 @@ export function FilesBrowser() {
     setPrevCursors([]);
   }
 
-  function whoSeesIt(file: FileMetadata): string {
-    if (file.visibility === "public") return "anyone with the link";
-    if (file.visibility === "protected") {
-      return "every signed-in member and admin";
-    }
-    return `${ownerLabel(file)} + admins · others: 404`;
-  }
-
   async function submitUpload(event: React.FormEvent) {
     event.preventDefault();
     if (busy) return;
@@ -456,9 +448,8 @@ export function FilesBrowser() {
 
       {state.kind === "error" ? (
         <div className="table-fallback" role="alert">
-          <p className="error-title">Couldn&apos;t load files</p>
-          <p className="muted">
-            GET /api/files → {state.status || "network"} · nothing was changed
+          <p className="error-title">
+            Couldn&apos;t load files ({state.status || "network"})
           </p>
           <button type="button" className="button" onClick={() => void load()}>
             Retry
@@ -468,11 +459,7 @@ export function FilesBrowser() {
 
       {state.kind === "ready" && items.length === 0 ? (
         <div className="table-fallback">
-          <p className="empty-title">No files here yet</p>
-          <p className="muted">
-            Upload from this page or with the fs CLI (fs up). Filters may also
-            be hiding everything.
-          </p>
+          <p className="empty-title">No files</p>
         </div>
       ) : null}
 
@@ -545,10 +532,7 @@ export function FilesBrowser() {
             </tbody>
           </table>
           <div className="table-footline table-footline-split">
-            <span>
-              {items.length} rows loaded
-              {scope === "mine" ? " · owned by you (server-filtered)" : ""}
-            </span>
+            <span>{items.length} rows</span>
             <span className="pager">
               <button
                 type="button"
@@ -585,15 +569,14 @@ export function FilesBrowser() {
           aria-label="Object record · access"
         >
           <div className="detail-facts">
-            <h2 className="detail-title">
-              {selected.name}{" "}
-              <span className="muted cell-mono">GET /{selected.id}</span>
-            </h2>
+            <h2 className="detail-title">{selected.name}</h2>
             <dl className="fact-list">
-              <div className="fact-row">
-                <dt>owner</dt>
-                <dd>{ownerLabel(selected)}</dd>
-              </div>
+              {selected.owner_id ? (
+                <div className="fact-row">
+                  <dt>owner</dt>
+                  <dd>{ownerLabel(selected)}</dd>
+                </div>
+              ) : null}
               <div className="fact-row">
                 <dt>visibility</dt>
                 <dd>
@@ -612,10 +595,6 @@ export function FilesBrowser() {
                     </button>
                   ) : null}
                 </dd>
-              </div>
-              <div className="fact-row">
-                <dt>who sees it</dt>
-                <dd>{whoSeesIt(selected)}</dd>
               </div>
               <div className="fact-row">
                 <dt>size · type</dt>
@@ -641,11 +620,6 @@ export function FilesBrowser() {
                 <dd>{formatDateTime(selected.created_at)}</dd>
               </div>
             </dl>
-            {!canManageSelected ? (
-              <p className="muted">
-                This file is managed by its owner and admins.
-              </p>
-            ) : null}
           </div>
           {canManageSelected ? (
             <div className="detail-actions">
@@ -703,7 +677,6 @@ export function FilesBrowser() {
                 value={uploadName}
                 onChange={(event) => setUploadName(event.target.value)}
               />
-              <p className="field-hint">defaults to the chosen file name</p>
             </div>
             <VisibilitySelector
               value={uploadVisibility}
@@ -781,8 +754,8 @@ export function FilesBrowser() {
           onClose={() => setDeleteOpen(false)}
         >
           <p>
-            The file and its stored bytes are removed immediately. Existing
-            links stop working. This cannot be undone.
+            The file is removed immediately. Existing links stop working. This
+            cannot be undone.
           </p>
           {deleteError ? (
             <p className="field-error" role="alert">

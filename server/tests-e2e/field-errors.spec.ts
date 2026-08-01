@@ -29,7 +29,7 @@ test("New API Key validation errors are associated with the name field", async (
   await signInContext(context, baseURL!, ADMIN.username, ADMIN.password);
   await page.goto("/keys");
   await page.getByRole("button", { name: "New key" }).first().click();
-  const input = page.getByLabel(/Name — where will this key live\?/);
+  const input = page.getByLabel("Name", { exact: true });
   await page.getByRole("button", { name: "Create key" }).click();
   await expectFieldError(
     page,

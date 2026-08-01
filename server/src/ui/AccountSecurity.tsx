@@ -225,8 +225,7 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
               </p>
             ) : (
               <p className="field-hint">
-                min 12 characters · max 72 UTF-8 bytes · stored as salted bcrypt
-                hash
+                min 12 characters · max 72 UTF-8 bytes
               </p>
             )}
           </div>
@@ -258,8 +257,7 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
             {state.kind === "submitting" ? "Changing…" : "Change password"}
           </button>
           <p className="form-footnote">
-            changing your password signs out every session for this account ·
-            API keys keep working
+            changing your password signs out every session for this account
           </p>
         </form>
       </section>
@@ -277,17 +275,6 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
           <div className="fact-row">
             <dt>account created</dt>
             <dd>{formatDate(user.created_at)}</dd>
-          </div>
-          <div className="fact-row">
-            <dt>session</dt>
-            <dd>cookie httpOnly · expires 7 days after sign-in</dd>
-          </div>
-          <div className="fact-row">
-            <dt>cli</dt>
-            <dd>
-              uses API keys, not this session →{" "}
-              <Link href="/keys">API Keys</Link>
-            </dd>
           </div>
         </dl>
         <div aria-live="polite">

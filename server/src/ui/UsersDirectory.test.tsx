@@ -118,11 +118,7 @@ test("directory lists accounts with explicit words, counts, and a you marker", a
   expect(
     await screen.findByRole("button", { name: /ops-admin ?· you/ }),
   ).toBeTruthy();
-  expect(
-    screen.getByText(
-      "3 accounts · 2 active · 1 admin · bcrypt password storage",
-    ),
-  ).toBeTruthy();
+  expect(screen.getByText("3 accounts · 2 active · 1 admin")).toBeTruthy();
   const disabledRow = screen
     .getByRole("button", { name: "intern-2025" })
     .closest("tr")!;
@@ -594,7 +590,7 @@ test("an unverifiable status change says the outcome is unknown and offers retry
   ).toBe(false);
 });
 
-test("load failures offer retry without pretending anything changed", async () => {
+test("load failures report status and offer retry", async () => {
   let failures = 1;
   vi.stubGlobal(
     "fetch",
@@ -613,7 +609,8 @@ test("load failures offer retry without pretending anything changed", async () =
     ),
   );
   renderDirectory();
-  expect(await screen.findByText("Couldn't load users")).toBeTruthy();
+  expect(await screen.findByText("Couldn't load users (500)")).toBeTruthy();
+  expect(screen.queryByText(/GET \/api\/users/)).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(await screen.findByRole("button", { name: "sam-ops" })).toBeTruthy();
 });

@@ -10,7 +10,6 @@ interface SecretOnceDialogProps {
   intro: string;
   secret: string;
   acknowledgement: string;
-  footnote?: string;
   onDone: () => void;
 }
 
@@ -22,7 +21,6 @@ export function SecretOnceDialog({
   intro,
   secret,
   acknowledgement,
-  footnote,
   onDone,
 }: SecretOnceDialogProps) {
   const [acked, setAcked] = useState(false);
@@ -81,7 +79,6 @@ export function SecretOnceDialog({
         />
         {acknowledgement}
       </label>
-      {footnote ? <p className="form-footnote">{footnote}</p> : null}
       {closeWarned && !acked ? (
         <p className="field-error" role="alert">
           You haven&apos;t confirmed you stored this value. Tick the box and

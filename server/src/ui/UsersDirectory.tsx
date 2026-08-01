@@ -9,8 +9,6 @@ import {
   useState,
 } from "react";
 
-import Link from "next/link";
-
 import { apiFetch, isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
 import { useLatest } from "@/lib/use-latest";
@@ -315,8 +313,7 @@ export function UsersDirectory() {
     <section aria-label="User directory">
       <p className="page-statline">
         {users.length} accounts · {users.filter((user) => user.active).length}{" "}
-        active · {users.filter((user) => user.role === "admin").length} admin ·
-        bcrypt password storage
+        active · {users.filter((user) => user.role === "admin").length} admin
       </p>
       {reconcileNotice ? (
         <p className="notice notice-success" role="status">
@@ -367,9 +364,6 @@ export function UsersDirectory() {
             </button>
           ))}
         </div>
-        <span className="toolbar-note">
-          sessions expire 7 days after sign-in
-        </span>
         <button
           type="button"
           className="button button-primary"
@@ -395,9 +389,8 @@ export function UsersDirectory() {
 
       {state.kind === "error" ? (
         <div className="table-fallback" role="alert">
-          <p className="error-title">Couldn&apos;t load users</p>
-          <p className="muted">
-            GET /api/users → {state.status || "network"} · nothing was changed
+          <p className="error-title">
+            Couldn&apos;t load users ({state.status || "network"})
           </p>
           <button type="button" className="button" onClick={() => void load()}>
             Retry
@@ -543,9 +536,6 @@ export function UsersDirectory() {
               ) : null}
             </tbody>
           </table>
-          <p className="table-footline">
-            rows 1–{visible.length} of {users.length} · all accounts loaded
-          </p>
         </>
       ) : null}
 
@@ -555,10 +545,7 @@ export function UsersDirectory() {
             className="detail-facts"
             aria-label={`${selected.username} detail`}
           >
-            <h2 className="detail-title">
-              {selected.username}{" "}
-              <span className="muted">users / {selected.username}</span>
-            </h2>
+            <h2 className="detail-title">{selected.username}</h2>
             <dl className="fact-list">
               <div className="fact-row">
                 <dt>role</dt>
@@ -572,28 +559,12 @@ export function UsersDirectory() {
                 </dd>
               </div>
               <div className="fact-row">
-                <dt>password</dt>
-                <dd>bcrypt hash set · never displayed</dd>
-              </div>
-              <div className="fact-row">
                 <dt>created</dt>
                 <dd>{formatDate(selected.created_at)}</dd>
               </div>
               <div className="fact-row">
                 <dt>updated</dt>
                 <dd>{formatDate(selected.updated_at)}</dd>
-              </div>
-              <div className="fact-row">
-                <dt>api keys</dt>
-                <dd>
-                  <Link href="/keys">open in API Keys →</Link>
-                </dd>
-              </div>
-              <div className="fact-row">
-                <dt>files</dt>
-                <dd>
-                  <Link href="/files">open in Files →</Link>
-                </dd>
               </div>
             </dl>
           </section>
@@ -646,10 +617,6 @@ export function UsersDirectory() {
                 Enable account…
               </button>
             )}
-            <p className="muted">
-              every action here opens an explicit confirmation · nothing fires
-              on first click
-            </p>
           </section>
         </div>
       ) : null}
@@ -713,10 +680,6 @@ export function UsersDirectory() {
                 Admin — full control of files, users and keys
               </label>
             </fieldset>
-            <p className="muted">
-              A one-time temporary password is generated on create and shown
-              exactly once. Share it over a secure channel.
-            </p>
             <div className="dialog-actions">
               <button
                 type="button"
@@ -899,20 +862,15 @@ export function UsersDirectory() {
         >
           {confirm.nextRole === "admin" ? (
             <p>
-              Admins have full control: every file, every user, every API key,
-              and the legacy service token status.
+              Admins have full control of every file, every user, and every API
+              key.
             </p>
           ) : (
             <p>
               {confirm.user.username} will manage only their own files, API
-              keys, and password. Admin surfaces disappear on their next
-              request.
+              keys, and password.
             </p>
           )}
-          <p className="muted">
-            {confirm.user.role} → {confirm.nextRole} · takes effect on next
-            request
-          </p>
           {confirmError ? (
             <p className="field-error" role="alert">
               {confirmError}
@@ -1025,12 +983,7 @@ export function UsersDirectory() {
           tag={secret.kind === "created" ? "CREATED" : "RESET"}
           intro="Temporary password — shown only this once. Share it over a secure channel."
           secret={secret.password}
-          acknowledgement="I've shared or stored this password — it won't be shown again."
-          footnote={
-            secret.kind === "created"
-              ? "no email flow — this server has usernames only; the admin hands the password over"
-              : "their old password and sessions stopped working the moment you confirmed"
-          }
+          acknowledgement="I've shared or stored this password."
           onDone={() => setSecret(null)}
         />
       ) : null}

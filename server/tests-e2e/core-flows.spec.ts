@@ -39,10 +39,10 @@ test("key create shows the secret once; revoked rows survive the next creation",
 
   // Create a key through the real UI.
   await page.getByRole("button", { name: "New key" }).first().click();
-  await page.getByLabel(/where will this key live/i).fill("flow-key-a");
+  await page.getByLabel("Name", { exact: true }).fill("flow-key-a");
   await page.getByRole("button", { name: "Create key" }).click();
   await expect(
-    page.getByText(/only time the full key is shown/i),
+    page.getByText("Copy this key now. It won't be shown again."),
   ).toBeVisible();
   const secretText = await page.locator(".secret-value").innerText();
   expect(secretText).toMatch(/^fsk_/);
@@ -60,7 +60,7 @@ test("key create shows the secret once; revoked rows survive the next creation",
   await expect(page.getByText(/revoked · /).first()).toBeVisible();
 
   await page.getByRole("button", { name: "New key" }).first().click();
-  await page.getByLabel(/where will this key live/i).fill("flow-key-b");
+  await page.getByLabel("Name", { exact: true }).fill("flow-key-b");
   await page.getByRole("button", { name: "Create key" }).click();
   await page.getByRole("checkbox", { name: /I've stored this key/ }).check();
   await page.getByRole("button", { name: "Done" }).click();

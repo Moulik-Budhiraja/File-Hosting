@@ -66,9 +66,7 @@ test("a same-role member login in tab B discards tab A's open show-once API key 
   await uiLogin(page, memberA.username, memberA.password);
   await page.goto("/keys");
   await page.getByRole("button", { name: "New key" }).first().click();
-  await page
-    .getByLabel(/Name — where will this key live\?/)
-    .fill("keyswap-once");
+  await page.getByLabel("Name", { exact: true }).fill("keyswap-once");
   await page.getByRole("button", { name: "Create key" }).click();
   await expect(page.getByRole("dialog")).toBeVisible();
   const secret = (await page.locator(".secret-value").innerText()).trim();

@@ -195,7 +195,7 @@ test("upload posts the file with the chosen visibility explained in plain langua
   });
 });
 
-test("the inspector shows the access record and saves visibility changes", async () => {
+test("the inspector shows useful access facts and saves visibility changes", async () => {
   const record: Recorded[] = [];
   vi.stubGlobal("fetch", vi.fn(routes({ record })));
   renderFiles();
@@ -209,6 +209,7 @@ test("the inspector shows the access record and saves visibility changes", async
   });
   expect(within(inspector).getByText("sam-ops")).toBeTruthy();
   expect(within(inspector).getAllByText("private").length).toBeGreaterThan(0);
+  expect(within(inspector).queryByText("who sees it")).toBeNull();
 
   await userEvent.click(
     within(inspector).getByRole("button", { name: /Change…/ }),
@@ -358,8 +359,44 @@ test("members cannot change or delete files they do not own", async () => {
     within(inspector).queryByRole("button", { name: /Delete/ }),
   ).toBeNull();
   expect(
-    within(inspector).getByText(/managed by its owner and admins/i),
-  ).toBeTruthy();
+    within(inspector).queryByText(/managed by its owner and admins/i),
+  ).toBeNull();
+});
+
+test("owner fact is omitted when absent and retained when meaningful", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        files: () =>
+          json(200, {
+            items: [file({ owner_id: null }), publicFile],
+            next_cursor: null,
+          }),
+      }),
+    ),
+  );
+  renderFiles();
+
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: /telemetry-batch-0412\.parquet/,
+    }),
+  );
+  let inspector = await screen.findByRole("region", {
+    name: /object record · access/i,
+  });
+  expect(within(inspector).queryByText("owner")).toBeNull();
+  expect(within(inspector).queryByText("—")).toBeNull();
+
+  await userEvent.click(
+    screen.getByRole("button", { name: /onboarding-runbook\.md/ }),
+  );
+  inspector = await screen.findByRole("region", {
+    name: /object record · access/i,
+  });
+  expect(within(inspector).getByText("owner")).toBeTruthy();
+  expect(within(inspector).getByText("you")).toBeTruthy();
 });
 
 test("deleting a managed file requires confirmation and reports the result", async () => {
@@ -504,7 +541,7 @@ test("an upload network failure never claims nothing was stored", async () => {
   expect(screen.queryByText(/nothing was stored/i)).toBeNull();
 });
 
-test("load failures state the failing call and offer retry", async () => {
+test("load failures report status and offer retry", async () => {
   let failures = 1;
   vi.stubGlobal(
     "fetch",
@@ -523,7 +560,8 @@ test("load failures state the failing call and offer retry", async () => {
     ),
   );
   renderFiles();
-  expect(await screen.findByText("Couldn't load files")).toBeTruthy();
+  expect(await screen.findByText("Couldn't load files (500)")).toBeTruthy();
+  expect(screen.queryByText(/GET \/api\/files/)).toBeNull();
   await userEvent.click(screen.getByRole("button", { name: "Retry" }));
   expect(
     await screen.findByRole("button", { name: /onboarding-runbook\.md/ }),

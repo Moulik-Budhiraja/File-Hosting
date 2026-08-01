@@ -207,11 +207,11 @@ test("an interrupted show-once pending flow reconciles truthfully after reauth",
   // Activation never completes before the session dies.
   await page.route("**/api/api-keys/*/activate", (route) => route.abort());
   await page.getByRole("button", { name: "New key" }).first().click();
-  await page
-    .getByLabel(/Name — where will this key live\?/)
-    .fill("interrupted-key");
+  await page.getByLabel("Name", { exact: true }).fill("interrupted-key");
   await page.getByRole("button", { name: "Create key" }).click();
-  await expect(page.getByText("SHOWN ONLY ONCE")).toBeVisible();
+  await expect(
+    page.getByText("Copy this key now. It won't be shown again."),
+  ).toBeVisible();
   await expect(page.getByText(/may not be active/i)).toBeVisible();
   // Only the opaque pending id is in the URL — never secret material.
   await expect(page).toHaveURL(/pend=/);

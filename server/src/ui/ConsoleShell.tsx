@@ -3,7 +3,6 @@
 import Link from "next/link";
 
 import { useAuth } from "@/lib/auth-context";
-import { RolloutTag } from "./RolloutTag";
 
 export type ConsoleSection = "files" | "users" | "keys" | "account";
 
@@ -70,8 +69,6 @@ export function AdminGate({ children }: { children: React.ReactNode }) {
 interface ConsolePageProps {
   active: ConsoleSection;
   title: string;
-  subtitle?: React.ReactNode;
-  headerNote?: React.ReactNode;
   actions?: React.ReactNode;
   children: React.ReactNode;
 }
@@ -79,8 +76,6 @@ interface ConsolePageProps {
 export function ConsolePage({
   active,
   title,
-  subtitle,
-  headerNote,
   actions,
   children,
 }: ConsolePageProps) {
@@ -91,15 +86,8 @@ export function ConsolePage({
         <header className="page-header">
           <div className="page-header-text">
             <h1 className="page-title">{title}</h1>
-            {subtitle ? <p className="page-subtitle">{subtitle}</p> : null}
           </div>
-          <div className="page-header-side">
-            <RolloutTag />
-            {headerNote ? (
-              <span className="page-header-note">{headerNote}</span>
-            ) : null}
-            {actions}
-          </div>
+          <div className="page-header-side">{actions}</div>
         </header>
         {children}
       </main>

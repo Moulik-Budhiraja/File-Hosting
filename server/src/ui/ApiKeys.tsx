@@ -498,17 +498,20 @@ export function ApiKeysView() {
             </button>
           </div>
         ) : null}
-        <span className="toolbar-note">CLI: Authorization: Bearer fsk_…</span>
-        <button
-          type="button"
-          className="button button-primary"
-          onClick={() => {
-            setCreateError(null);
-            setCreateOpen(true);
-          }}
-        >
-          New key
-        </button>
+        {state.kind === "ready" &&
+        state.keys.length === 0 &&
+        !(aggregate ? query : search.trim()) ? null : (
+          <button
+            type="button"
+            className="button button-primary"
+            onClick={() => {
+              setCreateError(null);
+              setCreateOpen(true);
+            }}
+          >
+            New key
+          </button>
+        )}
       </div>
 
       {state.kind === "loading" ? (
@@ -523,10 +526,8 @@ export function ApiKeysView() {
 
       {state.kind === "error" ? (
         <div className="table-fallback" role="alert">
-          <p className="error-title">Couldn&apos;t load keys</p>
-          <p className="muted">
-            GET /api/api-keys → {state.status || "network"} · nothing was
-            changed
+          <p className="error-title">
+            Couldn&apos;t load keys ({state.status || "network"})
           </p>
           <button type="button" className="button" onClick={() => void load()}>
             Retry
@@ -546,11 +547,7 @@ export function ApiKeysView() {
       state.keys.length === 0 &&
       !(aggregate ? query : search.trim()) ? (
         <div className="table-fallback">
-          <p className="empty-title">No API keys yet</p>
-          <p className="muted">
-            Keys let the fs CLI act as you without your password. Create one,
-            then run fs auth set on that machine.
-          </p>
+          <p className="empty-title">No API keys</p>
           <button
             type="button"
             className="button button-primary"
@@ -659,9 +656,7 @@ export function ApiKeysView() {
             <span>
               {state.keys.length} {state.keys.length === 1 ? "key" : "keys"} ·{" "}
               {activeCount} active
-              {pendingCount > 0 ? ` · ${pendingCount} pending` : ""} · recent
-              revoked keys stay listed — records older than 90 days or beyond
-              the last 20 may be pruned
+              {pendingCount > 0 ? ` · ${pendingCount} pending` : ""}
             </span>
             {isAdmin && scope === "all" ? (
               <span className="pager">
@@ -695,16 +690,6 @@ export function ApiKeysView() {
         </>
       ) : null}
 
-      {isAdmin ? (
-        <section className="legacy-token" aria-label="Legacy service token">
-          <h2 className="section-label">Legacy service token</h2>
-          <p className="muted">
-            Shared FS_TOKEN bearer credential · still accepted on /api/* · value
-            never shown. Replace CLI use with personal keys (fs auth set).
-          </p>
-        </section>
-      ) : null}
-
       {createOpen ? (
         <Dialog
           title="New API key"
@@ -713,7 +698,7 @@ export function ApiKeysView() {
         >
           <form onSubmit={submitCreate} noValidate>
             <div className="field">
-              <label htmlFor={nameId}>Name — where will this key live?</label>
+              <label htmlFor={nameId}>Name</label>
               <input
                 ref={nameRef}
                 id={nameId}
@@ -726,20 +711,13 @@ export function ApiKeysView() {
                   setCreateError(null);
                 }}
               />
-              <p className="field-hint">
-                e.g. laptop-mbp · ci-runner · ingest-pipeline — one key per
-                machine or job
-              </p>
+              <p className="field-hint">e.g. laptop-mbp · ci-runner</p>
               {createError ? (
                 <p id={nameErrorId} className="field-error" role="alert">
                   {createError}
                 </p>
               ) : null}
             </div>
-            <p className="muted">
-              The key acts as you ({user.username}) with your permissions. You
-              can revoke it at any time.
-            </p>
             <div className="dialog-actions">
               <button
                 type="button"
@@ -762,17 +740,8 @@ export function ApiKeysView() {
       ) : null}
 
       {secret ? (
-        <Dialog
-          title={`Key created — ${secret.name}`}
-          titleAdornment={
-            <span className="tag tag-warning">SHOWN ONLY ONCE</span>
-          }
-          onClose={closeSecret}
-        >
-          <p>
-            This is the only time the full key is shown. If you lose it, revoke
-            it and create a new one.
-          </p>
+        <Dialog title={`Key created — ${secret.name}`} onClose={closeSecret}>
+          <p>Copy this key now. It won&apos;t be shown again.</p>
           <div className="secret-block">
             <code className="secret-value">{secret.secret}</code>
             <button
@@ -788,10 +757,6 @@ export function ApiKeysView() {
               Copy failed — select the key text and copy it manually.
             </p>
           ) : null}
-          <p className="muted use-it">
-            USE IT · $ fs auth set — paste when prompted, stored in the OS
-            keychain
-          </p>
           {secret.activation === "activating" ? (
             <p className="muted" role="status">
               activating key…
@@ -825,7 +790,7 @@ export function ApiKeysView() {
                 })
               }
             />
-            I&apos;ve stored this key — it won&apos;t be shown again.
+            I&apos;ve stored this key
           </label>
           {secret.closeWarned && !secret.acked ? (
             <p className="field-error" role="alert">
@@ -907,16 +872,9 @@ export function ApiKeysView() {
           onClose={() => setRevokeTarget(null)}
         >
           {revokeTarget.status === "pending" ? (
-            <p>
-              This key was never activated and cannot authenticate. Cancelling
-              removes the pending record; nothing that works today stops
-              working.
-            </p>
+            <p>This key is inactive. Cancelling removes it.</p>
           ) : (
-            <p>
-              CLI calls using this key start failing immediately (exit 3). This
-              cannot be undone — create a new key to restore access.
-            </p>
+            <p>This key stops working immediately. This cannot be undone.</p>
           )}
           <p className="muted cell-mono">
             {maskKey(revokeTarget.prefix, revokeTarget.last_four)}

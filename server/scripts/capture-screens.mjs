@@ -188,8 +188,8 @@ const samCookie = await loginCookie("sam-ops", "sam-ops-fixture-pass-12+");
 // ---- browser ----
 const browser = await chromium.launch();
 
-async function newPage(viewport, cookie) {
-  const context = await browser.newContext({ viewport });
+async function newPage(viewport, cookie, emulation = {}) {
+  const context = await browser.newContext({ viewport, ...emulation });
   if (cookie) {
     const [name, value] = cookie.split("=");
     await context.addCookies([
@@ -320,7 +320,7 @@ const MOBILE = { width: 390, height: 844 };
   await capture(page, "desktop-keys-admin-1440x960");
 
   await page.getByRole("button", { name: "New key" }).first().click();
-  await page.getByLabel(/where will this key live/i).fill("laptop-mbp-2");
+  await page.getByLabel("Name", { exact: true }).fill("laptop-mbp-2");
   await capture(page, "desktop-keys-create-dialog-1440x960");
 
   await page.getByRole("button", { name: "Create key" }).click();
@@ -443,6 +443,26 @@ const MOBILE = { width: 390, height: 844 };
   await page.getByRole("button", { name: /Change visibility/ }).click();
   await page.getByRole("dialog").waitFor();
   await capture(page, "mobile-files-visibility-sheet-390x844");
+  await context.close();
+}
+
+// ---- accessibility preferences ----
+{
+  const { context, page } = await newPage(DESKTOP, adminCookie, {
+    forcedColors: "active",
+  });
+  await page.goto(`${BASE}/files`);
+  await page.getByRole("button", { name: /telemetry-batch/ }).waitFor();
+  await capture(page, "forced-colors-files-1440x960");
+  await context.close();
+}
+{
+  const { context, page } = await newPage(DESKTOP, adminCookie, {
+    reducedMotion: "reduce",
+  });
+  await page.goto(`${BASE}/keys`);
+  await page.getByRole("cell", { name: "ingest-pipeline", exact: true }).waitFor();
+  await capture(page, "reduced-motion-keys-1440x960");
   await context.close();
 }
 

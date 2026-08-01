@@ -88,7 +88,7 @@ test("a stale selected-file id restored from the URL is dropped from the query",
   await page.goto("/files?sel=defunct-file-id");
   // The list loads, nothing is selected, and the stale sel value is
   // removed from the URL without loops or a wrong selection.
-  await expect(page.getByText(/rows loaded/)).toBeVisible();
+  await expect(page.getByText(/rows$/)).toBeVisible();
   await expect
     .poll(() => new URL(page.url()).searchParams.get("sel"))
     .toBeNull();

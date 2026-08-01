@@ -225,9 +225,6 @@ export function LoginForm({
             ? "Signing in…"
             : "Sign in"}
       </button>
-      <p className="form-footnote">
-        CLI access uses personal API keys · fs auth set
-      </p>
     </form>
   );
 }
