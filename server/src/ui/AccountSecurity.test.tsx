@@ -140,19 +140,11 @@ test("a wrong current password shows the server rejection on the field", async (
   expect(await screen.findByText("Current password is invalid.")).toBeTruthy();
 });
 
-test("server errors state nothing changed and preserve the form values", async () => {
+test("an unavailable password-change response reports an unknown outcome with safe recovery", async () => {
   stubFetch((url) => {
     const known = meRoute(url);
     if (known) return known;
-    return new Response(
-      JSON.stringify({
-        error: {
-          code: "internal_error",
-          message: "An internal server error occurred",
-        },
-      }),
-      { status: 500, headers: { "content-type": "application/json" } },
-    );
+    throw new TypeError("response delivery was lost");
   });
   renderAccount();
   await screen.findByText("jordan");
@@ -160,13 +152,24 @@ test("server errors state nothing changed and preserve the form values", async (
   await userEvent.click(
     screen.getByRole("button", { name: "Change password" }),
   );
-  expect(await screen.findByText("Password not changed.")).toBeTruthy();
+
   expect(
-    screen.getByText(/couldn't complete the request \(500\)/i),
+    await screen.findByText("Password change outcome unknown."),
   ).toBeTruthy();
   expect(
+    screen.getByText(
+      /may have changed and every browser session may have been signed out/i,
+    ),
+  ).toBeTruthy();
+  expect(screen.getByRole("link", { name: /go to sign in/i })).toBeTruthy();
+  expect(screen.queryByText(/password not changed/i)).toBeNull();
+  expect(screen.queryByText(/current password still works/i)).toBeNull();
+  expect(
     (screen.getByLabelText("Current password") as HTMLInputElement).value,
-  ).toBe("old password!!");
+  ).toBe("");
+  expect(
+    (screen.getByLabelText("New password") as HTMLInputElement).value,
+  ).toBe("");
 });
 
 test("success clears the fields and routes to the truthful password-changed login state", async () => {

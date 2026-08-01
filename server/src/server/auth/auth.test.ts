@@ -755,6 +755,74 @@ describe("user repository", () => {
     }
   });
 
+  it("scopes API-key request ids per owner", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-owner-request-id-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const repository = await AuthRepository.create(databaseUrl);
+    try {
+      const firstOwner = await repository.createUser({
+        username: "request.first",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const secondOwner = await repository.createUser({
+        username: "request.second",
+        password: OTHER_CREDENTIAL,
+        role: "member",
+      });
+      const requestId = "shared-opaque-request-id";
+      const first = await repository.beginApiKeyCreation(
+        firstOwner.id,
+        "first-owner-key",
+        requestId,
+      );
+      const second = await repository.beginApiKeyCreation(
+        secondOwner.id,
+        "second-owner-key",
+        requestId,
+      );
+      assert.equal(first.created, true);
+      assert.equal(second.created, true);
+      assert.notEqual(first.id, second.id);
+
+      const firstReplay = await repository.beginApiKeyCreation(
+        firstOwner.id,
+        "first-owner-key",
+        requestId,
+      );
+      const secondReplay = await repository.beginApiKeyCreation(
+        secondOwner.id,
+        "second-owner-key",
+        requestId,
+      );
+      assert.equal(firstReplay.id, first.id);
+      assert.equal(secondReplay.id, second.id);
+      assert.equal(firstReplay.created, false);
+      assert.equal(secondReplay.created, false);
+
+      const inspection = createClient({ url: databaseUrl });
+      try {
+        const index = await inspection.execute(
+          "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'api_keys_request_idx'",
+        );
+        const sql = index.rows[0]?.sql;
+        if (typeof sql !== "string")
+          throw new Error("request index SQL missing");
+        assert.match(
+          sql,
+          /ON api_keys\s*\(user_id, request_id\)\s*WHERE request_id IS NOT NULL/iu,
+        );
+      } finally {
+        inspection.close();
+      }
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("retrying a create with the same request id is idempotent and never re-exposes the secret", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-idempotent-create-test-"),
@@ -1685,6 +1753,81 @@ describe("user repository", () => {
     }
   });
 
+  it("upgrades a populated global request-id index safely under concurrent startup", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-request-index-migration-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const seeded = await AuthRepository.create(databaseUrl);
+    let repositories: AuthRepository[] = [];
+    try {
+      const firstOwner = await seeded.createUser({
+        username: "index.first",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const secondOwner = await seeded.createUser({
+        username: "index.second",
+        password: OTHER_CREDENTIAL,
+        role: "member",
+      });
+      const requestId = "legacy-global-request-id";
+      await seeded.beginApiKeyCreation(
+        firstOwner.id,
+        "legacy-pending",
+        requestId,
+      );
+      await seeded.close();
+
+      const legacy = createClient({ url: databaseUrl });
+      try {
+        await legacy.execute("DROP INDEX api_keys_request_idx");
+        await legacy.execute(
+          "CREATE UNIQUE INDEX api_keys_request_idx ON api_keys(request_id) WHERE request_id IS NOT NULL",
+        );
+      } finally {
+        legacy.close();
+      }
+
+      repositories = await Promise.all(
+        Array.from({ length: 4 }, () => AuthRepository.create(databaseUrl)),
+      );
+      const second = await repositories[0]!.beginApiKeyCreation(
+        secondOwner.id,
+        "independent-pending",
+        requestId,
+      );
+      assert.equal(second.created, true);
+      const firstReplay = await repositories[1]!.beginApiKeyCreation(
+        firstOwner.id,
+        "legacy-pending",
+        requestId,
+      );
+      assert.equal(firstReplay.created, false);
+
+      const inspection = createClient({ url: databaseUrl });
+      try {
+        const index = await inspection.execute(
+          "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'api_keys_request_idx'",
+        );
+        const sql = index.rows[0]?.sql;
+        if (typeof sql !== "string")
+          throw new Error("request index SQL missing");
+        assert.match(
+          sql,
+          /ON api_keys\s*\(user_id, request_id\)\s*WHERE request_id IS NOT NULL/iu,
+        );
+      } finally {
+        inspection.close();
+      }
+      const later = await AuthRepository.create(databaseUrl);
+      await later.close();
+    } finally {
+      await Promise.all(repositories.map((repository) => repository.close()));
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
   it("does not purge another user's revoked API-key audit record", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-auth-api-key-owner-retention-test-"),
@@ -1877,6 +2020,62 @@ describe("user repository", () => {
       } finally {
         inspection.close();
       }
+    } finally {
+      await repository.close();
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("disabling an account transactionally revokes sessions so re-enable cannot revive them", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-auth-disable-session-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "auth.db")}`;
+    const repository = await AuthRepository.create(databaseUrl);
+    try {
+      const admin = await repository.bootstrapAdmin({
+        username: "session.admin",
+        password: ADMIN_CREDENTIAL,
+      });
+      const member = await repository.createUser({
+        username: "session.member",
+        password: MEMBER_CREDENTIAL,
+        role: "member",
+      });
+      const memberSession = await repository.createSession(member.id);
+      const adminSession = await repository.createSession(admin.id);
+      assert.equal(
+        (await repository.resolveSession(memberSession.token))?.id,
+        member.id,
+      );
+
+      await repository.setActive(member.id, false);
+      assert.equal(await repository.resolveSession(memberSession.token), null);
+      await repository.setActive(member.id, true);
+      assert.equal(await repository.resolveSession(memberSession.token), null);
+
+      const inspection = createClient({ url: databaseUrl });
+      try {
+        const revoked = await inspection.execute({
+          sql: "SELECT revoked_at FROM sessions WHERE user_id = ?",
+          args: [member.id],
+        });
+        assert.equal(typeof revoked.rows[0]?.revoked_at, "string");
+      } finally {
+        inspection.close();
+      }
+
+      // Transactional rollback adjacency: a rejected last-admin disable must
+      // not revoke that administrator's still-valid session.
+      await assert.rejects(
+        repository.setActive(admin.id, false),
+        (error) =>
+          error instanceof AppError && error.code === "last_active_admin",
+      );
+      assert.equal(
+        (await repository.resolveSession(adminSession.token))?.id,
+        admin.id,
+      );
     } finally {
       await repository.close();
       await rm(directory, { recursive: true, force: true });

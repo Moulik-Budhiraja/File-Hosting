@@ -217,11 +217,44 @@ export class AuthRepository {
     await client.execute("PRAGMA busy_timeout = 5000");
     await client.executeMultiple(AUTH_SCHEMA);
     await AuthRepository.migrateApiKeysSchema(client);
-    await client.execute(
-      `CREATE UNIQUE INDEX IF NOT EXISTS api_keys_request_idx
-        ON api_keys(request_id) WHERE request_id IS NOT NULL`,
-    );
+    await AuthRepository.migrateApiKeyRequestIndex(client);
     return new AuthRepository(client);
+  }
+
+  // request_id is an idempotency namespace owned by one user, not a global
+  // resource. Upgrade the earlier global partial index in a serialized,
+  // idempotent transaction; re-checking under the write lock keeps concurrent
+  // repository startup safe.
+  private static async migrateApiKeyRequestIndex(
+    client: Client,
+  ): Promise<void> {
+    const expected =
+      /ON api_keys\s*\(user_id, request_id\)\s*WHERE request_id IS NOT NULL/iu;
+    const indexSql = async (
+      executor: Pick<Client, "execute">,
+    ): Promise<string> => {
+      const result = await executor.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'index' AND name = 'api_keys_request_idx'",
+      );
+      return typeof result.rows[0]?.sql === "string" ? result.rows[0].sql : "";
+    };
+    if (expected.test(await indexSql(client))) return;
+    const transaction = await client.transaction("write");
+    try {
+      if (!expected.test(await indexSql(transaction))) {
+        await transaction.execute("DROP INDEX IF EXISTS api_keys_request_idx");
+        await transaction.execute(
+          `CREATE UNIQUE INDEX api_keys_request_idx
+            ON api_keys(user_id, request_id) WHERE request_id IS NOT NULL`,
+        );
+      }
+      await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
+    } finally {
+      transaction.close();
+    }
   }
 
   // Upgrade api_keys tables created before the two-phase columns — or
@@ -296,7 +329,7 @@ export class AuthRepository {
       );
       await transaction.execute(
         `CREATE UNIQUE INDEX IF NOT EXISTS api_keys_request_idx
-          ON api_keys(request_id) WHERE request_id IS NOT NULL`,
+          ON api_keys(user_id, request_id) WHERE request_id IS NOT NULL`,
       );
       await transaction.commit();
     } catch (error) {
@@ -699,27 +732,53 @@ export class AuthRepository {
   }
 
   async setActive(id: string, active: boolean): Promise<User> {
-    const current = await this.getUser(id);
-    if (!current) throw new AppError(404, "user_not_found", "User not found");
-    const now = new Date().toISOString();
-    const result = await this.client.execute({
-      sql: `UPDATE users SET active = ?, updated_at = ?
-        WHERE id = ? AND (
-          ? = 1 OR role <> 'admin' OR active = 0 OR EXISTS (
-            SELECT 1 FROM users other
-            WHERE other.role = 'admin' AND other.active = 1 AND other.id <> ?
-          )
-        )`,
-      args: [active ? 1 : 0, now, id, active ? 1 : 0, id],
+    return this.runExclusive(async () => {
+      const now = new Date().toISOString();
+      const transaction = await this.client.transaction("write");
+      try {
+        const lookup = await transaction.execute({
+          sql: "SELECT id, username, role, active, created_at, updated_at FROM users WHERE id = ?",
+          args: [id],
+        });
+        const row = lookup.rows[0];
+        if (!row) {
+          throw new AppError(404, "user_not_found", "User not found");
+        }
+        const current = userFromRow(row);
+        const result = await transaction.execute({
+          sql: `UPDATE users SET active = ?, updated_at = ?
+            WHERE id = ? AND (
+              ? = 1 OR role <> 'admin' OR active = 0 OR EXISTS (
+                SELECT 1 FROM users other
+                WHERE other.role = 'admin' AND other.active = 1 AND other.id <> ?
+              )
+            )`,
+          args: [active ? 1 : 0, now, id, active ? 1 : 0, id],
+        });
+        if (result.rowsAffected === 0) {
+          throw new AppError(
+            409,
+            "last_active_admin",
+            "The last active admin cannot be disabled or demoted",
+          );
+        }
+        if (!active) {
+          // Revocation and the active-state transition commit atomically. A
+          // later re-enable can therefore never revive a pre-disable cookie.
+          await transaction.execute({
+            sql: "UPDATE sessions SET revoked_at = ? WHERE user_id = ? AND revoked_at IS NULL",
+            args: [now, id],
+          });
+        }
+        await transaction.commit();
+        return { ...current, active, updatedAt: now };
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        transaction.close();
+      }
     });
-    if (result.rowsAffected === 0) {
-      throw new AppError(
-        409,
-        "last_active_admin",
-        "The last active admin cannot be disabled or demoted",
-      );
-    }
-    return { ...current, active, updatedAt: now };
   }
 
   async setRole(id: string, role: UserRole): Promise<User> {

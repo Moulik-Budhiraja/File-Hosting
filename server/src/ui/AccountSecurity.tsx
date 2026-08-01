@@ -17,7 +17,7 @@ type FormState =
   | { kind: "submitting" }
   | { kind: "current-rejected"; message: string }
   | { kind: "new-rejected"; message: string }
-  | { kind: "server-error"; status: number };
+  | { kind: "outcome-unknown" };
 
 interface AccountSecurityProps {
   // Invoked after the backend confirms the change (which revokes every
@@ -91,10 +91,14 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
       } else if (isApiError(error) && error.status === 400) {
         setState({ kind: "current-rejected", message: `${error.message}.` });
       } else {
-        setState({
-          kind: "server-error",
-          status: isApiError(error) ? error.status : 0,
-        });
+        // The server may have committed the password and revoked every
+        // session before response delivery failed. Clear both credentials
+        // so the form cannot encourage an unsafe blind replay, then direct
+        // the user to a recovery path that is valid for either outcome.
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setState({ kind: "outcome-unknown" });
       }
     }
   }
@@ -113,14 +117,16 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
       <section className="account-form-region" aria-label="Change password">
         <h2 className="section-label">Change password</h2>
         <div aria-live="polite">
-          {state.kind === "server-error" ? (
+          {state.kind === "outcome-unknown" ? (
             <div className="notice notice-danger">
-              <p className="notice-title">Password not changed.</p>
+              <p className="notice-title">Password change outcome unknown.</p>
               <p>
-                The server couldn&apos;t complete the request (
-                {state.status || "network"}). Your current password still works.
-                Try again.
+                The response was lost. Your password may have changed and every
+                browser session may have been signed out. Go to sign in and use
+                the new password first. If you cannot sign in, ask an
+                administrator to reset your password.
               </p>
+              <Link href="/login?next=%2Faccount">Go to sign in</Link>
             </div>
           ) : null}
         </div>
