@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -144,6 +144,29 @@ describe("raster safety envelope", () => {
 });
 
 describe("public unfurl view-model", () => {
+  it("reads only the capped Markdown prefix from a large sparse public file", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-unfurl-sparse-"),
+    );
+    temporaryDirectories.push(directory);
+    const objectPath = path.join(directory, "object");
+    const handle = await open(objectPath, "w");
+    const heading = Buffer.from("# Sparse heading\n");
+    await handle.write(heading, 0, heading.length, 0);
+    await handle.truncate(128 * 1024 * 1024);
+    await handle.close();
+    const service = {
+      config: { publicUrl: PUBLIC_URL },
+      storagePath: () => objectPath,
+    } as unknown as FileService;
+
+    const model = await buildUnfurlModel(
+      service,
+      storedFile({ size: 128 * 1024 * 1024 }),
+    );
+    assert.equal(model.title, "Sparse heading");
+  });
+
   it("uses the sanitized first Markdown heading as title, article type, summary card", async () => {
     const model = await modelFor("# Deploy Runbook\n\nSecret body text.\n");
     assert.equal(model.title, "Deploy Runbook");

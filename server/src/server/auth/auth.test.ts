@@ -79,7 +79,7 @@ describe("password security", () => {
       "https://example.test",
     );
     for (const publicUrl of [
-      "https://user:pass@example.test",
+      "https://embedded-user@example.test",
       "https://example.test/subpath",
       "https://example.test/?query=secret",
       "https://example.test/#fragment",

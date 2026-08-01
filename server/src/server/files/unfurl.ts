@@ -1,4 +1,4 @@
-import { readFile } from "node:fs/promises";
+import { open, readFile } from "node:fs/promises";
 
 import sharp from "sharp";
 
@@ -172,19 +172,21 @@ async function markdownHeading(
   service: FileService,
   file: StoredFile,
 ): Promise<string | null> {
+  let handle: Awaited<ReturnType<typeof open>> | undefined;
   try {
-    const bytes = await readFile(service.storagePath(file));
+    handle = await open(service.storagePath(file), "r");
+    const bytes = Buffer.alloc(Math.min(file.size, MARKDOWN_READ_LIMIT));
+    const { bytesRead } = await handle.read(bytes, 0, bytes.length, 0);
     const decoded = new TextDecoder("utf-8", { fatal: true }).decode(
-      bytes.subarray(0, MARKDOWN_READ_LIMIT),
+      bytes.subarray(0, bytesRead),
     );
     const heading = extractFirstMarkdownHeading(decoded);
-    return heading
-      ? sanitizeUnfurlText(heading, TITLE_MAX_BYTES) || null
-      : null;
+    return heading ? sanitizeUnfurlText(heading, TITLE_MAX_BYTES) : null;
   } catch {
-    // Malformed UTF-8 and I/O failures safely fall back to the filename.
+    return null;
+  } finally {
+    await handle?.close();
   }
-  return null;
 }
 
 export async function buildUnfurlModel(
