@@ -58,6 +58,19 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): FilesConfig {
       "FS_PUBLIC_URL must use http or https",
     );
   }
+  if (
+    parsedPublicUrl.username ||
+    parsedPublicUrl.password ||
+    parsedPublicUrl.pathname !== "/" ||
+    parsedPublicUrl.search ||
+    parsedPublicUrl.hash
+  ) {
+    throw new AppError(
+      500,
+      "invalid_configuration",
+      "FS_PUBLIC_URL must be a credential-free canonical origin",
+    );
+  }
 
   const readInteger = (name: string, fallback: number) => {
     const raw = env[name];
@@ -87,7 +100,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): FilesConfig {
     token,
     databaseUrl: env.DATABASE_URL ?? "file:./data/files.db",
     storageDir: path.resolve(env.FS_STORAGE_DIR ?? "./data/objects"),
-    publicUrl: publicUrl.replace(/\/+$/, ""),
+    publicUrl: parsedPublicUrl.origin,
     maxUploadBytes: readInteger("FS_MAX_UPLOAD_BYTES", 10_737_418_240),
     minFreeBytes: readInteger("FS_MIN_FREE_BYTES", 1_073_741_824),
     bootstrapUsername,

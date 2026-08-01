@@ -1,6 +1,11 @@
-import { errorResponse } from "@/server/files/http";
+import { errorResponse, notFound } from "@/server/files/http";
 import { renderPreview } from "@/server/files/preview";
 import { getViewableFile } from "@/server/files/request";
+import {
+  buildUnfurlModel,
+  publicUnfurlRevisionMatches,
+  renderUnfurlHead,
+} from "@/server/files/unfurl";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,17 +14,28 @@ interface RouteContext {
   params: Promise<{ id: string }>;
 }
 
-export async function GET(
+async function responseFor(
   request: Request,
   context: RouteContext,
+  includeBody: boolean,
 ): Promise<Response> {
   try {
     const { service, file } = await getViewableFile(
       request,
       (await context.params).id,
     );
-    const html = await renderPreview(service, file);
-    return new Response(html, {
+    const unfurlHead =
+      file.visibility === "public"
+        ? renderUnfurlHead(await buildUnfurlModel(service, file))
+        : "";
+    const html = await renderPreview(service, file, unfurlHead);
+    if (
+      file.visibility === "public" &&
+      !publicUnfurlRevisionMatches(file, await service.get(file.id))
+    ) {
+      throw notFound();
+    }
+    return new Response(includeBody ? html : null, {
       headers: {
         "cache-control": "no-store",
         "content-security-policy":
@@ -30,6 +46,27 @@ export async function GET(
       },
     });
   } catch (error) {
-    return errorResponse(error);
+    const response = errorResponse(error);
+    return includeBody
+      ? response
+      : new Response(null, {
+          status: response.status,
+          statusText: response.statusText,
+          headers: response.headers,
+        });
   }
+}
+
+export async function GET(
+  request: Request,
+  context: RouteContext,
+): Promise<Response> {
+  return responseFor(request, context, true);
+}
+
+export async function HEAD(
+  request: Request,
+  context: RouteContext,
+): Promise<Response> {
+  return responseFor(request, context, false);
 }
