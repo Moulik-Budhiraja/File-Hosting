@@ -12,9 +12,10 @@ import {
   GET as getOgImage,
   HEAD as headOgImage,
 } from "../../app/og/[filename]/route";
-import { layoutOgTitle } from "./og-image";
+import { layoutOgTitle, renderOgImage } from "./og-image";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
+import type { StoredFile } from "./types";
 
 function routeContext(id: string) {
   return { params: Promise.resolve({ id }) };
@@ -90,6 +91,27 @@ describe("OG image title layout", () => {
       ).length;
       assert.ok([...line].length + wideGlyphs <= 35);
     }
+  });
+
+  it("fails safe when a legacy model contains XML-illegal scalars", async () => {
+    const output = await renderOgImage(
+      {} as FileService,
+      { size: 1 } as StoredFile,
+      {
+        title: "legacy\uFFFFtitle",
+        description: "Binary file · 1 B",
+        ogType: "website",
+        twitterCard: "summary",
+        canonicalUrl: "https://example.test/Ab3dE5g",
+        imageUrl: "https://example.test/og/Ab3dE5g.png",
+        imageAlt: "safe",
+        kind: "binary",
+        eligibleRaster: false,
+      },
+    );
+    const metadata = await sharp(output).metadata();
+    assert.equal(metadata.width, 1200);
+    assert.equal(metadata.height, 630);
   });
 });
 
@@ -330,6 +352,13 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     assert.equal(pageSnapshots[0]?.status, 404);
     assert.equal(imageSnapshots[0]?.status, 404);
     for (const snapshot of [...pageSnapshots, ...imageSnapshots]) {
+      const headers = new Headers(snapshot.headers);
+      assert.equal(headers.get("x-content-type-options"), "nosniff");
+      assert.equal(headers.get("referrer-policy"), "no-referrer");
+      assert.match(
+        headers.get("content-security-policy") ?? "",
+        /frame-ancestors 'none'/u,
+      );
       const decoded = Buffer.from(snapshot.body, "base64").toString("utf8");
       assert.doesNotMatch(
         decoded,

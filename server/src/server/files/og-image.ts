@@ -1,14 +1,12 @@
-import { readFile } from "node:fs/promises";
-
 import sharp from "sharp";
 
+import { deriveRasterThumbnailInWorker } from "./raster-worker";
 import type { FileService } from "./service";
-import { rasterEnvelopeEligible, type PublicUnfurlModel } from "./unfurl";
+import { sanitizeUnfurlText, type PublicUnfurlModel } from "./unfurl";
 import type { StoredFile } from "./types";
 
 const WIDTH = 1200;
 const HEIGHT = 630;
-const MAX_SOURCE_BYTES = 20 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 40_000_000;
 const DECODE_TIMEOUT_SECONDS = 2;
 
@@ -83,15 +81,17 @@ export function layoutOgTitle(
 }
 
 function cardSvg(model: PublicUnfurlModel, hasThumbnail: boolean): Buffer {
+  const safeTitle = sanitizeUnfurlText(model.title, 300) || "Untitled file";
+  const safeDescription = sanitizeUnfurlText(model.description ?? "", 400);
   const titleWidth = hasThumbnail ? 20 : 34;
-  const lines = layoutOgTitle(model.title, titleWidth, 3);
+  const lines = layoutOgTitle(safeTitle, titleWidth, 3);
   const title = lines
     .map(
       (line, index) =>
         `<tspan x="92" dy="${index === 0 ? 0 : 72}">${escapeXml(line)}</tspan>`,
     )
     .join("");
-  const descriptionParts = (model.description ?? "").split(" · ");
+  const descriptionParts = safeDescription.split(" · ");
   const descriptionKind = descriptionParts.shift();
   const kind = (
     descriptionKind?.trim() ? descriptionKind : model.kind
@@ -122,43 +122,12 @@ async function safeRasterThumbnail(
   file: StoredFile,
   model: PublicUnfurlModel,
 ): Promise<Buffer | null> {
-  if (!model.eligibleRaster || file.size > MAX_SOURCE_BYTES) return null;
+  if (!model.eligibleRaster) return null;
   try {
-    const source = await readFile(service.storagePath(file));
-    if (source.length > MAX_SOURCE_BYTES) return null;
-    const input = sharp(source, {
-      failOn: "error",
-      limitInputPixels: MAX_INPUT_PIXELS,
-      sequentialRead: true,
-    }).timeout({ seconds: DECODE_TIMEOUT_SECONDS });
-    const metadata = await input.metadata();
-    const expectedFormat: Record<string, string> = {
-      "image/jpeg": "jpeg",
-      "image/png": "png",
-      "image/webp": "webp",
-    };
-    if (
-      metadata.format !== expectedFormat[file.mimeType] ||
-      !rasterEnvelopeEligible(
-        source.length,
-        metadata.width ?? 0,
-        metadata.height ?? 0,
-      ) ||
-      (metadata.pages ?? 1) !== 1
-    ) {
-      return null;
-    }
-    return await sharp(source, {
-      failOn: "error",
-      limitInputPixels: MAX_INPUT_PIXELS,
-      sequentialRead: true,
-    })
-      .timeout({ seconds: DECODE_TIMEOUT_SECONDS })
-      .rotate()
-      .resize(386, 386, { fit: "cover", position: "centre" })
-      .toColorspace("srgb")
-      .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
-      .toBuffer();
+    return await deriveRasterThumbnailInWorker(
+      service.storagePath(file),
+      file.mimeType,
+    );
   } catch {
     return null;
   }

@@ -6,6 +6,7 @@ import { afterEach, describe, it } from "node:test";
 
 import sharp from "sharp";
 
+import { RASTER_WORKER_LIMITS } from "./raster-worker";
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
 import {
@@ -92,6 +93,10 @@ describe("unfurl text sanitizer", () => {
     );
     assert.equal(sanitizeUnfurlText("nul \0byte\0end", 300), "nul byteend");
     assert.equal(sanitizeUnfurlText("tab\tnext ", 300), "tab next");
+    assert.equal(
+      sanitizeUnfurlText("line\u2028next\u2029bad\uFFFFscalar", 300),
+      "line next badscalar",
+    );
   });
 
   it("collapses whitespace runs and trims", () => {
@@ -132,6 +137,15 @@ describe("public share URL derivation", () => {
 });
 
 describe("raster safety envelope", () => {
+  it("isolates anonymous decoding behind bounded worker resources", () => {
+    assert.deepEqual(RASTER_WORKER_LIMITS, {
+      maxConcurrent: 2,
+      maxOldSpaceMiB: 256,
+      maxOutputBytes: 8 * 1024 * 1024,
+      wallTimeoutMs: 2_500,
+    });
+  });
+
   it("enforces the inclusive 20 MiB and 40 megapixel boundaries", () => {
     assert.equal(rasterEnvelopeEligible(20 * 1024 * 1024, 8000, 5000), true);
     assert.equal(
@@ -144,6 +158,33 @@ describe("raster safety envelope", () => {
 });
 
 describe("public unfurl view-model", () => {
+  it("bounds concurrent anonymous raster workers and safely degrades excess work", async () => {
+    const raster = await sharp({
+      create: {
+        width: 16,
+        height: 9,
+        channels: 3,
+        background: "red",
+      },
+    })
+      .png()
+      .toBuffer();
+    const service = await fakeService(raster);
+    const file = storedFile({
+      name: "bounded.png",
+      mimeType: "image/png",
+      size: raster.length,
+    });
+    const models = await Promise.all(
+      Array.from({ length: 3 }, () => buildUnfurlModel(service, file)),
+    );
+    assert.equal(models.filter((model) => model.eligibleRaster).length, 2);
+    assert.equal(
+      models.filter((model) => model.twitterCard === "summary").length,
+      1,
+    );
+  });
+
   it("reads only the capped Markdown prefix from a large sparse public file", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-unfurl-sparse-"),

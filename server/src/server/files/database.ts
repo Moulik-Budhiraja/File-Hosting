@@ -269,8 +269,9 @@ export class FileRepository {
       args: [id],
     });
     const row = result.rows[0];
-    if (!row) return null;
+    // Keep the storage-query class identical for missing and existing IDs.
     const tags = await this.tagsForIds([id]);
+    if (!row) return null;
     return fileFromRow(row, tags.get(id) ?? []);
   }
 

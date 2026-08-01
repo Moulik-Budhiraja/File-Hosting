@@ -50,6 +50,8 @@ describe("pure file helpers", () => {
     assert.equal(parseArchive("tar.gz"), "tar.gz");
     assert.equal(parseArchive(null), null);
     assert.throws(() => validateFilename("../secret"), /path separators/u);
+    assert.throws(() => validateFilename("replacement-�.txt"), /Unicode/u);
+    assert.throws(() => validateFilename("noncharacter-￿.txt"), /Unicode/u);
     assert.throws(() => validateTags(["bad,tag"]), /cannot contain commas/u);
     assert.throws(() => parseArchive("zip"), /tar\.gz/u);
   });

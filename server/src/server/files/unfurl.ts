@@ -1,14 +1,14 @@
-import { open, readFile } from "node:fs/promises";
-
-import sharp from "sharp";
+import { open } from "node:fs/promises";
 
 import { extractFirstMarkdownHeading } from "./preview";
+import { inspectRasterInWorker } from "./raster-worker";
 import type { FileService } from "./service";
 import { BASE62_ID_PATTERN, type StoredFile } from "./types";
 
 const CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F]/gu;
-const WHITESPACE_TO_SPACE = /[\t\r\n]/gu;
+const WHITESPACE_TO_SPACE = /[\t\r\n\u2028\u2029]/gu;
 const BIDI_CONTROLS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
+const INVALID_UNICODE = /[\uD800-\uDFFF\uFFFD]|\p{Noncharacter_Code_Point}/gu;
 const TITLE_MAX_BYTES = 300;
 const DESCRIPTION_MAX_BYTES = 400;
 const MARKDOWN_READ_LIMIT = 256 * 1024;
@@ -35,6 +35,7 @@ export function sanitizeUnfurlText(value: string, maxBytes: number): string {
     .replace(WHITESPACE_TO_SPACE, " ")
     .replace(CONTROL_PATTERN, "")
     .replace(BIDI_CONTROLS, "")
+    .replace(INVALID_UNICODE, "")
     .replace(/ {2,}/gu, " ")
     .trim();
 
@@ -138,30 +139,16 @@ async function inspectEligibleRaster(
     return null;
   }
   try {
-    const source = await readFile(service.storagePath(file));
-    if (source.length > MAX_RASTER_SOURCE_BYTES) return null;
-    const metadata = await sharp(source, {
-      failOn: "error",
-      limitInputPixels: MAX_RASTER_PIXELS,
-      sequentialRead: true,
-    })
-      .timeout({ seconds: 2 })
-      .metadata();
-    const expected: Record<string, string> = {
-      "image/jpeg": "jpeg",
-      "image/png": "png",
-      "image/webp": "webp",
-    };
-    const eligible =
-      metadata.format === expected[file.mimeType] &&
-      (metadata.pages ?? 1) === 1 &&
-      rasterEnvelopeEligible(
-        source.length,
-        metadata.width ?? 0,
-        metadata.height ?? 0,
-      );
-    return eligible
-      ? { width: metadata.width ?? 0, height: metadata.height ?? 0 }
+    const dimensions = await inspectRasterInWorker(
+      service.storagePath(file),
+      file.mimeType,
+    );
+    return rasterEnvelopeEligible(
+      file.size,
+      dimensions.width,
+      dimensions.height,
+    )
+      ? dimensions
       : null;
   } catch {
     return null;
