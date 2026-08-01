@@ -15,6 +15,7 @@ import path from "node:path";
 
 import { lookup } from "mime-types";
 
+import { AuthRepository } from "../auth/database";
 import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
@@ -59,17 +60,31 @@ export class FileService {
   private constructor(
     readonly config: FilesConfig,
     readonly repository: FileRepository,
+    readonly auth: AuthRepository,
   ) {
     this.tempDir = path.join(config.storageDir, ".tmp");
   }
 
   static async create(config: FilesConfig): Promise<FileService> {
     await mkdir(config.storageDir, { recursive: true });
+    const auth = await AuthRepository.create(config.databaseUrl);
+    if (config.bootstrapUsername && config.bootstrapPassword) {
+      const username = config.bootstrapUsername;
+      const password = config.bootstrapPassword;
+      await auth.bootstrapAdmin({ username, password });
+      config.bootstrapUsername = undefined;
+      config.bootstrapPassword = undefined;
+    }
     const repository = await FileRepository.create(config.databaseUrl);
-    const service = new FileService(config, repository);
+    const service = new FileService(config, repository, auth);
     await mkdir(service.tempDir, { recursive: true });
     await service.cleanupTemporaryFiles();
     return service;
+  }
+
+  async close(): Promise<void> {
+    await this.repository.close();
+    await this.auth.close();
   }
 
   toMetadata(file: StoredFile): FileMetadata {
@@ -80,6 +95,7 @@ export class FileService {
       mime_type: file.mimeType,
       sha256: file.sha256,
       visibility: file.visibility,
+      owner_id: file.ownerId,
       tags: file.tags,
       preview_url: `${this.config.publicUrl}/${file.id}`,
       raw_url: `${this.config.publicUrl}/raw/${file.id}`,
@@ -223,15 +239,18 @@ export class FileService {
         mimeType: normalizeMimeType(options.name, options.mimeType),
         sha256: checksum.digest("hex"),
         visibility: options.visibility,
+        ownerId: options.ownerId ?? null,
         storageKey: id,
         archive: options.archive,
         createdAt: now,
         updatedAt: now,
       };
       try {
+        await options.authorizeFinalize?.();
         return await this.repository.insert(file, options.tags);
       } catch (cause) {
         await unlink(finalPath).catch(() => undefined);
+        if (cause instanceof AppError) throw cause;
         throw new AppError(
           500,
           "metadata_write_failed",

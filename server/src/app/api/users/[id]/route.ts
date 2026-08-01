@@ -1,0 +1,68 @@
+import {
+  assertCsrf,
+  jsonObject,
+  publicUser,
+  requireAdmin,
+} from "@/server/auth/http";
+import { validatePassword } from "@/server/auth/password";
+import { AppError } from "@/server/files/errors";
+import { errorResponse, json } from "@/server/files/http";
+
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+
+interface RouteContext {
+  params: Promise<{ id: string }>;
+}
+
+export async function PATCH(
+  request: Request,
+  context: RouteContext,
+): Promise<Response> {
+  try {
+    const { service, principal } = await requireAdmin(request);
+    assertCsrf(request, service, principal);
+    const id = (await context.params).id;
+    const body = await jsonObject(request);
+    const allowed = new Set(["role", "active", "password"]);
+    if (
+      Object.keys(body).length === 0 ||
+      Object.keys(body).some((key) => !allowed.has(key))
+    ) {
+      throw new AppError(
+        400,
+        "invalid_user_patch",
+        "Patch may contain role, active, and password",
+      );
+    }
+    if (
+      body.role !== undefined &&
+      body.role !== "admin" &&
+      body.role !== "member"
+    ) {
+      throw new AppError(400, "invalid_role", "Role must be admin or member");
+    }
+    if (body.active !== undefined && typeof body.active !== "boolean") {
+      throw new AppError(400, "invalid_active", "Active must be a boolean");
+    }
+    if (body.password !== undefined && typeof body.password !== "string") {
+      throw new AppError(400, "invalid_password", "Password must be a string");
+    }
+    if (typeof body.password === "string") validatePassword(body.password);
+
+    let user = await service.auth.getUser(id);
+    if (!user) throw new AppError(404, "user_not_found", "User not found");
+    if (body.role === "admin" || body.role === "member") {
+      user = await service.auth.setRole(id, body.role);
+    }
+    if (typeof body.active === "boolean") {
+      user = await service.auth.setActive(id, body.active);
+    }
+    if (typeof body.password === "string") {
+      user = await service.auth.setPassword(id, body.password);
+    }
+    return json({ user: publicUser(user) });
+  } catch (error) {
+    return errorResponse(error);
+  }
+}

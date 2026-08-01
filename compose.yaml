@@ -14,6 +14,8 @@ services:
       FS_PUBLIC_URL: ${FS_PUBLIC_URL:-https://files.moulik.dev}
       FS_MAX_UPLOAD_BYTES: ${FS_MAX_UPLOAD_BYTES:-10737418240}
       FS_MIN_FREE_BYTES: ${FS_MIN_FREE_BYTES:-1073741824}
+      FS_BOOTSTRAP_USERNAME: ${FS_BOOTSTRAP_USERNAME:-}
+      FS_BOOTSTRAP_PASSWORD: ${FS_BOOTSTRAP_PASSWORD:-}
     volumes:
       - ./runtime/files:/data/files
       - ./runtime/sqlite:/data/sqlite

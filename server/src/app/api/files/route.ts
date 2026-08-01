@@ -1,6 +1,7 @@
 import { errorResponse, json } from "@/server/files/http";
 import { decodeCursor } from "@/server/files/database";
-import { requestBody, requireApiService } from "@/server/files/request";
+import { AppError } from "@/server/files/errors";
+import { requestBody, requireApiContext } from "@/server/files/request";
 import {
   parseArchive,
   parseBoolean,
@@ -15,7 +16,7 @@ export const dynamic = "force-dynamic";
 
 export async function POST(request: Request): Promise<Response> {
   try {
-    const service = await requireApiService(request);
+    const { service, principal } = await requireApiContext(request, true);
     const url = new URL(request.url);
     const contentLengthHeader = request.headers.get("content-length");
     let contentLength: number | undefined;
@@ -37,12 +38,28 @@ export async function POST(request: Request): Promise<Response> {
     const file = await service.upload(requestBody(request), {
       name: validateFilename(url.searchParams.get("name")),
       tags: validateTags(url.searchParams.getAll("tag")),
-      visibility: parseBoolean(url.searchParams.get("private"))
-        ? "private"
-        : "public",
+      visibility: url.searchParams.has("visibility")
+        ? parseVisibility(url.searchParams.get("visibility"))
+        : parseBoolean(url.searchParams.get("private"))
+          ? "private"
+          : "public",
+      ownerId: principal.userId,
       archive: parseArchive(url.searchParams.get("archive")),
       mimeType: request.headers.get("content-type") ?? undefined,
       contentLength,
+      authorizeFinalize: async () => {
+        const current = await requireApiContext(request, true);
+        if (
+          current.principal.userId !== principal.userId ||
+          current.principal.source !== principal.source
+        ) {
+          throw new AppError(
+            401,
+            "invalid_token",
+            "Credential is no longer valid",
+          );
+        }
+      },
     });
     return json(service.toMetadata(file), {
       status: 201,
@@ -55,7 +72,7 @@ export async function POST(request: Request): Promise<Response> {
 
 export async function GET(request: Request): Promise<Response> {
   try {
-    const service = await requireApiService(request);
+    const { service, principal } = await requireApiContext(request);
     const params = new URL(request.url).searchParams;
     const visibilityValue = params.get("visibility");
     const visibility = visibilityValue
@@ -66,6 +83,7 @@ export async function GET(request: Request): Promise<Response> {
       name: params.get("name") ?? undefined,
       tags: validateTags(params.getAll("tag")),
       visibility,
+      access: { role: principal.role, userId: principal.userId },
       limit: parseLimit(params.get("limit")),
       cursor: params.get("cursor")
         ? decodeCursor(params.get("cursor")!)

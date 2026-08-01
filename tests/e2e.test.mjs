@@ -29,6 +29,8 @@ const cliEntry = path.join(rootDir, "cli", "dist", "index.js");
 const nextEntry = path.join(serverDir, "node_modules", "next", "dist", "bin", "next");
 
 const token = "e2e-shared-secret";
+const bootstrapUsername = "e2e.admin";
+const bootstrapPassword = "e2e admin password from fixture";
 const oneGiB = 1024 ** 3;
 
 function sha256(value) {
@@ -141,7 +143,7 @@ async function waitForServer(server, baseUrl) {
   throw new Error(`Timed out waiting for Next server\n${server.logs()}`);
 }
 
-async function startServer({ port, databasePath, storageDir }) {
+async function startServer({ port, databasePath, storageDir, bootstrap = false }) {
   const baseUrl = `http://127.0.0.1:${port}`;
   const stdout = [];
   const stderr = [];
@@ -155,6 +157,12 @@ async function startServer({ port, databasePath, storageDir }) {
       FS_PUBLIC_URL: baseUrl,
       FS_STORAGE_DIR: storageDir,
       FS_TOKEN: token,
+      ...(bootstrap
+        ? {
+            FS_BOOTSTRAP_USERNAME: bootstrapUsername,
+            FS_BOOTSTRAP_PASSWORD: bootstrapPassword,
+          }
+        : {}),
       NEXT_TELEMETRY_DISABLED: "1",
       NODE_ENV: "production",
     },
@@ -229,7 +237,7 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     await rm(temporaryRoot, { recursive: true, force: true });
   });
 
-  server = await startServer({ port, databasePath, storageDir });
+  server = await startServer({ port, databasePath, storageDir, bootstrap: true });
   baseUrl = server.baseUrl;
 
   await t.test("health endpoint reports usable storage", async () => {
@@ -239,6 +247,43 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     assert.equal(body.status, "ok");
     assert.equal(typeof body.free_bytes, "number");
     assert(body.free_bytes > 0);
+  });
+
+  await t.test("bootstrap login, custom API key, protected visibility, and revocation work", async () => {
+    const login = await fetch(`${baseUrl}/api/auth/login`, {
+      method: "POST",
+      headers: { "content-type": "application/json", origin: baseUrl },
+      body: JSON.stringify({ username: bootstrapUsername, password: bootstrapPassword }),
+    });
+    assert.equal(login.status, 200);
+    const cookie = login.headers.get("set-cookie")?.split(";", 1)[0];
+    assert(cookie, "login should set the session cookie");
+
+    const created = await fetch(`${baseUrl}/api/api-keys`, {
+      method: "POST",
+      headers: { "content-type": "application/json", cookie, origin: baseUrl },
+      body: JSON.stringify({ name: "e2e-cli" }),
+    });
+    assert.equal(created.status, 201);
+    const createdBody = await created.json();
+    const apiKey = createdBody.api_key.secret;
+    assert.match(apiKey, /^fsk_[A-Za-z0-9_-]{43}$/);
+
+    const protectedPath = path.join(fixtureDir, "protected-e2e.txt");
+    await writeFile(protectedPath, "authenticated only");
+    const [uploaded] = await uploadJson([protectedPath, "--protected"], {
+      token: apiKey,
+    });
+    assert.equal(uploaded.visibility, "protected");
+    assert.equal((await request(`/raw/${uploaded.id}`, {}, false)).status, 404);
+    assert.equal((await fetch(`${baseUrl}/raw/${uploaded.id}`, { headers: { authorization: `Bearer ${apiKey}` } })).status, 200);
+
+    const revoked = await fetch(`${baseUrl}/api/api-keys/${createdBody.api_key.id}`, {
+      method: "DELETE",
+      headers: { cookie, origin: baseUrl },
+    });
+    assert.equal(revoked.status, 204);
+    assert.equal((await fetch(`${baseUrl}/api/files`, { headers: { authorization: `Bearer ${apiKey}` } })).status, 401);
   });
 
   let persistenceId;

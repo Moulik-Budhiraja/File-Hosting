@@ -48,7 +48,7 @@ const ROOT_HELP = `Usage:
   fs find [query] [options]         Search by name and/or tag
   fs info <id...> [options]         Show metadata and URLs
   fs tag <id> add|remove|set <tag...>
-  fs visibility <id> public|private
+  fs visibility <id> public|protected|private
   fs rm <id...> [--yes]             Delete files
   fs auth set|status|delete         Manage the saved token
 
@@ -72,7 +72,8 @@ Options:
   -r, --recursive             Archive matched directories
   --name <name>               Stored name (one input only; required for '-')
   --tag <tag>                 Add a tag (repeatable)
-  --private                   Make uploaded objects private
+  --protected                 Require authentication to read uploaded objects
+  --private                   Make uploaded objects owner-only
   --allow-large-upload        Confirm prior human approval above 1 GiB
   --no-input                  Never prompt
   --json | --jsonl | --id     Machine-readable output
@@ -249,6 +250,7 @@ async function uploadCommand(
     recursive: { type: "boolean", short: "r" },
     name: { type: "string" },
     tag: { type: "string", multiple: true },
+    protected: { type: "boolean" },
     private: { type: "boolean" },
     "allow-large-upload": { type: "boolean" },
     "no-input": { type: "boolean" },
@@ -258,6 +260,13 @@ async function uploadCommand(
     return EXIT.success;
   }
   const mode = chooseOutputMode(parsed.values);
+  if (parsed.values.protected && parsed.values.private) {
+    throw new CliError(
+      "Choose only one of --protected or --private",
+      EXIT.usage,
+      "VISIBILITY_CONFLICT",
+    );
+  }
   const tags = tagsFrom(parsed.values.tag);
   const prepared = await prepareInputs(
     parsed.positionals,
@@ -295,7 +304,11 @@ async function uploadCommand(
             size: input.uploadSize,
             stream: progress.trackReadable(input.open()),
             tags,
-            private: parsed.values.private ?? false,
+            visibility: parsed.values.protected
+              ? "protected"
+              : parsed.values.private
+                ? "private"
+                : "public",
             archive: input.archive,
           }),
         );
@@ -351,21 +364,23 @@ async function listCommand(args: string[], api: ApiClient, streams: Streams, fin
     tag: { type: "string", multiple: true },
     name: { type: "string" },
     public: { type: "boolean" },
+    protected: { type: "boolean" },
     private: { type: "boolean" },
     limit: { type: "string" },
   });
   if (parsed.values.help) {
     streams.stdout.write(
       find
-        ? "Usage: fs find [query] [--name <glob>] [--tag <tag>...] [--public|--private] [--limit N] [--json|--jsonl|--ids]\n"
-        : "Usage: fs list [--tag <tag>...] [--public|--private] [--limit N] [--json|--jsonl|--ids]\n",
+        ? "Usage: fs find [query] [--name <glob>] [--tag <tag>...] [--public|--protected|--private] [--limit N] [--json|--jsonl|--ids]\n"
+        : "Usage: fs list [--tag <tag>...] [--public|--protected|--private] [--limit N] [--json|--jsonl|--ids]\n",
     );
     return EXIT.success;
   }
   if (!find && parsed.positionals.length) throw new CliError("fs list does not accept positional arguments", EXIT.usage, "INVALID_ARGUMENTS");
   if (find && parsed.positionals.length > 1) throw new CliError("fs find accepts at most one query", EXIT.usage, "INVALID_ARGUMENTS");
-  if (parsed.values.public && parsed.values.private) {
-    throw new CliError("Choose only one of --public or --private", EXIT.usage, "VISIBILITY_CONFLICT");
+  const visibilityOptions = [parsed.values.public, parsed.values.protected, parsed.values.private].filter(Boolean).length;
+  if (visibilityOptions > 1) {
+    throw new CliError("Choose only one of --public, --protected, or --private", EXIT.usage, "VISIBILITY_CONFLICT");
   }
   const mode = chooseOutputMode(parsed.values);
   const limit = positiveInteger(parsed.values.limit, "--limit");
@@ -375,7 +390,13 @@ async function listCommand(args: string[], api: ApiClient, streams: Streams, fin
       q: find ? parsed.positionals[0] : undefined,
       name: find ? parsed.values.name : undefined,
       tags: tagsFrom(parsed.values.tag),
-      visibility: parsed.values.public ? "public" : parsed.values.private ? "private" : undefined,
+      visibility: parsed.values.public
+        ? "public"
+        : parsed.values.protected
+          ? "protected"
+          : parsed.values.private
+            ? "private"
+            : undefined,
     },
     limit,
   );
@@ -452,15 +473,15 @@ async function tagCommand(args: string[], api: ApiClient, streams: Streams): Pro
 async function visibilityCommand(args: string[], api: ApiClient, streams: Streams): Promise<ExitCode> {
   const parsed = parse(args, { json: { type: "boolean" }, "no-input": { type: "boolean" }, help: { type: "boolean", short: "h" } });
   if (parsed.values.help) {
-    streams.stdout.write("Usage: fs visibility <id> public|private [--json]\n");
+    streams.stdout.write("Usage: fs visibility <id> public|protected|private [--json]\n");
     return EXIT.success;
   }
   const [id, visibility, ...extra] = parsed.positionals;
-  if (!id || !visibility || extra.length || !["public", "private"].includes(visibility)) {
-    throw new CliError("Usage: fs visibility <id> public|private", EXIT.usage, "INVALID_ARGUMENTS");
+  if (!id || !visibility || extra.length || !["public", "protected", "private"].includes(visibility)) {
+    throw new CliError("Usage: fs visibility <id> public|protected|private", EXIT.usage, "INVALID_ARGUMENTS");
   }
   validateIds([id]);
-  const item = enrich(api, await api.patch(id, { visibility: visibility as "public" | "private" }));
+  const item = enrich(api, await api.patch(id, { visibility: visibility as "public" | "protected" | "private" }));
   printInfo(streams, item, parsed.values.json ?? false);
   return EXIT.success;
 }

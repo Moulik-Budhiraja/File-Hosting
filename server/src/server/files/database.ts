@@ -1,13 +1,12 @@
-import { mkdir } from "node:fs/promises";
-import path from "node:path";
-
 import {
   createClient,
   type Client,
   type InValue,
   type Row,
+  type Transaction,
 } from "@libsql/client";
 
+import { prepareLocalDatabaseDirectory } from "./database-url";
 import { AppError } from "./errors";
 import type {
   ArchiveType,
@@ -25,7 +24,8 @@ CREATE TABLE IF NOT EXISTS files (
   size INTEGER NOT NULL CHECK(size >= 0),
   mime_type TEXT NOT NULL,
   sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
-  visibility TEXT NOT NULL CHECK(visibility IN ('public', 'private')),
+  visibility TEXT NOT NULL CHECK(visibility IN ('public', 'protected', 'private')),
+  owner_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
   storage_key TEXT NOT NULL UNIQUE,
   archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
   created_at TEXT NOT NULL,
@@ -46,15 +46,9 @@ CREATE TABLE IF NOT EXISTS file_tags (
 CREATE INDEX IF NOT EXISTS files_created_at_id_idx ON files(created_at DESC, id DESC);
 CREATE INDEX IF NOT EXISTS files_name_idx ON files(name);
 CREATE INDEX IF NOT EXISTS files_visibility_idx ON files(visibility);
+CREATE INDEX IF NOT EXISTS files_owner_visibility_idx ON files(owner_id, visibility);
 CREATE INDEX IF NOT EXISTS file_tags_tag_name_idx ON file_tags(tag_name, file_id);
 `;
-
-function localDatabasePath(databaseUrl: string): string | null {
-  if (!databaseUrl.startsWith("file:")) return null;
-  const raw = databaseUrl.slice("file:".length).split("?")[0];
-  if (!raw || raw === ":memory:") return null;
-  return path.resolve(decodeURIComponent(raw));
-}
 
 function rowString(row: Row, key: string): string {
   const value = row[key];
@@ -79,6 +73,7 @@ function fileFromRow(row: Row, tags: string[]): StoredFile {
     mimeType: rowString(row, "mime_type"),
     sha256: rowString(row, "sha256"),
     visibility: rowString(row, "visibility") as Visibility,
+    ownerId: typeof row.owner_id === "string" ? row.owner_id : null,
     storageKey: rowString(row, "storage_key"),
     archive: archive === null ? null : (archive as ArchiveType),
     createdAt: rowString(row, "created_at"),
@@ -89,6 +84,14 @@ function fileFromRow(row: Row, tags: string[]): StoredFile {
 
 function escapeLike(value: string): string {
   return value.replace(/[\\%_]/gu, "\\$&");
+}
+
+function isDatabaseBusy(error: unknown): boolean {
+  return (
+    error instanceof Error &&
+    "code" in error &&
+    (error as Error & { code?: string }).code === "SQLITE_BUSY"
+  );
 }
 
 export function encodeCursor(cursor: {
@@ -130,14 +133,90 @@ export class FileRepository {
   }
 
   static async create(databaseUrl: string): Promise<FileRepository> {
-    const databasePath = localDatabasePath(databaseUrl);
-    if (databasePath)
-      await mkdir(path.dirname(databasePath), { recursive: true });
+    await prepareLocalDatabaseDirectory(databaseUrl);
     const repository = new FileRepository(
       createClient({ url: databaseUrl, intMode: "number" }),
     );
     await repository.ensureReady();
     return repository;
+  }
+
+  private async acquireMigrationTransaction(): Promise<Transaction> {
+    const deadline = Date.now() + 5_000;
+    for (;;) {
+      try {
+        return await this.client.transaction("write");
+      } catch (error) {
+        if (!isDatabaseBusy(error) || Date.now() >= deadline) throw error;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+    }
+  }
+
+  private async migrateLegacyFiles(): Promise<void> {
+    await this.client.execute("PRAGMA foreign_keys = OFF");
+    await this.client.execute("PRAGMA busy_timeout = 0");
+    let migrated = false;
+    let transaction: Transaction | null = null;
+    try {
+      transaction = await this.acquireMigrationTransaction();
+      const existing = await transaction.execute(
+        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",
+      );
+      const definition = existing.rows[0]?.sql;
+      const needsMigration =
+        typeof definition === "string" &&
+        (!definition.includes("owner_id") ||
+          !definition.includes("'protected'"));
+      if (!needsMigration) {
+        transaction.close();
+        transaction = null;
+        return;
+      }
+      await transaction.batch([
+        `CREATE TABLE files_v2 (
+            id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
+            name TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0),
+            mime_type TEXT NOT NULL, sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+            visibility TEXT NOT NULL CHECK(visibility IN ('public', 'protected', 'private')),
+            owner_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
+            storage_key TEXT NOT NULL UNIQUE,
+            archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
+            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+          )`,
+        `INSERT INTO files_v2
+            (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
+            SELECT id, name, size, mime_type, sha256, visibility, NULL, storage_key, archive, created_at, updated_at FROM files`,
+        `CREATE TABLE file_tags_v2 (
+            file_id TEXT NOT NULL REFERENCES files_v2(id) ON DELETE CASCADE,
+            tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
+            PRIMARY KEY (file_id, tag_name)
+          )`,
+        "INSERT INTO file_tags_v2 SELECT file_id, tag_name FROM file_tags",
+        "DROP TABLE file_tags",
+        "DROP TABLE files",
+        "ALTER TABLE files_v2 RENAME TO files",
+        "ALTER TABLE file_tags_v2 RENAME TO file_tags",
+      ]);
+      migrated = true;
+      await transaction.commit();
+    } catch (error) {
+      if (transaction) await transaction.rollback();
+      throw error;
+    } finally {
+      transaction?.close();
+      await this.client.execute("PRAGMA busy_timeout = 5000");
+      await this.client.execute("PRAGMA foreign_keys = ON");
+    }
+    if (!migrated) return;
+    const violations = await this.client.execute("PRAGMA foreign_key_check");
+    if (violations.rows.length > 0) {
+      throw new AppError(
+        500,
+        "migration_integrity_error",
+        "File migration failed foreign-key validation",
+      );
+    }
   }
 
   private async initialize(): Promise<void> {
@@ -148,6 +227,7 @@ export class FileRepository {
     } catch {
       // Remote libSQL endpoints manage journaling themselves.
     }
+    await this.migrateLegacyFiles();
     await this.client.executeMultiple(SCHEMA);
   }
 
@@ -201,10 +281,13 @@ export class FileRepository {
     await this.ready;
     const transaction = await this.client.transaction("write");
     try {
-      await transaction.execute({
+      const inserted = await transaction.execute({
         sql: `INSERT INTO files
-          (id, name, size, mime_type, sha256, visibility, storage_key, archive, created_at, updated_at)
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
+          SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
+          WHERE ? IS NULL OR EXISTS (
+            SELECT 1 FROM users WHERE id = ? AND active = 1
+          )`,
         args: [
           file.id,
           file.name,
@@ -212,12 +295,22 @@ export class FileRepository {
           file.mimeType,
           file.sha256,
           file.visibility,
+          file.ownerId,
           file.storageKey,
           file.archive,
           file.createdAt,
           file.updatedAt,
+          file.ownerId,
+          file.ownerId,
         ],
       });
+      if (inserted.rowsAffected === 0) {
+        throw new AppError(
+          401,
+          "account_inactive",
+          "The upload owner is no longer active",
+        );
+      }
       for (const tag of tags) {
         await transaction.execute({
           sql: "INSERT INTO tags (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
@@ -230,6 +323,9 @@ export class FileRepository {
       }
       await transaction.commit();
       return { ...file, tags: [...tags].sort((a, b) => a.localeCompare(b)) };
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     } finally {
       transaction.close();
     }
@@ -239,6 +335,15 @@ export class FileRepository {
     await this.ready;
     const where: string[] = [];
     const args: InValue[] = [];
+    const access = options.access ?? { role: "admin", userId: null };
+    if (access.role === "anonymous") {
+      where.push("f.visibility = 'public'");
+    } else if (access.role === "member") {
+      where.push(
+        "(f.visibility IN ('public', 'protected') OR (f.visibility = 'private' AND f.owner_id = ?))",
+      );
+      args.push(access.userId);
+    }
 
     if (options.q) {
       const search = `%${escapeLike(options.q.toLocaleLowerCase("en-US"))}%`;
@@ -349,6 +454,9 @@ export class FileRepository {
         });
       }
       await transaction.commit();
+    } catch (error) {
+      await transaction.rollback();
+      throw error;
     } finally {
       transaction.close();
     }

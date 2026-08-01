@@ -129,7 +129,9 @@ class MockService {
         id,
         name: url.searchParams.get("name") ?? "file",
         size: body.length,
-        visibility: url.searchParams.get("private") === "true" ? "private" : "public",
+        visibility:
+          (url.searchParams.get("visibility") as FileMetadata["visibility"] | null) ??
+          (url.searchParams.get("private") === "true" ? "private" : "public"),
         tags: url.searchParams.getAll("tag"),
         archive: url.searchParams.get("archive") === "tar.gz" ? "tar.gz" : null,
         sha256: "test-sha",
@@ -433,6 +435,19 @@ test("global --no-input rejects interactive auth set without reading or saving",
   assert.equal(writes, 0);
 });
 
+test("upload creates protected objects atomically", async () => {
+  const path = join(scratch, "protected.txt");
+  await writeFile(path, "authenticated only");
+
+  const result = await cli([path, "--protected", "--json"]);
+  assert.equal(result.code, 0);
+  const [item] = JSON.parse(result.stdout.text) as FileMetadata[];
+  assert.equal(item.visibility, "protected");
+  const request = service.requests.find((entry) => entry.path === "/api/files")!;
+  assert.equal(request.query.get("visibility"), "protected");
+  assert.equal(request.query.get("private"), "true");
+});
+
 test("upload shorthand streams bytes and applies tags and visibility", async () => {
   const path = join(scratch, "report.txt");
   await writeFile(path, "hello agent");
@@ -635,6 +650,25 @@ test("list paginates, caps server page size, and supports NUL-delimited IDs", as
   assert(limits.every((limit) => limit <= 500));
 });
 
+test("list supports protected-only visibility filtering", async () => {
+  const match = service.seed({ visibility: "protected" });
+  service.seed({ visibility: "public" });
+
+  const result = await cli(["list", "--protected", "--json"]);
+
+  assert.equal(result.code, 0);
+  assert.deepEqual(
+    (JSON.parse(result.stdout.text) as FileMetadata[]).map((item) => item.id),
+    [match.id],
+  );
+  const request = service.requests.find((entry) => entry.path === "/api/files")!;
+  assert.equal(request.query.get("visibility"), "protected");
+
+  const conflict = await cli(["list", "--protected", "--private"]);
+  assert.equal(conflict.code, 2);
+  assert.match(conflict.stderr.text, /choose only one/iu);
+});
+
 test("find sends query, name glob, tags, and visibility", async () => {
   const match = service.seed({ name: "quarterly.pdf", tags: ["finance"], visibility: "private" });
   service.seed({ name: "quarterly.txt", tags: ["finance"], visibility: "private" });
@@ -666,6 +700,8 @@ test("tag and visibility commands use PATCH semantics", async () => {
   assert.deepEqual(service.files.get(item.id)?.metadata.tags, ["new"]);
   assert.equal((await cli(["tag", item.id, "set"])).code, 0);
   assert.deepEqual(service.files.get(item.id)?.metadata.tags, []);
+  assert.equal((await cli(["visibility", item.id, "protected"])).code, 0);
+  assert.equal(service.files.get(item.id)?.metadata.visibility, "protected");
   assert.equal((await cli(["visibility", item.id, "private"])).code, 0);
   assert.equal(service.files.get(item.id)?.metadata.visibility, "private");
 });

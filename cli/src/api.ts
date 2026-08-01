@@ -11,7 +11,7 @@ export interface ListParams {
   q?: string;
   name?: string;
   tags?: string[];
-  visibility?: "public" | "private";
+  visibility?: "public" | "protected" | "private";
   limit?: number;
   cursor?: string;
 }
@@ -74,12 +74,15 @@ export class ApiClient {
     size: number;
     stream: Readable;
     tags: string[];
-    private: boolean;
+    visibility: "public" | "protected" | "private";
     archive: "tar.gz" | null;
   }): Promise<FileMetadata> {
     const query = new URLSearchParams({ name: input.name });
     for (const tag of input.tags) query.append("tag", tag);
-    if (input.private) query.set("private", "true");
+    if (input.visibility !== "public") {
+      query.set("visibility", input.visibility);
+      query.set("private", "true");
+    }
     if (input.archive) query.set("archive", input.archive);
     const response = await this.checked(this.url("/api/files", query), {
       method: "POST",
@@ -115,7 +118,7 @@ export class ApiClient {
     id: string,
     body: {
       tags?: { operation: "add" | "remove" | "set"; values: string[] };
-      visibility?: "public" | "private";
+      visibility?: "public" | "protected" | "private";
     },
   ): Promise<FileMetadata> {
     const response = await this.checked(this.url(`/api/files/${encodeURIComponent(id)}`), {

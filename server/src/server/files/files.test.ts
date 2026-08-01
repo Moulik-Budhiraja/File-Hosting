@@ -16,6 +16,7 @@ import { GET as health } from "../../app/healthz/route";
 import { GET as rawFile, HEAD as headRawFile } from "../../app/raw/[id]/route";
 import { isAuthorized } from "./auth";
 import { decodeCursor, encodeCursor } from "./database";
+import { AppError } from "./errors";
 import { generateFileId } from "./id";
 import { parseRangeHeader } from "./range";
 import { FileService } from "./service";
@@ -115,7 +116,7 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
 
   after(async () => {
     setFileServiceForTests(null);
-    await service.repository.close();
+    await service.close();
     await rm(directory, { recursive: true, force: true });
   });
 
@@ -229,6 +230,24 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       tags: { operation: "set", values: ["final"] },
     });
     assert.deepEqual(replaced?.tags, ["final"]);
+  });
+
+  it("rejects a streamed upload when finalize authorization is revoked", async () => {
+    await assert.rejects(
+      service.upload(chunks("revoked"), {
+        name: "revoked-upload.txt",
+        tags: [],
+        visibility: "private",
+        archive: null,
+        mimeType: "text/plain",
+        contentLength: 7,
+        authorizeFinalize: () => {
+          throw new AppError(401, "invalid_token", "Credential was revoked");
+        },
+      }),
+      (error: unknown) =>
+        error instanceof AppError && error.code === "invalid_token",
+    );
   });
 
   it("rejects oversized streams and removes partial files", async () => {
@@ -358,6 +377,26 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.equal(invalid.headers.get("content-range"), "bytes */40");
   });
 
+  it("rejects oversized file PATCH bodies before parsing", async () => {
+    const file = await service.upload(chunks("bounded"), {
+      name: "bounded-patch.txt",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "text/plain",
+      contentLength: 7,
+    });
+    const response = await patchFile(
+      new Request(`http://localhost/api/files/${file.id}`, {
+        method: "PATCH",
+        headers: { ...AUTHORIZATION, "content-type": "application/json" },
+        body: JSON.stringify({ payload: "x".repeat(65_536) }),
+      }),
+      routeContext(file.id),
+    );
+    assert.equal(response.status, 413);
+  });
+
   it("makes private files indistinguishable from missing files without auth", async () => {
     const patchResponse = await patchFile(
       new Request(`http://localhost/api/files/${uploadedId}`, {
@@ -395,6 +434,129 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       routeContext(uploadedId),
     );
     assert.equal(authenticated.status, 200);
+  });
+
+  it("enforces ownership, protected visibility, IDOR hiding, and pre-pagination filtering", async () => {
+    const owner = await service.auth.createUser({
+      username: "file.owner",
+      password: "a sufficiently long owner password",
+      role: "member",
+    });
+    const other = await service.auth.createUser({
+      username: "file.other",
+      password: "a sufficiently long other password",
+      role: "member",
+    });
+    const ownerKey = await service.auth.createApiKey(owner.id, "owner-test");
+    const otherKey = await service.auth.createApiKey(other.id, "other-test");
+    const ownerAuth = { authorization: `Bearer ${ownerKey.secret}` };
+    const otherAuth = { authorization: `Bearer ${otherKey.secret}` };
+    const ownerSession = await service.auth.createSession(owner.id);
+    const csrfRejected = await postFile(
+      new Request("http://localhost/api/files?name=csrf.txt", {
+        method: "POST",
+        headers: {
+          cookie: `fs_session=${ownerSession.token}`,
+          origin: "https://evil.example",
+        },
+        body: "blocked",
+      }),
+    );
+    assert.equal(csrfRejected.status, 403);
+
+    const privateUpload = await postFile(
+      new Request(
+        "http://localhost/api/files?name=owned.txt&visibility=private",
+        {
+          method: "POST",
+          headers: ownerAuth,
+          body: "owned",
+        },
+      ),
+    );
+    assert.equal(privateUpload.status, 201);
+    const privateMetadata = (await privateUpload.json()) as {
+      id: string;
+      owner_id: string | null;
+    };
+    const privateId = privateMetadata.id;
+    assert.equal(privateMetadata.owner_id, owner.id);
+    assert.equal((await service.get(privateId))?.ownerId, owner.id);
+
+    const protectedUpload = await postFile(
+      new Request(
+        "http://localhost/api/files?name=shared.txt&visibility=protected",
+        {
+          method: "POST",
+          headers: ownerAuth,
+          body: "shared",
+        },
+      ),
+    );
+    assert.equal(protectedUpload.status, 201);
+    const protectedId = ((await protectedUpload.json()) as { id: string }).id;
+    assert.equal(
+      (
+        await rawFile(
+          new Request(`http://localhost/raw/${protectedId}`, {
+            headers: otherAuth,
+          }),
+          routeContext(protectedId),
+        )
+      ).status,
+      200,
+    );
+    assert.equal(
+      (
+        await rawFile(
+          new Request(`http://localhost/raw/${protectedId}`),
+          routeContext(protectedId),
+        )
+      ).status,
+      404,
+    );
+
+    for (const action of [
+      () =>
+        getFile(
+          new Request(`http://localhost/api/files/${privateId}`, {
+            headers: otherAuth,
+          }),
+          routeContext(privateId),
+        ),
+      () =>
+        patchFile(
+          new Request(`http://localhost/api/files/${privateId}`, {
+            method: "PATCH",
+            headers: { ...otherAuth, "content-type": "application/json" },
+            body: JSON.stringify({ visibility: "public" }),
+          }),
+          routeContext(privateId),
+        ),
+      () =>
+        deleteFile(
+          new Request(`http://localhost/api/files/${privateId}`, {
+            method: "DELETE",
+            headers: otherAuth,
+          }),
+          routeContext(privateId),
+        ),
+    ]) {
+      assert.equal((await action()).status, 404);
+    }
+
+    const page = await listFiles(
+      new Request("http://localhost/api/files?limit=1", { headers: otherAuth }),
+    );
+    assert.equal(page.status, 200);
+    const body = (await page.json()) as {
+      items: Array<{ id: string }>;
+      next_cursor: string | null;
+    };
+    assert.equal(
+      body.items.some((item) => item.id === privateId),
+      false,
+    );
   });
 
   it("reports health, deletes metadata and bytes, then returns 404", async () => {
