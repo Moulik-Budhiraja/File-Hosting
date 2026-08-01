@@ -1148,22 +1148,7 @@ main.landing code {
   }
 }
 
-/* ---- hardening pass: rollout label, sheets, wrapping, touch targets ---- */
-
-.rollout-tag {
-  font-family: var(--font-mono);
-  font-size: var(--text-label);
-  letter-spacing: var(--tracking-caps);
-  color: var(--color-warning);
-  border: 1px solid var(--color-hairline-strong);
-  border-radius: var(--radius-sm);
-  padding: 2px 6px;
-  white-space: nowrap;
-}
-
-.login-shell-header .rollout-tag {
-  margin-left: var(--space-3);
-}
+/* ---- hardening pass: sheets, wrapping, touch targets ---- */
 
 .banner-success::before {
   content: "• ";
@@ -1280,7 +1265,6 @@ main.landing code {
   .dialog-panel,
   .notice,
   .banner,
-  .rollout-tag,
   .tag {
     border: 1px solid CanvasText;
   }

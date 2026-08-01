@@ -68,7 +68,7 @@ RED→GREEN inside the Playwright suite itself (32 → 44 px).
 | P2-9 44px + overflow failures         | **Fixed.** Mobile/coarse rules give login inputs+button, segments, and link actions ≥44×44 (specificity corrected); `min-width:0` + `overflow-wrap:anywhere` on dialog titles, row/detail/page titles, table cells, fact rows. Live-verified at 360/390/430/768/1440 with 100-byte names (page + dialog).                                                    |
 | P2-10 no defensive headers            | **Fixed.** App CSP (`frame-ancestors 'none'` + self-pinned sources), legacy XFO DENY, nosniff, strict referrer, Permissions-Policy, `poweredByHeader:false`; API routes hardened separately; `/{id}` and `/raw/{id}` deliberately excluded so their stricter route-specific policies stand (tested live, incl. iframe denial and raw-route non-inheritance). |
 | P2-11 no tracked browser tests/CI     | **Fixed.** Tracked Playwright production suite (27 tests, standalone server, synthetic fixtures) + `.github/workflows/server.yml` (Ubuntu: install, lint, typecheck, backend+UI tests, format, build, standalone smoke, Chromium production tests, CLI build, root E2E, production audit; root/server/cli/config path triggers).                             |
-| P2-12 rollout label removed           | **Fixed.** `RolloutTag` (“PROPOSED · BACKEND IN PR #7”) on the login shell and every console page header; centralized for one-line removal when PR #7 merges. Legacy landing/file pages are unlabeled (established behavior).                                                                                                                                |
+| P2-12 rollout label lifecycle         | **Fixed.** The temporary “PROPOSED · BACKEND IN PR #7” label shipped while PR #7 was open, then its component, usage sites, and styles were removed after PR #7 merged. Login and console tests now assert that the stale future-tense label is absent.                                                                                                      |
 | P3-1 throttle UX                      | **Fixed.** 429 clears/refocuses the password; the truthful lock warning persists through edits (submit re-enabled for retry); copy is “Try again later.” — no fabricated countdown (backend exposes no retry metadata).                                                                                                                                      |
 | P3-2 next loses task state            | **Fixed.** Files search/visibility/scope/cursor live in the URL (replaceState); expiry preserves complete `pathname + search`; sanitizer keeps query+hash. Unit + live (reauth returns to the actual task).                                                                                                                                                  |
 
@@ -145,8 +145,9 @@ All 33 implementation-pass captures were regenerated with
 a fresh synthetic dataset (users `ops-admin`/`sam-ops`/`priya.k`/
 `intern-2025`(disabled)/`nadia.r`; files across all three visibilities;
 active + revoked keys; shown-once secret DOM text replaced with EXAMPLE
-placeholders before capture). Same filenames as before; every screen now
-carries the rollout tag. `mobile-users-actions-390x844.png` now shows the
+placeholders before capture). Same filenames as before; these captures predate
+PR #7's merge and therefore show the then-required rollout tag. The tag was
+removed after the merge. `mobile-users-actions-390x844.png` shows the
 adopted IA-09d action sheet. Compared against all ten live Paper boards
 (IA·01–IA·10, file `01KYVPSA8HV7QMRBN7MBPX0G99`): layouts, copy tone,
 canonical fact placement, and state words match; deliberate,

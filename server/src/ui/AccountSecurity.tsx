@@ -116,6 +116,18 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
         // The server judged the NEW password invalid — the error belongs
         // to the new-password field, not the current-credential field.
         setState({ kind: "new-rejected", message: `${error.message}.` });
+      } else if (
+        isApiError(error) &&
+        error.status >= 500 &&
+        !error.hasErrorEnvelope
+      ) {
+        // A proxy/gateway can replace the origin response after the password
+        // transaction committed. Without our structured error envelope, a
+        // delivered 5xx cannot prove rollback, so recovery stays conservative.
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setState({ kind: "outcome-unknown" });
       } else if (isApiError(error)) {
         // The error response was DELIVERED, so the outcome is known: the
         // password route rolls back on any error and only commits before
@@ -196,7 +208,12 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
               aria-describedby={
                 state.kind === "current-rejected" ? currentErrorId : undefined
               }
-              onChange={(event) => setCurrentPassword(event.target.value)}
+              onChange={(event) => {
+                setCurrentPassword(event.target.value);
+                if (state.kind === "current-rejected") {
+                  setState({ kind: "idle" });
+                }
+              }}
             />
             {state.kind === "current-rejected" ? (
               <p className="field-error" id={currentErrorId}>
@@ -216,6 +233,7 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
               onChange={(event) => {
                 setNewPassword(event.target.value);
                 setNewError(null);
+                setMismatch(false);
                 if (state.kind === "new-rejected") setState({ kind: "idle" });
               }}
             />

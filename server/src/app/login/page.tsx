@@ -7,7 +7,6 @@ import { markSessionActive } from "@/lib/auth-context";
 import { publishSessionChange } from "@/lib/session-signal";
 import { sanitizeNextPath } from "@/lib/next-path";
 import { safeStorageGet, safeStorageSet } from "@/lib/safe-storage";
-import { RolloutTag } from "@/ui/RolloutTag";
 import { LoginForm, type LoginNotice } from "@/ui/LoginForm";
 
 const LAST_USERNAME_KEY = "fs.last-username";
@@ -40,7 +39,6 @@ function LoginScreen() {
     <div className="login-shell">
       <header className="login-shell-header">
         <span className="nav-product-name">fs-server</span>
-        <RolloutTag />
       </header>
       <main className="login-main">
         <LoginForm

@@ -132,7 +132,7 @@ test("AdminGate renders admin content for admins", async () => {
   expect(await screen.findByText("directory")).toBeTruthy();
 });
 
-test("every console surface carries the PROPOSED rollout label until PR #7 merges", async () => {
+test("console surfaces do not advertise the backend as unmerged after PR #7 merged", async () => {
   vi.stubGlobal(
     "fetch",
     vi.fn(async () => meResponse("admin", "ops-admin")),
@@ -145,5 +145,6 @@ test("every console surface carries the PROPOSED rollout label until PR #7 merge
       </ConsolePage>
     </AuthProvider>,
   );
-  expect(await screen.findByText("PROPOSED · BACKEND IN PR #7")).toBeTruthy();
+  expect(await screen.findByText("content")).toBeTruthy();
+  expect(screen.queryByText("PROPOSED · BACKEND IN PR #7")).toBeNull();
 });

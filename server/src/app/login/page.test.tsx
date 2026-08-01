@@ -39,6 +39,11 @@ const user = {
   updated_at: "2026-07-01T00:00:00.000Z",
 };
 
+test("login does not advertise the backend as unmerged after PR #7 merged", () => {
+  render(<LoginPage />);
+  expect(screen.queryByText("PROPOSED · BACKEND IN PR #7")).toBeNull();
+});
+
 async function signIn() {
   vi.stubGlobal(
     "fetch",

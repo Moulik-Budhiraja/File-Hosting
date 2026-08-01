@@ -3,6 +3,7 @@ export class ApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    public readonly hasErrorEnvelope: boolean,
   ) {
     super(message);
     this.name = "ApiError";
@@ -61,12 +62,17 @@ export async function apiFetch<T = unknown>(
   if (!response.ok) {
     let code = "internal_error";
     let message = "The server could not complete the request";
+    let hasErrorEnvelope = false;
     try {
       const payload = (await response.json()) as {
         error?: { code?: unknown; message?: unknown };
       };
-      if (typeof payload.error?.code === "string") code = payload.error.code;
-      if (typeof payload.error?.message === "string") {
+      if (
+        typeof payload.error?.code === "string" &&
+        typeof payload.error?.message === "string"
+      ) {
+        hasErrorEnvelope = true;
+        code = payload.error.code;
         message = payload.error.message;
       }
     } catch {
@@ -78,7 +84,7 @@ export async function apiFetch<T = unknown>(
     if (response.status === 403) {
       for (const handler of forbiddenHandlers) handler();
     }
-    throw new ApiError(response.status, code, message);
+    throw new ApiError(response.status, code, message, hasErrorEnvelope);
   }
   if (response.status === 204) return undefined as T;
   return (await response.json()) as T;
