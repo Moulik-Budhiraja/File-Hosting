@@ -129,6 +129,11 @@ test("lists key metadata only — masked prefix and tail, explicit status words"
   expect(
     screen.getByRole("cell", { name: /revoked · Apr 2, 2026/ }),
   ).toBeTruthy();
+  expect(
+    screen.getByText(
+      "Revoked history may omit records older than 90 days or beyond 20 keys.",
+    ),
+  ).toBeTruthy();
   // Revoked rows keep no revoke action.
   const revokeButtons = screen.getAllByRole("button", { name: /^Revoke/ });
   expect(revokeButtons).toHaveLength(1);

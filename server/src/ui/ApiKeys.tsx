@@ -685,6 +685,12 @@ export function ApiKeysView() {
               </span>
             ) : null}
           </div>
+          {state.keys.some((key) => key.revoked_at !== null) ? (
+            <p className="table-footline">
+              Revoked history may omit records older than 90 days or beyond 20
+              keys.
+            </p>
+          ) : null}
         </>
       ) : null}
 

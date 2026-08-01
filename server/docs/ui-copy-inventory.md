@@ -53,6 +53,7 @@ Visible copy stays only when it helps a user choose, act, recover, or understand
 - One-time secret copy failure recovery and acknowledgement/close protection.
 - Destructive confirmation consequences for deleting files, revoking keys, disabling accounts, changing roles, and resetting passwords.
 - Last-active-admin lockout explanation and recovery action.
+- The concise revoked-key retention limit when revoked history is present.
 
 ## Exact-head audit repairs
 
