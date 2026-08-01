@@ -459,3 +459,64 @@ standalone build.
   fails the UI reports the outcome as unknown (by design, tested).
 - Docker image build and native Windows High Contrast remain unavailable
   on this host (unchanged from prior passes).
+
+## Cross-tab same-role account-replacement pass @ bb0008f
+
+An interrupted Sol re-audit surfaced an unverified hypothesis: a tab that
+adopts a replacement identity of the SAME role (member→member or
+admin→admin) keeps its user-scoped React state — list rows, an open
+private-file detail, and open show-once secret dialogs — because nothing
+outside role-gated chrome reacted to the user id changing. The hypothesis
+was reproduced independently before any production edit; strict TDD.
+Commands ran in `server/`.
+
+### RED → GREEN log
+
+| Slice                                               | Test command                                                 | RED observation                                                                                                                       | GREEN                                       |
+| --------------------------------------------------- | ------------------------------------------------------------ | ------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------- |
+| Member→member private rows/detail (production)      | `npx playwright test tests-e2e/identity-replacement.spec.ts` | tab A adopted B's footer identity but `idswap-a-private.txt` stayed rendered twice (row + open detail); the list never reloaded for B | pass — 0 traces of A; B's private row loads |
+| Member→member show-once API key secret (production) | same command                                                 | the `fsk_…` show-once dialog stayed open over B's reloaded key list                                                                   | pass — dialog and secret text gone          |
+| Admin→admin show-once temp password (production)    | same command                                                 | admin A's "Password reset — …" one-time password dialog survived admin B's login                                                      | pass                                        |
+| Demotion leaves privileged rows (production)        | same command                                                 | after the out-of-band admin→member demotion the nav flipped but another member's private file row stayed rendered                     | pass — privileged rows discarded            |
+| Same-role replacement remount (unit)                | `npx vitest run src/lib/auth-context.test.tsx`               | a child probe's held state (`prior-user-private-data`) survived a `publishSessionChange` identity swap member-a→member-b              | 14/14                                       |
+| Role-change remount for the same account (unit)     | same command                                                 | held state survived admin→member for the same user id                                                                                 | pass                                        |
+
+### Fix (one production file)
+
+`src/lib/auth-context.tsx`: the authenticated subtree is rendered as
+`<Fragment key={`${me.user.id}:${me.role}`}>{children}</Fragment>`. Any
+identity replacement (any role combination) or role change remounts every
+user-scoped surface in the same render that commits the new identity:
+state is discarded synchronously (no stale frame), each surface reloads
+only for the new identity, and unmount cleanup (`useLatest` abort +
+cancelled flags) prevents the prior identity's in-flight responses from
+repopulating anything. The stale-refresh banner stays outside the keyed
+subtree, so failed background refreshes still keep the working UI. URL
+task state restored after a remount is validated exactly as after reauth:
+a foreign `sel` is dropped against the new list and a foreign cursor
+degrades to the first page (established, tested behavior).
+
+### Validation battery (final, executed at this state)
+
+| Check                                                   | Result                                                                                                                                                                                                   |
+| ------------------------------------------------------- | -------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `npm run check`                                         | lint/typecheck clean; backend **71/71**; UI **190/190**                                                                                                                                                  |
+| `npm run format:check`                                  | clean                                                                                                                                                                                                    |
+| `npm run build` (clean standalone prepare)              | pass                                                                                                                                                                                                     |
+| `npx playwright test` (production standalone, Chromium) | **55/55** across 18 specs (51 prior + 4 new identity-replacement regressions)                                                                                                                            |
+| CLI typecheck + tests + build + `npm audit`             | pass; **52/52**; 0 vulnerabilities                                                                                                                                                                       |
+| Root `node --test tests/e2e.test.mjs`                   | **17/17**                                                                                                                                                                                                |
+| `npm audit --omit=dev` (server)                         | 0 vulnerabilities (full audit: the same pre-existing dev-only `brace-expansion` high remains)                                                                                                            |
+| `git diff --check` (worktree and `165fee3..HEAD`)       | clean                                                                                                                                                                                                    |
+| Secret/home-path scan of changed files                  | clean — no home paths, keys, or real-looking secrets                                                                                                                                                     |
+| Capture/Paper comparison                                | unchanged — the remount renders only during an identity transition, a state absent from the capture inventory; every captured steady-state DOM/layout is byte-identical, so no captures were regenerated |
+
+### Limitations (this pass)
+
+- The remount trigger is the identity read (`/api/auth/me`) committing a
+  different `user.id` or `role`; the window between the other tab's cookie
+  replacement and this tab's refresh (bounded by the session signal,
+  focus/visibility refresh, and the 60 s poll) is inherited from the
+  established propagation design, not widened or narrowed by this pass.
+- Docker image build and native Windows High Contrast remain unavailable
+  on this host (unchanged from prior passes).

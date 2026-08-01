@@ -2,6 +2,7 @@
 
 import {
   createContext,
+  Fragment,
   useCallback,
   useContext,
   useEffect,
@@ -273,7 +274,15 @@ export function AuthProvider({
           </button>
         </p>
       ) : null}
-      {children}
+      {/* The subtree below is keyed by identity: an account replacement
+          (any role) or a role change REMOUNTS every user-scoped surface
+          in the same render that commits the new identity. Lists,
+          selections, open details, dialogs, show-once secrets, and
+          errors are discarded synchronously — never diffed across
+          accounts — and each surface reloads only for the new identity;
+          unmount cleanup aborts the prior identity's in-flight loads so
+          a slow stale response cannot repopulate anything. */}
+      <Fragment key={`${me.user.id}:${me.role}`}>{children}</Fragment>
     </AuthContext.Provider>
   );
 }

@@ -1,6 +1,6 @@
 import { cleanup, render, screen, waitFor } from "@testing-library/react";
 import userEvent from "@testing-library/user-event";
-import { act } from "react";
+import { act, useState } from "react";
 import { afterEach, expect, test, vi } from "vitest";
 
 import { apiFetch } from "@/lib/api";
@@ -425,4 +425,83 @@ test("an authoritative 403 triggers an identity refresh before further admin ren
   await waitFor(() =>
     expect(screen.queryByRole("link", { name: "Users" })).toBeNull(),
   );
+});
+
+// A probe holding user-scoped local state (a stand-in for list rows,
+// open details, and show-once secret dialogs). It must be REMOUNTED —
+// state discarded — whenever the signed-in identity changes.
+function UserScopedStateProbe() {
+  const { user, role } = useAuth();
+  const [held, setHeld] = useState("fresh");
+  return (
+    <div>
+      <p>
+        viewer {user.username} · {role}
+      </p>
+      <p>held {held}</p>
+      <button type="button" onClick={() => setHeld("prior-user-private-data")}>
+        hold
+      </button>
+    </div>
+  );
+}
+
+test("a same-role account replacement discards user-scoped child state", async () => {
+  let currentName = "member-a";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") return meResponse("member", currentName);
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <UserScopedStateProbe />
+    </AuthProvider>,
+  );
+  await screen.findByText("viewer member-a · member");
+  await userEvent.click(screen.getByRole("button", { name: "hold" }));
+  expect(screen.getByText("held prior-user-private-data")).toBeTruthy();
+
+  // Another tab signs in as a DIFFERENT member — same role.
+  currentName = "member-b";
+  act(() => {
+    publishSessionChange();
+  });
+  await screen.findByText("viewer member-b · member");
+  // The prior user's held state is gone; the subtree restarted fresh.
+  expect(screen.queryByText("held prior-user-private-data")).toBeNull();
+  expect(screen.getByText("held fresh")).toBeTruthy();
+});
+
+test("a role change for the same account also discards user-scoped child state", async () => {
+  let currentRole: "admin" | "member" = "admin";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") return meResponse(currentRole, "ops-admin");
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <UserScopedStateProbe />
+    </AuthProvider>,
+  );
+  await screen.findByText("viewer ops-admin · admin");
+  await userEvent.click(screen.getByRole("button", { name: "hold" }));
+  expect(screen.getByText("held prior-user-private-data")).toBeTruthy();
+
+  // Demotion out of band: rows loaded under admin privilege must not
+  // survive into the member rendering.
+  currentRole = "member";
+  act(() => {
+    window.dispatchEvent(
+      new StorageEvent("storage", { key: SESSION_MARKER_KEY, newValue: "1" }),
+    );
+  });
+  await screen.findByText("viewer ops-admin · member");
+  expect(screen.queryByText("held prior-user-private-data")).toBeNull();
+  expect(screen.getByText("held fresh")).toBeTruthy();
 });
