@@ -21,7 +21,20 @@ function escapeXml(value: string): string {
     .replaceAll("'", "&apos;");
 }
 
-function titleLines(
+function graphemeColumns(grapheme: string): number {
+  return /[◆…\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hangul}]/u.test(
+    grapheme,
+  )
+    ? 2
+    : 1;
+}
+
+function displayGrapheme(grapheme: string): string {
+  if (/\p{Extended_Pictographic}/u.test(grapheme)) return "◆";
+  return grapheme.replace(/[\uFE0E\uFE0F]/gu, "");
+}
+
+export function layoutOgTitle(
   title: string,
   maxColumns: number,
   maxLines: number,
@@ -30,18 +43,15 @@ function titleLines(
     ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
       title,
     ),
-  ].map(({ segment }) => segment);
+  ]
+    .map(({ segment }) => displayGrapheme(segment))
+    .filter(Boolean);
   const lines: string[] = [];
   let current = "";
   let columns = 0;
   let consumed = 0;
   for (const grapheme of graphemes) {
-    const width =
-      /[\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hangul}]/u.test(
-        grapheme,
-      )
-        ? 2
-        : 1;
+    const width = graphemeColumns(grapheme);
     if (columns + width > maxColumns && current) {
       lines.push(current.trimEnd());
       if (lines.length === maxLines) break;
@@ -54,14 +64,27 @@ function titleLines(
   }
   if (lines.length < maxLines && current) lines.push(current.trimEnd());
   if (consumed < graphemes.length && lines.length > 0) {
-    lines[lines.length - 1] = `${lines.at(-1)?.replace(/[\s.…-]*$/u, "")}…`;
+    const finalLine = [
+      ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
+        lines.at(-1)?.replace(/[\s.…-]*$/u, "") ?? "",
+      ),
+    ].map(({ segment }) => segment);
+    while (
+      finalLine.reduce(
+        (total, segment) => total + graphemeColumns(segment),
+        2,
+      ) > maxColumns
+    ) {
+      finalLine.pop();
+    }
+    lines[lines.length - 1] = `${finalLine.join("")}…`;
   }
   return lines.length > 0 ? lines : ["Untitled file"];
 }
 
 function cardSvg(model: PublicUnfurlModel, hasThumbnail: boolean): Buffer {
-  const titleWidth = hasThumbnail ? 23 : 38;
-  const lines = titleLines(model.title, titleWidth, 3);
+  const titleWidth = hasThumbnail ? 20 : 34;
+  const lines = layoutOgTitle(model.title, titleWidth, 3);
   const title = lines
     .map(
       (line, index) =>
@@ -85,12 +108,12 @@ function cardSvg(model: PublicUnfurlModel, hasThumbnail: boolean): Buffer {
   return Buffer.from(`<svg xmlns="http://www.w3.org/2000/svg" width="${WIDTH}" height="${HEIGHT}" viewBox="0 0 ${WIDTH} ${HEIGHT}">
     <rect width="1200" height="630" fill="#15171C"/>
     <rect x="92" y="82" width="18" height="18" rx="4" fill="#6EA8DC"/>
-    <text x="124" y="98" fill="#A2A8B4" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, Roboto, sans-serif" font-size="24" font-weight="650" letter-spacing="0.4">File-Hosting</text>
+    <text x="124" y="98" fill="#A2A8B4" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', 'Hiragino Sans', 'Apple SD Gothic Neo', 'Noto Sans CJK SC', 'Noto Sans', Arial, sans-serif" font-size="24" font-weight="650" letter-spacing="0.4">File-Hosting</text>
     ${thumbnailFrame}
-    <text x="92" y="${titleY}" fill="#E7E9EE" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, Roboto, sans-serif" font-size="58" font-weight="650" letter-spacing="-0.8" direction="auto" style="unicode-bidi:isolate">${title}</text>
+    <text x="92" y="${titleY}" fill="#E7E9EE" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', 'Hiragino Sans', 'Apple SD Gothic Neo', 'Noto Sans CJK SC', 'Noto Sans', Arial, sans-serif" font-size="58" font-weight="650" letter-spacing="-0.8" direction="auto" style="unicode-bidi:isolate">${title}</text>
     <line x1="92" y1="520" x2="1108" y2="520" stroke="#22262E" stroke-width="2"/>
-    <text x="92" y="561" fill="#6EA8DC" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, Roboto, sans-serif" font-size="22" font-weight="650" letter-spacing="1.2">${escapeXml(kind)}</text>
-    <text x="1108" y="561" fill="#A2A8B4" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Segoe UI', system-ui, Roboto, sans-serif" font-size="22" text-anchor="end" style="font-variant-numeric:tabular-nums">${escapeXml(facts)}</text>
+    <text x="92" y="561" fill="#6EA8DC" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', 'Hiragino Sans', 'Apple SD Gothic Neo', 'Noto Sans CJK SC', 'Noto Sans', Arial, sans-serif" font-size="22" font-weight="650" letter-spacing="1.2">${escapeXml(kind)}</text>
+    <text x="1108" y="561" fill="#A2A8B4" font-family="-apple-system, BlinkMacSystemFont, 'SF Pro Text', 'Helvetica Neue', 'PingFang SC', 'Hiragino Sans', 'Apple SD Gothic Neo', 'Noto Sans CJK SC', 'Noto Sans', Arial, sans-serif" font-size="22" text-anchor="end" style="font-variant-numeric:tabular-nums">${escapeXml(facts)}</text>
   </svg>`);
 }
 
@@ -156,6 +179,7 @@ export async function renderOgImage(
   }
   return base
     .flatten({ background: "#15171C" })
+    .removeAlpha()
     .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
     .toBuffer();
 }

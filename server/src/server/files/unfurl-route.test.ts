@@ -12,6 +12,7 @@ import {
   GET as getOgImage,
   HEAD as headOgImage,
 } from "../../app/og/[filename]/route";
+import { layoutOgTitle } from "./og-image";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
 
@@ -76,6 +77,21 @@ function privacySnapshot(response: Response, body: Buffer) {
     body: body.toString("base64"),
   };
 }
+
+describe("OG image title layout", () => {
+  it("fits wide glyphs, replaces unsupported pictographs, and signals truncation", () => {
+    const lines = layoutOgTitle(`${"長한".repeat(80)}${"😀".repeat(8)}`, 34, 3);
+    assert.equal(lines.length, 3);
+    assert.match(lines.at(-1) ?? "", /…$/u);
+    assert.doesNotMatch(lines.join(""), /\p{Extended_Pictographic}/u);
+    for (const line of lines) {
+      const wideGlyphs = [...line].filter((character) =>
+        /[\p{Script=Han}\p{Script=Hangul}]/u.test(character),
+      ).length;
+      assert.ok([...line].length + wideGlyphs <= 35);
+    }
+  });
+});
 
 describe("rich unfurl routes", { concurrency: false }, () => {
   let directory: string;
@@ -570,6 +586,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       assert.equal(metadata.width, 1200);
       assert.equal(metadata.height, 630);
       assert.equal(metadata.format, "png");
+      assert.equal(metadata.hasAlpha, false);
       assert.equal(metadata.exif, undefined);
       assert.equal(metadata.icc, undefined);
       assert.equal(metadata.iptc, undefined);
