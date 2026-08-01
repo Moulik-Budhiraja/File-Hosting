@@ -257,7 +257,8 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
             {state.kind === "submitting" ? "Changing…" : "Change password"}
           </button>
           <p className="form-footnote">
-            changing your password signs out every session for this account
+            changing your password signs out every session · API keys keep
+            working
           </p>
         </form>
       </section>

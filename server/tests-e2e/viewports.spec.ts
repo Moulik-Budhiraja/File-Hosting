@@ -59,6 +59,27 @@ test("console pages have no body overflow at all required widths", async ({
   }
 });
 
+test("active console navigation is fully visible at 390px", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  await signInContext(context, baseURL!, ADMIN.username, ADMIN.password);
+  await page.setViewportSize({ width: 390, height: 844 });
+  for (const route of ["/files", "/users", "/keys", "/account"]) {
+    await page.goto(route);
+    const box = await page.locator(".nav-item-active").boundingBox();
+    expect(
+      box!.x,
+      `${route} active nav starts in viewport`,
+    ).toBeGreaterThanOrEqual(0);
+    expect(
+      box!.x + box!.width,
+      `${route} active nav ends in viewport`,
+    ).toBeLessThanOrEqual(390);
+  }
+});
+
 test("Files visibility segments are at least 44x44 on mobile", async ({
   context,
   page,

@@ -461,9 +461,7 @@ export function ApiKeysView() {
         <input
           type="search"
           className="toolbar-search"
-          placeholder={
-            aggregate ? "search key name or owner" : "search key name"
-          }
+          placeholder="search keys"
           aria-label={
             aggregate ? "Search key name or owner" : "Search key name"
           }
@@ -718,6 +716,9 @@ export function ApiKeysView() {
                 </p>
               ) : null}
             </div>
+            <p className="muted">
+              Uses your current account permissions until revoked.
+            </p>
             <div className="dialog-actions">
               <button
                 type="button"

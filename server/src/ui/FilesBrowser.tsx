@@ -459,7 +459,13 @@ export function FilesBrowser() {
 
       {state.kind === "ready" && items.length === 0 ? (
         <div className="table-fallback">
-          <p className="empty-title">No files</p>
+          <p className="empty-title">
+            {query ||
+            visibility !== "all" ||
+            scope !== (isAdmin ? "everyone" : "mine")
+              ? "No files match the current filters"
+              : "No files"}
+          </p>
         </div>
       ) : null}
 

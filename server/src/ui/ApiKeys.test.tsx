@@ -180,6 +180,9 @@ test("create shows the secret exactly once behind an explicit acknowledgement", 
   await screen.findByRole("cell", { name: "ingest-pipeline" });
 
   await userEvent.click(screen.getByRole("button", { name: "New key" }));
+  expect(
+    screen.getByText("Uses your current account permissions until revoked."),
+  ).toBeTruthy();
   await userEvent.type(screen.getByLabelText("Name"), "laptop-mbp");
   await userEvent.click(screen.getByRole("button", { name: "Create key" }));
 
@@ -516,6 +519,7 @@ test("admins load one paginated aggregate request with owner identity — no N+1
   expect(
     await screen.findByRole("cell", { name: "ingest-pipeline" }),
   ).toBeTruthy();
+  expect(screen.getByPlaceholderText("search keys")).toBeTruthy();
   expect(screen.getByText("Owner")).toBeTruthy();
   expect(screen.getAllByText("sam-ops").length).toBeGreaterThan(0);
   expect(screen.queryByText("Legacy service token")).toBeNull();

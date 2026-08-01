@@ -1006,6 +1006,7 @@ main.landing code {
 
   .nav-item {
     height: 44px;
+    padding-inline: 10px;
     border-left: 0;
     border-bottom: 2px solid transparent;
     white-space: nowrap;

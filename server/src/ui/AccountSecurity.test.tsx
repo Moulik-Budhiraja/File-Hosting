@@ -71,6 +71,9 @@ test("shows account facts and signs out through the logout endpoint", async () =
   renderAccount();
   expect(await screen.findByText("jordan")).toBeTruthy();
   expect(screen.getByText("member")).toBeTruthy();
+  expect(
+    screen.getByText(/signs out every session.*API keys keep working/i),
+  ).toBeTruthy();
   await userEvent.click(screen.getByRole("button", { name: "Sign out" }));
   expect(calls).toContain("POST /api/auth/logout");
 });

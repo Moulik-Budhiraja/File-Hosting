@@ -163,6 +163,26 @@ test("visibility filter refetches with the visibility parameter", async () => {
   });
 });
 
+test("empty state distinguishes an empty collection from filtered results", async () => {
+  window.history.replaceState(null, "", "/files");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      routes({
+        files: () => json(200, { items: [], next_cursor: null }),
+      }),
+    ),
+  );
+  renderFiles();
+  expect(await screen.findByText("No files")).toBeTruthy();
+
+  await userEvent.click(screen.getByRole("button", { name: "Private" }));
+  expect(
+    await screen.findByText("No files match the current filters"),
+  ).toBeTruthy();
+  window.history.replaceState(null, "", "/files");
+});
+
 test("upload posts the file with the chosen visibility explained in plain language", async () => {
   const record: Recorded[] = [];
   vi.stubGlobal("fetch", vi.fn(routes({ record })));

@@ -42,7 +42,7 @@ Visible copy stays only when it helps a user choose, act, recover, or understand
 | User load error         | `GET /api/users → … · nothing was changed` → `Couldn't load users (<status>)`                                                                                                                                            | Keeps failure attribution without route internals.                                                  |
 | Account password policy | Removed `stored as salted bcrypt hash`                                                                                                                                                                                   | Security implementation detail.                                                                     |
 | Account facts           | Removed cookie flags, session expiry, and CLI/session explanation                                                                                                                                                        | Backend/auth implementation details.                                                                |
-| Account password action | Removed `API keys keep working` from the always-visible footnote                                                                                                                                                         | Keeps the direct session sign-out consequence.                                                      |
+| Account password action | Reduced the footnote to `changing your password signs out every session · API keys keep working`                                                                                                                         | Both credential consequences affect the decision.                                                   |
 
 ## Retained because operational
 
@@ -53,3 +53,11 @@ Visible copy stays only when it helps a user choose, act, recover, or understand
 - One-time secret copy failure recovery and acknowledgement/close protection.
 - Destructive confirmation consequences for deleting files, revoking keys, disabling accounts, changing roles, and resetting passwords.
 - Last-active-admin lockout explanation and recovery action.
+
+## Exact-head audit repairs
+
+- Restored the terse API-key consequence at password change.
+- Added one sentence at key creation: `Uses your current account permissions until revoked.`
+- Distinguished `No files` from `No files match the current filters`.
+- Shortened the visible key-search placeholder to `search keys`; its complete accessible name remains.
+- Reduced mobile nav padding so every active destination is fully visible at 390 px.
