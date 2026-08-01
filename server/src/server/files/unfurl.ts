@@ -3,12 +3,9 @@ import { open } from "node:fs/promises";
 import { extractFirstMarkdownHeading } from "./preview";
 import { inspectRasterInWorker } from "./raster-worker";
 import type { FileService } from "./service";
+import { sanitizePublicText } from "./text-safety";
 import { BASE62_ID_PATTERN, type StoredFile } from "./types";
 
-const CONTROL_PATTERN = /[\u0000-\u001F\u007F-\u009F]/gu;
-const WHITESPACE_TO_SPACE = /[\t\r\n\u2028\u2029]/gu;
-const BIDI_CONTROLS = /[\u061C\u200E\u200F\u202A-\u202E\u2066-\u2069]/gu;
-const INVALID_UNICODE = /[\uD800-\uDFFF\uFFFD]|\p{Noncharacter_Code_Point}/gu;
 const TITLE_MAX_BYTES = 300;
 const DESCRIPTION_MAX_BYTES = 400;
 const MARKDOWN_READ_LIMIT = 256 * 1024;
@@ -29,25 +26,7 @@ export interface PublicUnfurlModel {
   eligibleRaster: boolean;
 }
 
-export function sanitizeUnfurlText(value: string, maxBytes: number): string {
-  const cleaned = value
-    .normalize("NFC")
-    .replace(WHITESPACE_TO_SPACE, " ")
-    .replace(CONTROL_PATTERN, "")
-    .replace(BIDI_CONTROLS, "")
-    .replace(INVALID_UNICODE, "")
-    .replace(/ {2,}/gu, " ")
-    .trim();
-
-  let bytes = 0;
-  let end = 0;
-  for (const character of cleaned) {
-    bytes += Buffer.byteLength(character, "utf8");
-    if (bytes > maxBytes) break;
-    end += character.length;
-  }
-  return cleaned.slice(0, end).trim();
-}
+export const sanitizeUnfurlText = sanitizePublicText;
 
 function escapeHtmlAttribute(value: string): string {
   return value
@@ -168,7 +147,9 @@ async function markdownHeading(
       bytes.subarray(0, bytesRead),
     );
     const heading = extractFirstMarkdownHeading(decoded);
-    return heading ? sanitizeUnfurlText(heading, TITLE_MAX_BYTES) : null;
+    return heading
+      ? sanitizeUnfurlText(heading, TITLE_MAX_BYTES) || null
+      : null;
   } catch {
     return null;
   } finally {

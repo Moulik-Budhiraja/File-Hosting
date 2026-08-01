@@ -45,6 +45,8 @@ try {
   const metadata = await sharp(source, inputOptions)
     .timeout({ seconds: 2 })
     .metadata();
+  const orientedWidth = metadata.autoOrient?.width ?? metadata.width;
+  const orientedHeight = metadata.autoOrient?.height ?? metadata.height;
   if (
     metadata.format !== expectedFormat ||
     !metadata.width ||
@@ -56,8 +58,8 @@ try {
   }
   if (mode === "metadata") {
     writeSync(1, JSON.stringify({
-      width: metadata.width,
-      height: metadata.height,
+      width: orientedWidth,
+      height: orientedHeight,
     }));
   } else if (mode === "thumbnail") {
     const thumbnail = await sharp(source, inputOptions)
@@ -79,16 +81,31 @@ try {
 `;
 
 let activeWorkers = 0;
+const workerWaiters: Array<() => void> = [];
+
+async function acquireWorkerSlot(): Promise<void> {
+  if (activeWorkers < RASTER_WORKER_LIMITS.maxConcurrent) {
+    activeWorkers += 1;
+    return;
+  }
+  await new Promise<void>((resolve) => workerWaiters.push(resolve));
+}
+
+function releaseWorkerSlot(): void {
+  const next = workerWaiters.shift();
+  if (next) {
+    next();
+    return;
+  }
+  activeWorkers -= 1;
+}
 
 async function runRasterWorker(
   mode: "metadata" | "thumbnail",
   filePath: string,
   mimeType: string,
 ): Promise<Buffer> {
-  if (activeWorkers >= RASTER_WORKER_LIMITS.maxConcurrent) {
-    throw new Error("raster worker capacity exhausted");
-  }
-  activeWorkers += 1;
+  await acquireWorkerSlot();
   try {
     return await new Promise<Buffer>((resolve, reject) => {
       execFile(
@@ -127,7 +144,7 @@ async function runRasterWorker(
       );
     });
   } finally {
-    activeWorkers -= 1;
+    releaseWorkerSlot();
   }
 }
 

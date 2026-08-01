@@ -59,6 +59,19 @@ afterEach(async () => {
 });
 
 describe("Markdown preview rendering", () => {
+  it("sanitizes and isolates hostile legacy filenames in every HTML sink", async () => {
+    const html = await render("plain body", {
+      name: "A\u0085B\u2028C\u202Egpj\u202C.bin",
+      mimeType: "text/plain",
+    });
+    assert.match(html, /<title>AB Cgpj\.bin<\/title>/u);
+    assert.match(html, /<h1 class="file-title" dir="auto">AB Cgpj\.bin<\/h1>/u);
+    assert.doesNotMatch(
+      html,
+      /[\u0080-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/u,
+    );
+  });
+
   it("renders core and GFM document semantics instead of source markers", async () => {
     const html = await render(`# Heading one
 

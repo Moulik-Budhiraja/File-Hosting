@@ -91,6 +91,12 @@ describe("OG image title layout", () => {
       ).length;
       assert.ok([...line].length + wideGlyphs <= 35);
     }
+    const wideLatin = layoutOgTitle("W".repeat(60), 18, 3);
+    assert.equal(wideLatin.length, 3);
+    assert.match(wideLatin.at(-1) ?? "", /…$/u);
+    assert.ok(
+      wideLatin.every((line) => [...line.replace(/…$/u, "")].length <= 9),
+    );
   });
 
   it("fails safe when a legacy model contains XML-illegal scalars", async () => {
@@ -629,6 +635,12 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       assert.ok((pixel[0] ?? 0) > 150);
       assert.ok((pixel[1] ?? 255) < 80);
       assert.ok((pixel[2] ?? 255) < 100);
+      const corner = await sharp(output)
+        .extract({ left: 720, top: 114, width: 1, height: 1 })
+        .removeAlpha()
+        .raw()
+        .toBuffer();
+      assert.ok((corner[0] ?? 255) < 100);
       for (const forbidden of [
         "synthetic-forbidden-copyright",
         "forbidden-raster-tag",
@@ -639,6 +651,36 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         assert.equal(output.includes(Buffer.from(forbidden)), false);
       }
     }
+  });
+
+  it("reports auto-oriented raster dimensions truthfully", async () => {
+    const oriented = await sharp({
+      create: {
+        width: 120,
+        height: 60,
+        channels: 3,
+        background: "red",
+      },
+    })
+      .jpeg()
+      .withMetadata({ orientation: 6 })
+      .toBuffer();
+    const file = await service.upload(binaryBytes(oriented), {
+      name: "portrait.jpg",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "image/jpeg",
+      contentLength: oriented.length,
+    });
+    const response = await getPreview(
+      new Request(`https://canonical.example.test/${file.id}`),
+      routeContext(file.id),
+    );
+    assert.equal(
+      parsedHead(await response.text()).get("og:description"),
+      `JPEG image · 60 × 120 · ${file.size} B`,
+    );
   });
 
   it("falls back safely for malformed, bomb, oversized, SVG, and GIF sources", async () => {

@@ -2,7 +2,8 @@ import sharp from "sharp";
 
 import { deriveRasterThumbnailInWorker } from "./raster-worker";
 import type { FileService } from "./service";
-import { sanitizeUnfurlText, type PublicUnfurlModel } from "./unfurl";
+import { sanitizePublicText } from "./text-safety";
+import type { PublicUnfurlModel } from "./unfurl";
 import type { StoredFile } from "./types";
 
 const WIDTH = 1200;
@@ -20,11 +21,7 @@ function escapeXml(value: string): string {
 }
 
 function graphemeColumns(grapheme: string): number {
-  return /[◆…\p{Extended_Pictographic}\p{Script=Han}\p{Script=Hangul}]/u.test(
-    grapheme,
-  )
-    ? 2
-    : 1;
+  return /[◆…A-Z0-9mw]|[^\u0000-\u007F]/u.test(grapheme) ? 2 : 1;
 }
 
 function displayGrapheme(grapheme: string): string {
@@ -81,9 +78,9 @@ export function layoutOgTitle(
 }
 
 function cardSvg(model: PublicUnfurlModel, hasThumbnail: boolean): Buffer {
-  const safeTitle = sanitizeUnfurlText(model.title, 300) || "Untitled file";
-  const safeDescription = sanitizeUnfurlText(model.description ?? "", 400);
-  const titleWidth = hasThumbnail ? 20 : 34;
+  const safeTitle = sanitizePublicText(model.title, 300) || "Untitled file";
+  const safeDescription = sanitizePublicText(model.description ?? "", 400);
+  const titleWidth = hasThumbnail ? 20 : 32;
   const lines = layoutOgTitle(safeTitle, titleWidth, 3);
   const title = lines
     .map(
@@ -144,7 +141,14 @@ export async function renderOgImage(
     limitInputPixels: MAX_INPUT_PIXELS,
   }).timeout({ seconds: DECODE_TIMEOUT_SECONDS });
   if (thumbnail) {
-    base.composite([{ input: thumbnail, left: 720, top: 114 }]);
+    const mask = Buffer.from(
+      '<svg xmlns="http://www.w3.org/2000/svg" width="386" height="386"><rect width="386" height="386" rx="16" fill="white"/></svg>',
+    );
+    const roundedThumbnail = await sharp(thumbnail)
+      .composite([{ input: mask, blend: "dest-in" }])
+      .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
+      .toBuffer();
+    base.composite([{ input: roundedThumbnail, left: 720, top: 114 }]);
   }
   return base
     .flatten({ background: "#15171C" })

@@ -125,6 +125,12 @@ const unicodeFile = await upload(
   "public",
   "unicode-card",
 );
+const wideTitleFile = await upload(
+  "ANNUAL_REPORT_Q4_2024_FINAL_V3.PDF",
+  "application/octet-stream",
+  "public",
+  "wide-title-card",
+);
 
 const crawlerResponse = await fetch(`${baseUrl}/${markdown.id}`, {
   headers: {
@@ -272,6 +278,14 @@ try {
       forcedColors: "none",
       imageUrl: `${baseUrl}/og/${raster.id}.png`,
       background: "#090a0d",
+    },
+    {
+      name: "desktop-light-wide-title",
+      viewport: { width: 1280, height: 760 },
+      colorScheme: "light",
+      forcedColors: "none",
+      imageUrl: `${baseUrl}/og/${wideTitleFile.id}.png`,
+      background: "#f5f5f7",
     },
     {
       name: "mobile-light-unicode",

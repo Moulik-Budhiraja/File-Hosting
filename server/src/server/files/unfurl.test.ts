@@ -158,7 +158,7 @@ describe("raster safety envelope", () => {
 });
 
 describe("public unfurl view-model", () => {
-  it("bounds concurrent anonymous raster workers and safely degrades excess work", async () => {
+  it("queues concurrent anonymous raster workers without changing metadata", async () => {
     const raster = await sharp({
       create: {
         width: 16,
@@ -178,10 +178,10 @@ describe("public unfurl view-model", () => {
     const models = await Promise.all(
       Array.from({ length: 3 }, () => buildUnfurlModel(service, file)),
     );
-    assert.equal(models.filter((model) => model.eligibleRaster).length, 2);
+    assert.equal(models.filter((model) => model.eligibleRaster).length, 3);
     assert.equal(
       models.filter((model) => model.twitterCard === "summary").length,
-      1,
+      0,
     );
   });
 
@@ -248,6 +248,17 @@ describe("public unfurl view-model", () => {
   it("falls back to the sanitized filename when no heading exists", async () => {
     const model = await modelFor("plain paragraph only\n");
     assert.equal(model.title, "notes.md");
+  });
+
+  it("falls back when the first Markdown heading sanitizes to empty", async () => {
+    const model = await modelFor("# \u202E\u202D\u200E\u200F\n", {
+      name: "safe-fallback.md",
+    });
+    assert.equal(model.title, "safe-fallback.md");
+    assert.equal(
+      model.imageAlt,
+      "File-Hosting preview card: safe-fallback.md, Markdown document",
+    );
   });
 
   it("rejects malformed UTF-8 headings and falls back without replacement characters", async () => {

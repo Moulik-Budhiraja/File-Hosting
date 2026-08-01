@@ -3,6 +3,7 @@ import { open } from "node:fs/promises";
 import MarkdownIt from "markdown-it";
 
 import type { FileService } from "./service";
+import { sanitizePublicText } from "./text-safety";
 import type { StoredFile } from "./types";
 
 const MAX_TEXT_PREVIEW_BYTES = 256 * 1024;
@@ -250,6 +251,8 @@ export async function renderPreview(
   unfurlHead = "",
 ): Promise<string> {
   const rawUrl = `/raw/${encodeURIComponent(file.id)}`;
+  const displayName = sanitizePublicText(file.name, 300) || "Untitled file";
+  const escapedName = escapeHtml(displayName);
   let preview: string;
   if (isTextPreview(file)) {
     const text = await readTextPreview(service, file);
@@ -259,13 +262,13 @@ export async function renderPreview(
       preview = `<pre class="text-preview">${escapeHtml(text.content)}</pre>${renderTruncationNotice(text.truncated)}`;
     }
   } else if (file.mimeType.startsWith("image/")) {
-    preview = `<img src="${rawUrl}" alt="${escapeHtml(file.name)}">`;
+    preview = `<img src="${rawUrl}" alt="${escapedName}">`;
   } else if (file.mimeType.startsWith("audio/")) {
     preview = `<audio src="${rawUrl}" controls></audio>`;
   } else if (file.mimeType.startsWith("video/")) {
     preview = `<video src="${rawUrl}" controls></video>`;
   } else if (file.mimeType === "application/pdf") {
-    preview = `<iframe src="${rawUrl}" title="${escapeHtml(file.name)}"></iframe>`;
+    preview = `<iframe src="${rawUrl}" title="${escapedName}"></iframe>`;
   } else {
     preview =
       '<p class="notice">No browser preview is available for this file type.</p>';
@@ -288,7 +291,7 @@ export async function renderPreview(
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
     ${unfurlHead}
-    <title>${escapeHtml(file.name)}</title>
+    <title>${escapedName}</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -334,6 +337,7 @@ export async function renderPreview(
         line-height: 1.2;
         margin: 0 0 .85rem;
         overflow-wrap: anywhere;
+        unicode-bidi: isolate;
       }
       .metadata {
         display: grid;
@@ -452,11 +456,11 @@ export async function renderPreview(
   <body>
     <div class="page">
       <header class="file-header">
-        <h1 class="file-title">${escapeHtml(file.name)}</h1>
+        <h1 class="file-title" dir="auto">${escapedName}</h1>
         <dl class="metadata">
           ${metadata}
         </dl>
-        <a class="raw-action" href="${rawUrl}" download="${escapeHtml(file.name)}">Open raw file</a>
+        <a class="raw-action" href="${rawUrl}" download="${escapedName}">Open raw file</a>
       </header>
       <main>${preview}</main>
     </div>
