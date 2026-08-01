@@ -18,3 +18,13 @@ test("compose forwards bootstrap credentials into the server container", async (
     /^\s+FS_BOOTSTRAP_PASSWORD: \$\{FS_BOOTSTRAP_PASSWORD:-\}$/mu,
   );
 });
+
+test("production image installs the fonts used by generated cards", async () => {
+  const dockerfile = await readFile(
+    path.join(rootDir, "server", "Dockerfile"),
+    "utf8",
+  );
+
+  assert.match(dockerfile, /apk add --no-cache[^\n]*font-noto/u);
+  assert.match(dockerfile, /apk add --no-cache[^\n]*font-noto-cjk/u);
+});

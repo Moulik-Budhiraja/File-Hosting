@@ -1,6 +1,10 @@
 import sharp from "sharp";
 
-import { deriveRasterThumbnailInWorker } from "./raster-worker";
+import { AppError } from "./errors";
+import {
+  BoundedWorkerPool,
+  deriveRasterThumbnailInWorker,
+} from "./raster-worker";
 import type { FileService } from "./service";
 import { sanitizePublicText } from "./text-safety";
 import type { PublicUnfurlModel } from "./unfurl";
@@ -10,6 +14,18 @@ const WIDTH = 1200;
 const HEIGHT = 630;
 const MAX_INPUT_PIXELS = 40_000_000;
 const DECODE_TIMEOUT_SECONDS = 2;
+
+export const OG_RENDER_LIMITS = Object.freeze({
+  maxConcurrent: 2,
+  maxQueued: 16,
+  queueTimeoutMs: 2_500,
+});
+
+const ogRenderPool = new BoundedWorkerPool(
+  OG_RENDER_LIMITS.maxConcurrent,
+  OG_RENDER_LIMITS.maxQueued,
+  OG_RENDER_LIMITS.queueTimeoutMs,
+);
 
 function escapeXml(value: string): string {
   return value
@@ -130,7 +146,7 @@ async function safeRasterThumbnail(
   }
 }
 
-export async function renderOgImage(
+async function renderOgImageUnbounded(
   service: FileService,
   file: StoredFile,
   model: PublicUnfurlModel,
@@ -155,4 +171,23 @@ export async function renderOgImage(
     .removeAlpha()
     .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
     .toBuffer();
+}
+
+export async function renderOgImage(
+  service: FileService,
+  file: StoredFile,
+  model: PublicUnfurlModel,
+): Promise<Buffer> {
+  try {
+    await ogRenderPool.acquire();
+  } catch (error) {
+    throw new AppError(503, "preview_busy", "Preview rendering is busy", {
+      cause: error,
+    });
+  }
+  try {
+    return await renderOgImageUnbounded(service, file, model);
+  } finally {
+    ogRenderPool.release();
+  }
 }

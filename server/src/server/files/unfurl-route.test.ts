@@ -12,9 +12,10 @@ import {
   GET as getOgImage,
   HEAD as headOgImage,
 } from "../../app/og/[filename]/route";
-import { layoutOgTitle, renderOgImage } from "./og-image";
+import { layoutOgTitle, OG_RENDER_LIMITS, renderOgImage } from "./og-image";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
+import type { PublicUnfurlModel } from "./unfurl";
 import type { StoredFile } from "./types";
 
 function routeContext(id: string) {
@@ -118,6 +119,40 @@ describe("OG image title layout", () => {
     const metadata = await sharp(output).metadata();
     assert.equal(metadata.width, 1200);
     assert.equal(metadata.height, 630);
+  });
+
+  it("bounds the complete in-process card renderer", async () => {
+    assert.deepEqual(OG_RENDER_LIMITS, {
+      maxConcurrent: 2,
+      maxQueued: 16,
+      queueTimeoutMs: 2_500,
+    });
+    const model: PublicUnfurlModel = {
+      title: "bounded-card.txt",
+      description: "Text document · 1 B",
+      ogType: "article",
+      twitterCard: "summary",
+      canonicalUrl: "https://example.test/Ab3dE5g",
+      imageUrl: "https://example.test/og/Ab3dE5g.png",
+      imageAlt: "safe",
+      kind: "document",
+      eligibleRaster: false,
+    };
+    const results = await Promise.allSettled(
+      Array.from({ length: 40 }, () =>
+        renderOgImage({} as FileService, { size: 1 } as StoredFile, model),
+      ),
+    );
+    const fulfilled = results.filter(({ status }) => status === "fulfilled");
+    const rejected = results.filter(({ status }) => status === "rejected");
+
+    assert.equal(fulfilled.length, 18);
+    assert.equal(rejected.length, 22);
+    for (const result of results) {
+      if (result.status === "rejected") {
+        assert.match(String(result.reason), /Preview rendering is busy/u);
+      }
+    }
   });
 });
 
