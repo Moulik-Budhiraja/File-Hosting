@@ -372,6 +372,7 @@ export async function renderPreview(
         overflow-wrap: normal;
         padding: .45rem .65rem;
         text-align: left;
+        white-space: nowrap;
         word-break: normal;
       }
       .markdown-body th { background: var(--code); font-weight: 700; }

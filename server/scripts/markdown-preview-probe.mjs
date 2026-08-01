@@ -145,11 +145,18 @@ try {
         codeScrollWidth: codeScroller?.scrollWidth ?? 0,
         tableClientWidth: tableScroller?.clientWidth ?? 0,
         tableScrollWidth: tableScroller?.scrollWidth ?? 0,
+        tableMaxRowHeight: Math.max(
+          0,
+          ...Array.from(document.querySelectorAll("article.markdown-body tr"), (row) =>
+            row.getBoundingClientRect().height,
+          ),
+        ),
       };
     });
     assert.equal(layout.bodyScrollWidth, layout.bodyClientWidth);
     assert(layout.tableScrollWidth >= layout.tableClientWidth);
     assert(layout.codeScrollWidth >= layout.codeClientWidth);
+    assert(layout.tableMaxRowHeight <= 80, `table row is ${layout.tableMaxRowHeight}px tall`);
     if (viewport.width <= 430) {
       assert(layout.tableScrollWidth > layout.tableClientWidth);
       assert(layout.codeScrollWidth > layout.codeClientWidth);

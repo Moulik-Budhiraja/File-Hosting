@@ -103,7 +103,7 @@ const value = "safe";
     assert.match(html, /<div class="table-scroll"[^>]*tabindex="0"/u);
     assert.match(
       html,
-      /\.markdown-body th, \.markdown-body td \{[^}]*min-width:\s*8rem;[^}]*overflow-wrap:\s*normal;[^}]*word-break:\s*normal;/u,
+      /\.markdown-body th, \.markdown-body td \{[^}]*min-width:\s*8rem;[^}]*overflow-wrap:\s*normal;[^}]*white-space:\s*nowrap;[^}]*word-break:\s*normal;/u,
     );
     assert.match(html, /<a href="https:\/\/example\.test\/path"/u);
     assert.match(html, /<a href="https:\/\/example\.test\/bare"/u);
