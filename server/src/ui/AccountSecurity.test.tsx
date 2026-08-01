@@ -391,6 +391,98 @@ test("a server invalid_password rejection maps to the new-password field", async
   ).toBeNull();
 });
 
+test("editing a rejected current password clears the stale field judgment", async () => {
+  stubFetch((url) => {
+    const known = meRoute(url);
+    if (known) return known;
+    return new Response(
+      JSON.stringify({
+        error: {
+          code: "invalid_credentials",
+          message: "Current password is invalid",
+        },
+      }),
+      { status: 401, headers: { "content-type": "application/json" } },
+    );
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords(
+    "wrong password!",
+    "new password 123",
+    "new password 123",
+  );
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+  await screen.findByText("Current password is invalid.");
+
+  const current = screen.getByLabelText("Current password");
+  await userEvent.clear(current);
+  await userEvent.type(current, "corrected password!");
+
+  expect(screen.queryByText("Current password is invalid.")).toBeNull();
+  expect(current.getAttribute("aria-invalid")).toBeNull();
+  expect(current.getAttribute("aria-describedby")).toBeNull();
+});
+
+test("editing either new-password value clears a stale mismatch judgment", async () => {
+  stubFetch((url) => {
+    const known = meRoute(url);
+    if (known) return known;
+    return new Response(null, { status: 204 });
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords("old password!", "new password 123", "new password 124");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+  await screen.findByText("Doesn't match the new password.");
+
+  const next = screen.getByLabelText("New password");
+  const confirmation = screen.getByLabelText("Confirm new password");
+  await userEvent.clear(next);
+  await userEvent.type(next, "new password 124");
+
+  expect(screen.queryByText("Doesn't match the new password.")).toBeNull();
+  expect(confirmation.getAttribute("aria-invalid")).toBeNull();
+  expect(confirmation.getAttribute("aria-describedby")).toBeNull();
+});
+
+test("an unstructured gateway 502 is conservative because an origin commit may be hidden", async () => {
+  stubFetch((url, init) => {
+    const known = meRoute(url);
+    if (known) return known;
+    if (url === "/api/auth/password" && init?.method === "POST") {
+      return new Response("<html>Bad Gateway</html>", {
+        status: 502,
+        headers: { "content-type": "text/html" },
+      });
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords("old password!!", "new password 123", "new password 123");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+
+  expect(
+    await screen.findByText("Password change outcome unknown."),
+  ).toBeTruthy();
+  expect(screen.queryByText("Password not changed.")).toBeNull();
+  const recovery = screen.getByRole("link", { name: /go to sign in/i });
+  await waitFor(() => expect(document.activeElement).toBe(recovery));
+  expect(
+    (screen.getByLabelText("Current password") as HTMLInputElement).value,
+  ).toBe("");
+  expect(
+    (screen.getByLabelText("New password") as HTMLInputElement).value,
+  ).toBe("");
+});
+
 test("a failed sign-out keeps the session and shows an actionable error", async () => {
   stubFetch((url, init) => {
     const known = meRoute(url);

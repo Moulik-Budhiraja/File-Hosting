@@ -145,8 +145,9 @@ All 33 implementation-pass captures were regenerated with
 a fresh synthetic dataset (users `ops-admin`/`sam-ops`/`priya.k`/
 `intern-2025`(disabled)/`nadia.r`; files across all three visibilities;
 active + revoked keys; shown-once secret DOM text replaced with EXAMPLE
-placeholders before capture). Same filenames as before; every screen now
-carries the rollout tag. `mobile-users-actions-390x844.png` now shows the
+placeholders before capture). Same filenames as before; these captures predate
+PR #7's merge and therefore show the then-required rollout tag. The tag was
+removed after the merge. `mobile-users-actions-390x844.png` shows the
 adopted IA-09d action sheet. Compared against all ten live Paper boards
 (IA·01–IA·10, file `01KYVPSA8HV7QMRBN7MBPX0G99`): layouts, copy tone,
 canonical fact placement, and state words match; deliberate,

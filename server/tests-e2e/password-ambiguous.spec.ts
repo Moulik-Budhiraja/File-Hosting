@@ -212,3 +212,107 @@ test("a revoked session 401 asks for re-authentication without blaming the curre
   expect(oldLogin.status()).toBe(200);
   await api.dispose();
 });
+
+test("a committed change hidden by an unstructured gateway 502 stays conservative", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const member = await ensureUser(
+    baseURL!,
+    "password-gateway-member",
+    "member",
+  );
+  const replacement = "gateway-hidden-replacement";
+  await signInContext(context, baseURL!, member.username, member.password);
+  await page.goto("/account");
+
+  let committed = false;
+  await page.route("**/api/auth/password", async (route) => {
+    if (route.request().method() === "POST" && !committed) {
+      const response = await route.fetch();
+      expect(response.status()).toBe(204);
+      committed = true;
+      await route.fulfill({
+        status: 502,
+        contentType: "text/html",
+        body: "<html><body>Bad Gateway</body></html>",
+      });
+      return;
+    }
+    await route.continue();
+  });
+
+  await page
+    .getByLabel("Current password", { exact: true })
+    .fill(member.password);
+  await page.getByLabel("New password", { exact: true }).fill(replacement);
+  await page
+    .getByLabel("Confirm new password", { exact: true })
+    .fill(replacement);
+  await page.getByRole("button", { name: "Change password" }).click();
+
+  await expect(
+    page.getByText("Password change outcome unknown."),
+  ).toBeVisible();
+  await expect(page.getByText("Password not changed.")).toHaveCount(0);
+  const recovery = page.getByRole("link", { name: /go to sign in/i });
+  await expect(recovery).toBeFocused();
+  await expect(
+    page.getByLabel("Current password", { exact: true }),
+  ).toHaveValue("");
+  expect(committed).toBe(true);
+
+  const api = await apiContext(baseURL!);
+  const replacementLogin = await api.post("/api/auth/login", {
+    data: { username: member.username, password: replacement },
+    headers: { origin: baseURL!, "x-real-ip": nextAddress() },
+  });
+  expect(replacementLogin.status()).toBe(200);
+  const oldLogin = await api.post("/api/auth/login", {
+    data: { username: member.username, password: member.password },
+    headers: { origin: baseURL!, "x-real-ip": nextAddress() },
+  });
+  expect(oldLogin.status()).toBe(401);
+  const oldSession = await context.request.get("/api/auth/me");
+  expect(oldSession.status()).toBe(401);
+  await api.dispose();
+});
+
+test("editing judged password values clears stale field errors", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const member = await ensureUser(baseURL!, "password-edit-member", "member");
+  await signInContext(context, baseURL!, member.username, member.password);
+  await page.goto("/account");
+
+  const current = page.getByLabel("Current password", { exact: true });
+  const next = page.getByLabel("New password", { exact: true });
+  const confirmation = page.getByLabel("Confirm new password", { exact: true });
+  await current.fill("definitely-wrong-password");
+  await next.fill("replacement-fixture-credential");
+  await confirmation.fill("replacement-fixture-credential");
+  await page.getByRole("button", { name: "Change password" }).click();
+  await expect(page.getByText("Current password is invalid.")).toBeVisible();
+  await expect(current).toHaveAttribute("aria-invalid", "true");
+
+  await current.fill(member.password);
+  await expect(page.getByText("Current password is invalid.")).toHaveCount(0);
+  await expect(current).not.toHaveAttribute("aria-invalid", "true");
+  await expect(current).not.toHaveAttribute("aria-describedby", /.+/u);
+
+  await next.fill("replacement-fixture-first");
+  await confirmation.fill("replacement-fixture-second");
+  await page.getByRole("button", { name: "Change password" }).click();
+  await expect(page.getByText("Doesn't match the new password.")).toBeVisible();
+  await expect(confirmation).toHaveAttribute("aria-invalid", "true");
+
+  await next.fill("replacement-fixture-second");
+  await expect(page.getByText("Doesn't match the new password.")).toHaveCount(
+    0,
+  );
+  await expect(confirmation).not.toHaveAttribute("aria-invalid", "true");
+  await expect(confirmation).not.toHaveAttribute("aria-describedby", /.+/u);
+});
