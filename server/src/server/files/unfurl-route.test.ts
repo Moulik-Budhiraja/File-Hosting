@@ -284,6 +284,57 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     }
   });
 
+  it("fails closed when source bytes disappear after the initial lookup", async () => {
+    const file = await service.upload(bytes("# Source race"), {
+      name: "source-race.md",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "text/markdown",
+    });
+    const originalStoragePath = service.storagePath.bind(service);
+    let pathReads = 0;
+    service.storagePath = (candidate: StoredFile) => {
+      if (candidate.id === file.id) {
+        pathReads += 1;
+        if (pathReads > 1) return path.join(directory, "missing-source");
+      }
+      return originalStoragePath(candidate);
+    };
+    try {
+      const response = await getPreview(
+        new Request(`https://canonical.example.test/${file.id}`),
+        routeContext(file.id),
+      );
+      const missing = await getPreview(
+        new Request("https://canonical.example.test/0000000"),
+        routeContext("0000000"),
+      );
+      assert.deepEqual(
+        privacySnapshot(response, Buffer.from(await response.arrayBuffer())),
+        privacySnapshot(missing, Buffer.from(await missing.arrayBuffer())),
+      );
+      pathReads = 0;
+      const image = await getOgImage(
+        new Request(`https://canonical.example.test/og/${file.id}.png`),
+        ogRouteContext(file.id),
+      );
+      const missingImage = await getOgImage(
+        new Request("https://canonical.example.test/og/0000000.png"),
+        ogRouteContext("0000000"),
+      );
+      assert.deepEqual(
+        privacySnapshot(image, Buffer.from(await image.arrayBuffer())),
+        privacySnapshot(
+          missingImage,
+          Buffer.from(await missingImage.arrayBuffer()),
+        ),
+      );
+    } finally {
+      service.storagePath = originalStoragePath;
+    }
+  });
+
   it("serves GET and HEAD consistently without a body for HEAD", async () => {
     const file = await service.upload(bytes("binary"), {
       name: "archive.bin",

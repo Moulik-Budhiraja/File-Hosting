@@ -1,6 +1,7 @@
 import { errorResponse, notFound } from "@/server/files/http";
 import { renderOgImage } from "@/server/files/og-image";
 import { getFileService } from "@/server/files/singleton";
+import { sourceMatchesFile } from "@/server/files/source-state";
 import {
   buildUnfurlModel,
   publicUnfurlRevisionMatches,
@@ -35,10 +36,12 @@ async function responseFor(
     const service = await getFileService();
     const file = await service.get(id);
     if (file?.visibility !== "public") throw notFound();
+    if (!(await sourceMatchesFile(service, file))) throw notFound();
     const model = await buildUnfurlModel(service, file);
     const image = await renderOgImage(service, file, model);
     const current = await service.get(id);
     if (!publicUnfurlRevisionMatches(file, current)) throw notFound();
+    if (!(await sourceMatchesFile(service, file))) throw notFound();
     const headers = new Headers(IMAGE_HEADERS);
     headers.set("content-length", String(image.length));
     return new Response(includeBody ? new Uint8Array(image) : null, {

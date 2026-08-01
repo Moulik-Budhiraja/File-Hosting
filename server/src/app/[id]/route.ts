@@ -2,6 +2,10 @@ import { errorResponse, notFound } from "@/server/files/http";
 import { renderPreview } from "@/server/files/preview";
 import { getViewableFile } from "@/server/files/request";
 import {
+  isMissingSourceError,
+  sourceMatchesFile,
+} from "@/server/files/source-state";
+import {
   buildUnfurlModel,
   publicUnfurlRevisionMatches,
   renderUnfurlHead,
@@ -24,6 +28,7 @@ async function responseFor(
       request,
       (await context.params).id,
     );
+    if (!(await sourceMatchesFile(service, file))) throw notFound();
     const unfurlHead =
       file.visibility === "public"
         ? renderUnfurlHead(await buildUnfurlModel(service, file))
@@ -35,6 +40,7 @@ async function responseFor(
     ) {
       throw notFound();
     }
+    if (!(await sourceMatchesFile(service, file))) throw notFound();
     return new Response(includeBody ? html : null, {
       headers: {
         "cache-control": "no-store",
@@ -46,7 +52,9 @@ async function responseFor(
       },
     });
   } catch (error) {
-    const response = errorResponse(error);
+    const response = errorResponse(
+      isMissingSourceError(error) ? notFound() : error,
+    );
     return includeBody
       ? response
       : new Response(null, {

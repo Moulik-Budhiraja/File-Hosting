@@ -82,6 +82,27 @@ try {
 
 let activeWorkers = 0;
 const workerWaiters: Array<() => void> = [];
+const WORKER_ENVIRONMENT_KEYS = [
+  "PATH",
+  "HOME",
+  "TMPDIR",
+  "TEMP",
+  "TMP",
+  "LANG",
+  "LC_ALL",
+  "SystemRoot",
+  "WINDIR",
+  "DYLD_LIBRARY_PATH",
+  "LD_LIBRARY_PATH",
+] as const;
+
+function rasterWorkerEnvironment(): NodeJS.ProcessEnv {
+  const environment: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV };
+  for (const key of WORKER_ENVIRONMENT_KEYS) {
+    if (process.env[key] !== undefined) environment[key] = process.env[key];
+  }
+  return environment;
+}
 
 async function acquireWorkerSlot(): Promise<void> {
   if (activeWorkers < RASTER_WORKER_LIMITS.maxConcurrent) {
@@ -123,7 +144,7 @@ async function runRasterWorker(
         {
           cwd: process.cwd(),
           encoding: null,
-          env: { ...process.env, NODE_OPTIONS: "" },
+          env: rasterWorkerEnvironment(),
           killSignal: "SIGKILL",
           maxBuffer: RASTER_WORKER_LIMITS.maxOutputBytes,
           timeout: RASTER_WORKER_LIMITS.wallTimeoutMs,
