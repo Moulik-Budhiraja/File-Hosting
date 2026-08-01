@@ -2598,6 +2598,22 @@ test("multiple leftover backups fail closed instead of guessing", async () => {
   assert.deepEqual((await readdir(room)).sort(), ["a.tar.gz", "dest"]);
 });
 
+test("unrelated backup-prefix paths are preserved and ignored", async () => {
+  const extract = await import("../src/extract.js");
+  const { mkdir } = await import("node:fs/promises");
+  const room = await mkdtemp(join(scratch, "unrelated-backup-"));
+  const archivePath = join(room, "a.tar.gz");
+  await writeFile(archivePath, gzipSync(rawTarEntry("inside.txt", "new content")));
+  const unrelated = join(room, ".dest.fs-backup-user-data");
+  await mkdir(unrelated);
+  await writeFile(join(unrelated, "keep.txt"), "do not delete");
+
+  await extract.extractArchive(archivePath, join(room, "dest"), false);
+
+  assert.equal(await readFile(join(unrelated, "keep.txt"), "utf8"), "do not delete");
+  assert.equal(await readFile(join(room, "dest", "inside.txt"), "utf8"), "new content");
+});
+
 // Path-only completeness cannot see a symlink whose TARGET the extractor
 // resolved differently than the scanner did, and a published link target is
 // exactly what the portable-name and containment policy is about. The staged

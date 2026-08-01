@@ -373,7 +373,17 @@ async function recoverLeftoverBackups(
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
     throw error;
   }
-  const backups = names.filter((name) => name.startsWith(prefix)).sort();
+  const backups: string[] = [];
+  for (const name of names.sort()) {
+    if (!name.startsWith(prefix)) continue;
+    // mkdtemp appends exactly six alphanumeric characters. A shared prefix is
+    // not ownership: only the CLI's generated spelling with its `previous`
+    // payload is eligible for recovery or removal.
+    const suffix = name.slice(prefix.length);
+    if (!/^[A-Za-z0-9]{6}$/.test(suffix)) continue;
+    if (!(await exists(join(parent, name, "previous")))) continue;
+    backups.push(name);
+  }
   // Two backups can only coexist after two crashes or two concurrent runs
   // against this destination. There is no evidence for which one holds the
   // real previous content, so restoring one and deleting the other would

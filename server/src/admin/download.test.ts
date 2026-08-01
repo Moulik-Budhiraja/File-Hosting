@@ -318,9 +318,18 @@ describe("downloadFile", () => {
     assert.equal(outcome.cancelled, true);
   });
 
-  it("treats an abort during createWritable as cancellation", async () => {
+  it("treats an abort during createWritable as cancellation and cancels the response", async () => {
+    let bodyCancelled = false;
+    const stream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        controller.enqueue(new Uint8Array(4));
+      },
+      cancel() {
+        bodyCancelled = true;
+      },
+    });
     const environment: DownloadEnvironment = {
-      fetchStream: async () => chunkResponse([new Uint8Array(4)]),
+      fetchStream: async () => new Response(stream, { status: 200 }),
       fetchBlob: async () => {
         throw new Error("unused");
       },
@@ -336,6 +345,7 @@ describe("downloadFile", () => {
       environment,
     );
     assert.equal(outcome.cancelled, true);
+    assert.equal(bodyCancelled, true);
   });
 
   it("treats an abort during the buffered fallback fetch as cancellation", async () => {

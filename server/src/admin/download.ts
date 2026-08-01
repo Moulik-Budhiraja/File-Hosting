@@ -112,6 +112,10 @@ async function streamToDisk(
   try {
     writable = await handle.createWritable();
   } catch (error) {
+    // The response was established before the writable. If opening the file
+    // fails or is cancelled, stop the unread body so the transfer and its
+    // server-side active-download state do not continue in the background.
+    await body.cancel(error).catch(() => undefined);
     if (isAbortError(error) || options.signal?.aborted) {
       return { method: "stream", cancelled: true };
     }
