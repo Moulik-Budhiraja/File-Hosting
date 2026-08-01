@@ -48,6 +48,16 @@ function comparisonKey(relativePath: string): string {
     .join("/");
 }
 
+// Windows stores a relative symlink's substitute name with "\" separators
+// even when the link was created with "/", so the host's readlink spelling of
+// a scanner-accepted target differs only in separators. Fold them back to the
+// canonical archive spelling before comparison. Off Windows a backslash is a
+// literal name character (and the scanner rejects any target carrying one),
+// so the value must not be rewritten there.
+function canonicalLinkSpelling(target: string): string {
+  return process.platform === "win32" ? target.replaceAll("\\", "/") : target;
+}
+
 // Second line of defense behind the strict pre-scan: the staged tree must
 // match the scan manifest EXACTLY. Every scanner-accepted entry must exist,
 // and nothing the scanner never declared may exist — an extractor that
@@ -62,7 +72,8 @@ export async function verifyExtractionCompleteness(
   // means the extractor read the stream differently.
   for (const link of links) {
     const staged = join(root, ...link.path.split("/"));
-    const actual = await readlink(staged).catch(() => null);
+    const raw = await readlink(staged).catch(() => null);
+    const actual = raw === null ? null : canonicalLinkSpelling(raw);
     if (actual !== link.target) {
       throw new CliError(
         `Archive extraction produced an unexpected link target: ${link.path} -> ${actual ?? "(not a symlink)"}`,
@@ -119,6 +130,11 @@ export interface PublishHooks {
     cwd: string;
     onwarn: (code: string, message: string) => void;
   }) => Promise<void>;
+  // Test seam for a deterministic failure from the real streaming extractor.
+  // Production never supplies it; keeping the ordinary Unpack path lets tests
+  // exercise queued-write quiescence without platform-specific filesystem
+  // limits or errno values.
+  onExtractEntry?: (entryPath: string) => void;
 }
 
 function asExtractionFailure(error: unknown): CliError {
@@ -175,6 +191,7 @@ function startRealExtraction(options: {
   file: string;
   cwd: string;
   onwarn: (code: string, message: string) => void;
+  onentry?: (entryPath: string) => void;
 }): ExtractionHandle {
   let markQuiesced: (() => void) | undefined;
   const quiesced = new Promise<void>((resolve) => {
@@ -210,6 +227,18 @@ function startRealExtraction(options: {
       reject(error instanceof Error ? error : new Error(String(error)));
       stopFeeding();
     });
+    if (options.onentry) {
+      unpack.on("entry", (entry) => {
+        try {
+          options.onentry?.(entry.path);
+        } catch (error) {
+          unpack.emit(
+            "error",
+            error instanceof Error ? error : new Error(String(error)),
+          );
+        }
+      });
+    }
     source.on("error", (error: unknown) => {
       reject(error instanceof Error ? error : new Error(String(error)));
       stopFeeding();
@@ -412,7 +441,12 @@ export async function extractArchive(
         ? startHookedExtraction(() =>
             runExtract({ file: archivePath, cwd: staging, onwarn }),
           )
-        : startRealExtraction({ file: archivePath, cwd: staging, onwarn }),
+        : startRealExtraction({
+            file: archivePath,
+            cwd: staging,
+            onwarn,
+            onentry: hooks.onExtractEntry,
+          }),
     );
     throwIfExtractionWarnings(warnings);
     await verifyExtractionCompleteness(
