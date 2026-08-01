@@ -28,6 +28,21 @@ export type UnauthenticatedReason = "signed-out" | "session-expired";
 // dead cookie can be reported as "session expired" instead of "signed out".
 export const SESSION_MARKER_KEY = "fs.session-active";
 
+// Per-tab, non-secret identity marker. Unlike localStorage, sessionStorage is
+// not shared by sibling tabs, so each mounted console can compare the next
+// authoritative identity with the identity whose task URL it currently owns.
+export const USER_SCOPE_IDENTITY_KEY = "fs.user-scope-identity";
+
+const USER_SCOPED_TASK_PARAMS = [
+  "q",
+  "visibility",
+  "scope",
+  "cursor",
+  "prev",
+  "sel",
+  "pend",
+] as const;
+
 // Focus/visibility refreshes are best-effort; anything more frequent than
 // this is a request storm, not fresher identity.
 const BACKGROUND_REFRESH_MIN_INTERVAL_MS = 30_000;
@@ -48,6 +63,36 @@ function clearSessionMarker(): void {
 
 function hadSession(): boolean {
   return safeStorageGet(SESSION_MARKER_KEY) === "1";
+}
+
+function readScopedIdentity(): string | null {
+  try {
+    return window.sessionStorage.getItem(USER_SCOPE_IDENTITY_KEY);
+  } catch {
+    return null;
+  }
+}
+
+function writeScopedIdentity(identity: string): void {
+  try {
+    window.sessionStorage.setItem(USER_SCOPE_IDENTITY_KEY, identity);
+  } catch {
+    // Restricted storage still gets the mounted-provider identity boundary.
+  }
+}
+
+function clearUserScopedTaskUrl(): void {
+  const params = new URLSearchParams(window.location.search);
+  let changed = false;
+  for (const name of USER_SCOPED_TASK_PARAMS) {
+    if (!params.has(name)) continue;
+    params.delete(name);
+    changed = true;
+  }
+  if (!changed) return;
+  const search = params.toString();
+  const target = `${window.location.pathname}${search ? `?${search}` : ""}${window.location.hash}`;
+  window.history.replaceState(null, "", target);
 }
 
 export interface SignOutResult {
@@ -77,6 +122,7 @@ export function AuthProvider({
   const [failed, setFailed] = useState(false);
   const [stale, setStale] = useState(false);
   const hasIdentityRef = useRef(false);
+  const identityRef = useRef<string | null>(null);
   const reportedRef = useRef(false);
   const mountedRef = useRef(true);
   const inflightRef = useRef<Promise<void> | null>(null);
@@ -112,6 +158,17 @@ export function AuthProvider({
           report("signed-out");
           return;
         }
+        const nextIdentity = `${result.user.id}:${result.role}`;
+        const previousIdentity = identityRef.current ?? readScopedIdentity();
+        if (previousIdentity && previousIdentity !== nextIdentity) {
+          // This runs before setMe commits the replacement identity. The old
+          // subtree cannot re-render from the URL change, and the new keyed
+          // subtree can only initialize from the scrubbed route, so no request
+          // derived from another user's task state can be issued.
+          clearUserScopedTaskUrl();
+        }
+        identityRef.current = nextIdentity;
+        writeScopedIdentity(nextIdentity);
         hasIdentityRef.current = true;
         setMe(result);
         setStale(false);

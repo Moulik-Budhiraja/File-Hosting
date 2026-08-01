@@ -189,3 +189,51 @@ test("restricted storage does not break the reconciled login path", async ({
   expect(errors).toEqual([]);
   await context.close();
 });
+
+test("a lost login response with a definitive different cookie session names that session truthfully and retries safely", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const existing = await ensureUser(baseURL!, "login-existing-user", "member");
+  const intended = await ensureUser(baseURL!, "login-intended-user", "member");
+  await page.goto("/login");
+  await page.getByLabel("Username").fill(existing.username);
+  await page.getByLabel("Password").fill(existing.password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL((url) => url.pathname === "/files");
+  await page.goto("/login");
+
+  let abortLogin = true;
+  await page.route("**/api/auth/login", async (route) => {
+    if (abortLogin) {
+      await route.abort("connectionreset");
+      return;
+    }
+    await route.continue({
+      headers: { ...route.request().headers(), "x-real-ip": nextAddress() },
+    });
+  });
+  const meResponses: number[] = [];
+  page.on("response", (response) => {
+    if (response.url().endsWith("/api/auth/me"))
+      meResponses.push(response.status());
+  });
+  await page.getByLabel("Username").fill(intended.username);
+  await page.getByLabel("Password").fill(intended.password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+
+  await expect(
+    page.getByText(new RegExp(`still signed in as ${existing.username}`, "i")),
+  ).toBeVisible();
+  await expect(page.getByText(/server didn't respond/i)).toHaveCount(0);
+  expect(meResponses).toContain(200);
+  const cookies = await context.cookies(baseURL);
+  expect(cookies.some((cookie) => cookie.name === "fs_session")).toBe(true);
+
+  abortLogin = false;
+  await page.getByLabel("Password").fill(intended.password);
+  await page.getByRole("button", { name: "Sign in" }).click();
+  await page.waitForURL((url) => url.pathname === "/files");
+  await expect(page.getByText(intended.username).first()).toBeVisible();
+});

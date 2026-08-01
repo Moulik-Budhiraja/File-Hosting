@@ -16,6 +16,7 @@ afterEach(() => {
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
   window.localStorage.clear();
+  window.sessionStorage.clear();
   // The sign-out probe appends result notes directly to <body>.
   document.querySelectorAll("body > p").forEach((node) => node.remove());
 });
@@ -475,6 +476,72 @@ test("a same-role account replacement discards user-scoped child state", async (
   expect(screen.getByText("held fresh")).toBeTruthy();
 });
 
+function UrlTaskProbe() {
+  const { user } = useAuth();
+  const [initialSearch] = useState(() => window.location.search);
+  return <p>{`${user.username} task ${initialSearch || "clean"}`}</p>;
+}
+
+test("a replacement identity sees a clean URL before its subtree initializes", async () => {
+  let currentName = "url-member-a";
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") return meResponse("member", currentName);
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <UrlTaskProbe />
+    </AuthProvider>,
+  );
+  await screen.findByText("url-member-a task clean");
+
+  window.history.replaceState(
+    null,
+    "",
+    "/files?q=private-name&visibility=private&scope=mine&cursor=old-cursor&prev=old-prev&sel=old-selection&pend=old-pending&keep=route-state",
+  );
+  currentName = "url-member-b";
+  act(() => publishSessionChange());
+
+  await screen.findByText("url-member-b task ?keep=route-state");
+  expect(window.location.search).toBe("?keep=route-state");
+});
+
+test("the same identity preserves task URL restoration across a provider remount", async () => {
+  window.history.replaceState(null, "", "/files");
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (url: string) => {
+      if (url === "/api/auth/me") return meResponse("member", "reauth-member");
+      throw new Error(`unexpected ${url}`);
+    }),
+  );
+  const first = render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <UrlTaskProbe />
+    </AuthProvider>,
+  );
+  await screen.findByText("reauth-member task clean");
+  window.history.replaceState(
+    null,
+    "",
+    "/files?q=same-user-task&visibility=private&scope=mine&cursor=same-cursor&prev=same-prev&sel=same-selection",
+  );
+  first.unmount();
+
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <UrlTaskProbe />
+    </AuthProvider>,
+  );
+  await screen.findByText(
+    "reauth-member task ?q=same-user-task&visibility=private&scope=mine&cursor=same-cursor&prev=same-prev&sel=same-selection",
+  );
+});
+
 test("a role change for the same account also discards user-scoped child state", async () => {
   let currentRole: "admin" | "member" = "admin";
   vi.stubGlobal(
@@ -492,6 +559,11 @@ test("a role change for the same account also discards user-scoped child state",
   await screen.findByText("viewer ops-admin · admin");
   await userEvent.click(screen.getByRole("button", { name: "hold" }));
   expect(screen.getByText("held prior-user-private-data")).toBeTruthy();
+  window.history.replaceState(
+    null,
+    "",
+    "/files?q=admin-task&visibility=private&scope=everyone&cursor=admin-cursor&prev=admin-prev&sel=admin-selection&pend=admin-pending",
+  );
 
   // Demotion out of band: rows loaded under admin privilege must not
   // survive into the member rendering.
@@ -504,4 +576,5 @@ test("a role change for the same account also discards user-scoped child state",
   await screen.findByText("viewer ops-admin · member");
   expect(screen.queryByText("held prior-user-private-data")).toBeNull();
   expect(screen.getByText("held fresh")).toBeTruthy();
+  expect(window.location.search).toBe("");
 });

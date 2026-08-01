@@ -147,7 +147,10 @@ export function FilesBrowser() {
     };
     setOrDelete("q", query || null);
     setOrDelete("visibility", visibility === "all" ? null : visibility);
-    setOrDelete("scope", scope === "everyone" ? null : scope);
+    // Only persist a non-default admin scope. Members are always scoped to
+    // their own files, so writing `scope=mine` would recreate a scrubbed old
+    // account parameter after an identity replacement.
+    setOrDelete("scope", isAdmin && scope === "mine" ? "mine" : null);
     setOrDelete("cursor", cursor);
     setOrDelete("prev", encodePrevCursors(prevCursors));
     setOrDelete("sel", selectedId);
@@ -156,7 +159,7 @@ export function FilesBrowser() {
     if (target !== `${window.location.pathname}${window.location.search}`) {
       window.history.replaceState(null, "", target);
     }
-  }, [query, visibility, scope, cursor, prevCursors, selectedId]);
+  }, [query, visibility, isAdmin, scope, cursor, prevCursors, selectedId]);
 
   useEffect(() => {
     if (!isAdmin) return;

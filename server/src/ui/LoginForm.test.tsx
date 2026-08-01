@@ -240,9 +240,12 @@ test("a session for a different user never completes the intended sign-in", asyn
   await userEvent.click(screen.getByRole("button", { name: "Sign in" }));
 
   expect(onSuccess).not.toHaveBeenCalled();
+  expect(screen.getByText(/still signed in as someone-else/i)).toBeTruthy();
+  expect(screen.queryByText(/server didn't respond/i)).toBeNull();
   expect(
-    screen.getByText(/couldn't confirm whether sign-in completed/i),
-  ).toBeTruthy();
+    (screen.getByRole("button", { name: "Sign in" }) as HTMLButtonElement)
+      .disabled,
+  ).toBe(false);
 });
 
 test("session-expired mode shows the banner and prefills the username", () => {

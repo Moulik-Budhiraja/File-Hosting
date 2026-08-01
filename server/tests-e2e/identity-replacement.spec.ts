@@ -143,6 +143,13 @@ test("an out-of-band demotion clears privileged file rows, not just the admin na
   await expect(
     page.getByRole("button", { name: /rowswap-owner-private\.txt/ }).first(),
   ).toBeVisible();
+  await page.evaluate(() => {
+    window.history.replaceState(
+      null,
+      "",
+      "/files?q=admin-only-query&visibility=private&scope=everyone&cursor=admin-only-cursor&prev=admin-only-prev&sel=admin-only-selection&pend=admin-only-pending&keep=route-state",
+    );
+  });
 
   // Demote out of band — no coordinated signal; only the bounded poll.
   const api = await apiContext(baseURL!);
@@ -159,6 +166,8 @@ test("an out-of-band demotion clears privileged file rows, not just the admin na
   });
   // The rows loaded under admin privilege are gone with the privilege.
   await expect(page.getByText(/rowswap-owner-private\.txt/)).toHaveCount(0);
+  await expect(page.getByLabel("Search name or tag")).toHaveValue("");
+  await expect.poll(() => new URL(page.url()).search).toBe("?keep=route-state");
 
   // Restore the fixture for reruns.
   const restore = await apiContext(baseURL!);
@@ -167,4 +176,95 @@ test("an out-of-band demotion clears privileged file rows, not just the admin na
     headers: { authorization: `Bearer ${LEGACY_TOKEN}` },
   });
   await restore.dispose();
+});
+
+test("a same-role member replacement strips every Files task parameter before the new identity requests or renders", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const memberA = await ensureUser(baseURL!, "urlswap-files-a", "member");
+  const memberB = await ensureUser(baseURL!, "urlswap-files-b", "member");
+  await uiLogin(page, memberA.username, memberA.password);
+
+  const oldValues = [
+    "old-file-query",
+    "visibility=private",
+    "old-file-cursor",
+    "old-file-prev",
+    "old-file-selection",
+    "old-file-pending",
+  ];
+  const requestsAfterSwitch: string[] = [];
+  let switching = false;
+  page.on("request", (request) => {
+    if (switching && request.url().includes("/api/files?")) {
+      requestsAfterSwitch.push(request.url());
+    }
+  });
+  await page.route("**/api/files?**", async (route) => {
+    const url = new URL(route.request().url());
+    if (url.searchParams.get("cursor") === "old-file-cursor") {
+      await route.fulfill({
+        status: 200,
+        contentType: "application/json",
+        body: JSON.stringify({ items: [], next_cursor: null }),
+      });
+      return;
+    }
+    await route.continue();
+  });
+  await page.goto(
+    "/files?q=old-file-query&visibility=private&scope=mine&cursor=old-file-cursor&prev=old-file-prev&sel=old-file-selection&pend=old-file-pending&keep=route-state",
+  );
+  await expect(page.getByLabel("Search name or tag")).toHaveValue(
+    "old-file-query",
+  );
+
+  const tabB = await context.newPage();
+  switching = true;
+  await uiLogin(tabB, memberB.username, memberB.password);
+  await expect(page.getByText("urlswap-files-b · member")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByLabel("Search name or tag")).toHaveValue("");
+  await expect.poll(() => new URL(page.url()).search).toBe("?keep=route-state");
+  expect(
+    requestsAfterSwitch.some((url) =>
+      oldValues.some((value) => decodeURIComponent(url).includes(value)),
+    ),
+  ).toBe(false);
+  await tabB.close();
+});
+
+test("a same-role admin replacement strips every Keys task parameter before restoration", async ({
+  context,
+  page,
+  baseURL,
+}) => {
+  const adminA = await ensureUser(baseURL!, "urlswap-keys-a", "admin");
+  const adminB = await ensureUser(baseURL!, "urlswap-keys-b", "admin");
+  await uiLogin(page, adminA.username, adminA.password);
+  await page.goto(
+    "/keys?q=old-key-query&visibility=private&scope=mine&cursor=old-key-cursor&prev=old-key-prev&sel=old-key-selection&pend=old-key-pending&keep=route-state",
+  );
+  await expect(page.getByLabel(/Search key name/)).toHaveValue("old-key-query");
+
+  const tabB = await context.newPage();
+  await uiLogin(tabB, adminB.username, adminB.password);
+  await expect(page.getByText("urlswap-keys-b · admin")).toBeVisible({
+    timeout: 10_000,
+  });
+  await expect(page.getByLabel(/Search key name/)).toHaveValue("");
+  await expect(page.getByRole("button", { name: "All users" })).toHaveAttribute(
+    "aria-pressed",
+    "true",
+  );
+  await expect(page.getByRole("button", { name: "Mine" })).toHaveAttribute(
+    "aria-pressed",
+    "false",
+  );
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  await expect.poll(() => new URL(page.url()).search).toBe("?keep=route-state");
+  await tabB.close();
 });

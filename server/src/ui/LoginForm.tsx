@@ -25,6 +25,8 @@ type LoginState =
   // Transport failed and the authoritative /api/auth/me probe confirmed
   // there is no session: not signed in (yet), retry freely.
   | { kind: "not-signed-in" }
+  // The probe responded definitively with another cookie-backed identity.
+  | { kind: "different-session"; username: string }
   // Transport failed and the probe could not confirm either way.
   | { kind: "unknown" };
 
@@ -101,7 +103,9 @@ export function LoginForm({
       }
       // A session for a different identity (or a legacy credential) is
       // not the sign-in the user asked for.
-      return me.user ? { kind: "unknown" } : { kind: "not-signed-in" };
+      return me.user
+        ? { kind: "different-session", username: me.user.username }
+        : { kind: "not-signed-in" };
     } catch (error) {
       if (isApiError(error) && error.status === 401) {
         return { kind: "not-signed-in" };
@@ -188,6 +192,13 @@ export function LoginForm({
           <p className="field-error">
             Sign-in didn&apos;t complete — you&apos;re not signed in. Check your
             connection and try again.
+          </p>
+        ) : null}
+        {state.kind === "different-session" ? (
+          <p className="field-error">
+            You&apos;re still signed in as {state.username}. This sign-in
+            didn&apos;t take effect in this browser. Check your connection and
+            try again.
           </p>
         ) : null}
         {state.kind === "unknown" ? (

@@ -33,6 +33,10 @@ beforeEach(() => {
 afterEach(() => {
   const failures = consoleFailures;
   consoleFailures = [];
+  // AuthProvider's per-tab identity boundary is intentionally durable across
+  // component remounts. Tests are independent browser sessions, so do not let
+  // one test's synthetic identity own the next test's seeded task URL.
+  window.sessionStorage.clear();
   if (failures.length > 0) {
     throw new Error(
       `Unexpected console output during test:\n${failures.join("\n")}`,
