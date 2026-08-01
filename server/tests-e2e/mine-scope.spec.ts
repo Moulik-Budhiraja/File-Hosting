@@ -44,10 +44,9 @@ test("Mine finds an owned file buried behind a full page of others' files", asyn
 
   // Members default to Mine; the needle is on page one of the scoped
   // listing even though 55 newer unowned files exist.
-  await expect(page.getByRole("button", { name: "Mine" })).toHaveAttribute(
-    "aria-pressed",
-    "true",
-  );
+  await expect(
+    page.getByRole("button", { name: "Mine", exact: true }),
+  ).toHaveAttribute("aria-pressed", "true");
   await expect(
     page.getByRole("button", { name: /mine-needle\.txt/ }),
   ).toBeVisible();

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 import { apiFetch, isApiError } from "@/lib/api";
 import { useAuth } from "@/lib/auth-context";
@@ -17,6 +17,14 @@ type FormState =
   | { kind: "submitting" }
   | { kind: "current-rejected"; message: string }
   | { kind: "new-rejected"; message: string }
+  // The server answered with a non-field error: the transaction rolled
+  // back, so the password is unchanged and retry is safe.
+  | { kind: "server-error" }
+  // The server rejected the session itself (revoked/expired) before
+  // judging any credential — only re-authentication can proceed.
+  | { kind: "session-ended" }
+  // No response was delivered at all; the commit may or may not have
+  // happened.
   | { kind: "outcome-unknown" };
 
 interface AccountSecurityProps {
@@ -42,6 +50,14 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
   const newErrorId = useId();
   const confirmErrorId = useId();
   const currentErrorId = useId();
+  const recoveryLinkRef = useRef<HTMLAnchorElement | null>(null);
+
+  // Only the genuine lost-response transition re-homes the keyboard: the
+  // submit button it was on is disabled mid-flight, so focus would
+  // otherwise fall back to the document body.
+  useEffect(() => {
+    if (state.kind === "outcome-unknown") recoveryLinkRef.current?.focus();
+  }, [state.kind]);
 
   const newFieldInvalid = newError !== null || state.kind === "new-rejected";
 
@@ -75,11 +91,23 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
       setState({ kind: "idle" });
       onPasswordChanged();
     } catch (error) {
-      if (isApiError(error) && error.status === 401) {
+      if (
+        isApiError(error) &&
+        error.status === 401 &&
+        error.code === "invalid_credentials"
+      ) {
         setState({
           kind: "current-rejected",
           message: "Current password is invalid.",
         });
+      } else if (isApiError(error) && error.status === 401) {
+        // The session died (revoked/expired/disabled) before any credential
+        // was judged. Drop the typed credentials — this page can no longer
+        // act on them — and point at re-authentication.
+        setCurrentPassword("");
+        setNewPassword("");
+        setConfirmPassword("");
+        setState({ kind: "session-ended" });
       } else if (
         isApiError(error) &&
         error.status === 400 &&
@@ -88,8 +116,11 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
         // The server judged the NEW password invalid — the error belongs
         // to the new-password field, not the current-credential field.
         setState({ kind: "new-rejected", message: `${error.message}.` });
-      } else if (isApiError(error) && error.status === 400) {
-        setState({ kind: "current-rejected", message: `${error.message}.` });
+      } else if (isApiError(error)) {
+        // The error response was DELIVERED, so the outcome is known: the
+        // password route rolls back on any error and only commits before
+        // its 204, so nothing changed and retry is safe.
+        setState({ kind: "server-error" });
       } else {
         // The server may have committed the password and revoked every
         // session before response delivery failed. Clear both credentials
@@ -125,6 +156,29 @@ export function AccountSecurity({ onPasswordChanged }: AccountSecurityProps) {
                 browser session may have been signed out. Go to sign in and use
                 the new password first. If you cannot sign in, ask an
                 administrator to reset your password.
+              </p>
+              <Link href="/login?next=%2Faccount" ref={recoveryLinkRef}>
+                Go to sign in
+              </Link>
+            </div>
+          ) : null}
+          {state.kind === "server-error" ? (
+            <div className="notice notice-danger">
+              <p className="notice-title">Password not changed.</p>
+              <p>
+                The server returned an error and did not apply the change. Try
+                again — if it keeps failing, ask an administrator.
+              </p>
+            </div>
+          ) : null}
+          {state.kind === "session-ended" ? (
+            <div className="notice notice-danger">
+              <p className="notice-title">
+                Session ended — password not changed.
+              </p>
+              <p>
+                Your session is no longer valid — it expired or was revoked.
+                Sign in again to change your password.
               </p>
               <Link href="/login?next=%2Faccount">Go to sign in</Link>
             </div>

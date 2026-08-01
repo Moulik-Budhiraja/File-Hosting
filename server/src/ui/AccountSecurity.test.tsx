@@ -137,7 +137,137 @@ test("a wrong current password shows the server rejection on the field", async (
   await userEvent.click(
     screen.getByRole("button", { name: "Change password" }),
   );
-  expect(await screen.findByText("Current password is invalid.")).toBeTruthy();
+  const error = await screen.findByText("Current password is invalid.");
+  const current = screen.getByLabelText("Current password");
+  expect(current.getAttribute("aria-invalid")).toBe("true");
+  expect(current.getAttribute("aria-describedby")).toBe(error.id);
+  // Wrong credentials never masquerade as a dead session.
+  expect(screen.queryByText(/sign in again/i)).toBeNull();
+  expect(screen.queryByRole("link", { name: /go to sign in/i })).toBeNull();
+});
+
+test("a dead-session 401 asks for re-authentication instead of blaming the current password", async () => {
+  stubFetch((url, init) => {
+    const known = meRoute(url);
+    if (known) return known;
+    if (url === "/api/auth/password" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: "unauthorized",
+            message: "A valid bearer token is required",
+          },
+        }),
+        { status: 401, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords("old password!!", "new password 123", "new password 123");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+
+  expect(
+    await screen.findByText("Session ended — password not changed."),
+  ).toBeTruthy();
+  expect(
+    screen.getByText(/sign in again to change your password/i),
+  ).toBeTruthy();
+  const link = screen.getByRole("link", { name: /go to sign in/i });
+  expect(link.getAttribute("href")).toBe("/login?next=%2Faccount");
+  // The credential was not judged — the field carries no false blame.
+  expect(screen.queryByText("Current password is invalid.")).toBeNull();
+  const current = screen.getByLabelText("Current password") as HTMLInputElement;
+  expect(current.getAttribute("aria-invalid")).toBeNull();
+  expect(current.getAttribute("aria-describedby")).toBeNull();
+  // A dead-session page keeps no typed credentials around.
+  expect(current.value).toBe("");
+  expect(
+    (screen.getByLabelText("New password") as HTMLInputElement).value,
+  ).toBe("");
+  // Only the genuine lost-response transition moves focus.
+  expect(document.activeElement).not.toBe(link);
+});
+
+test("a delivered server error says the change was not applied, never that the response was lost", async () => {
+  stubFetch((url, init) => {
+    const known = meRoute(url);
+    if (known) return known;
+    if (url === "/api/auth/password" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: "internal_error",
+            message: "The server could not complete the request",
+          },
+        }),
+        { status: 500, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords("old password!!", "new password 123", "new password 123");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+
+  expect(await screen.findByText("Password not changed.")).toBeTruthy();
+  expect(
+    screen.getByText(/the server returned an error and did not apply/i),
+  ).toBeTruthy();
+  // The response arrived — no lost-response or unknown-outcome guidance.
+  expect(screen.queryByText(/response was lost/i)).toBeNull();
+  expect(screen.queryByText(/outcome unknown/i)).toBeNull();
+  expect(screen.queryByText(/may have changed/i)).toBeNull();
+  expect(screen.queryByRole("link", { name: /go to sign in/i })).toBeNull();
+  // The failure belongs to the server, not the current-password field…
+  const current = screen.getByLabelText("Current password") as HTMLInputElement;
+  expect(current.getAttribute("aria-invalid")).toBeNull();
+  // …and the typed credentials stay so retrying is one click.
+  expect(current.value).toBe("old password!!");
+  expect(
+    (
+      screen.getByRole("button", {
+        name: "Change password",
+      }) as HTMLButtonElement
+    ).disabled,
+  ).toBe(false);
+});
+
+test("a delivered non-credential 400 never marks the current-password field", async () => {
+  stubFetch((url, init) => {
+    const known = meRoute(url);
+    if (known) return known;
+    if (url === "/api/auth/password" && init?.method === "POST") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            code: "invalid_request",
+            message: "The request could not be processed",
+          },
+        }),
+        { status: 400, headers: { "content-type": "application/json" } },
+      );
+    }
+    throw new Error(`unexpected ${url}`);
+  });
+  renderAccount();
+  await screen.findByText("jordan");
+  await fillPasswords("old password!!", "new password 123", "new password 123");
+  await userEvent.click(
+    screen.getByRole("button", { name: "Change password" }),
+  );
+
+  expect(await screen.findByText("Password not changed.")).toBeTruthy();
+  expect(screen.queryByText("The request could not be processed.")).toBeNull();
+  const current = screen.getByLabelText("Current password");
+  expect(current.getAttribute("aria-invalid")).toBeNull();
+  expect(current.getAttribute("aria-describedby")).toBeNull();
 });
 
 test("an unavailable password-change response reports an unknown outcome with safe recovery", async () => {
@@ -161,7 +291,8 @@ test("an unavailable password-change response reports an unknown outcome with sa
       /may have changed and every browser session may have been signed out/i,
     ),
   ).toBeTruthy();
-  expect(screen.getByRole("link", { name: /go to sign in/i })).toBeTruthy();
+  const recovery = screen.getByRole("link", { name: /go to sign in/i });
+  expect(recovery.getAttribute("href")).toBe("/login?next=%2Faccount");
   expect(screen.queryByText(/password not changed/i)).toBeNull();
   expect(screen.queryByText(/current password still works/i)).toBeNull();
   expect(
@@ -170,6 +301,8 @@ test("an unavailable password-change response reports an unknown outcome with sa
   expect(
     (screen.getByLabelText("New password") as HTMLInputElement).value,
   ).toBe("");
+  // Keyboard position lands on the recovery action, not the document body.
+  await waitFor(() => expect(document.activeElement).toBe(recovery));
 });
 
 test("success clears the fields and routes to the truthful password-changed login state", async () => {

@@ -72,6 +72,15 @@ a:hover {
   background-color: var(--color-primary-soft);
 }
 
+/* Notice recovery links receive focus from script after an ambiguous
+ * outcome; a pointer-initiated submit means that focus may not qualify as
+ * :focus-visible, so it must be marked on plain :focus. */
+.notice a:focus {
+  outline: 1px solid var(--color-primary);
+  outline-offset: 1px;
+  background-color: var(--color-primary-soft);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *,
   *::before,
@@ -1248,7 +1257,8 @@ main.landing code {
 /* Windows High Contrast / forced colors: state emphasis must not rely on
  * background fills that forced-colors strips. */
 @media (forced-colors: active) {
-  :focus-visible {
+  :focus-visible,
+  .notice a:focus {
     outline: 2px solid Highlight;
     outline-offset: 2px;
   }
