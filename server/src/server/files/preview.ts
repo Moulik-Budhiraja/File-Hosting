@@ -180,19 +180,26 @@ function createMarkdownRenderer() {
       const firstText = inline.children.find((token) => token.type === "text");
       const match = /^\[([ xX])\]\s+/u.exec(firstText?.content ?? "");
       if (!match || !firstText) continue;
+
+      let listItemIndex = -1;
+      for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+        const candidate = state.tokens[cursor];
+        if (candidate?.type === "list_item_close") break;
+        if (candidate?.type !== "list_item_open") continue;
+        const hasEarlierInline = state.tokens
+          .slice(cursor + 1, index)
+          .some((token) => token.type === "inline");
+        if (!hasEarlierInline) listItemIndex = cursor;
+        break;
+      }
+      if (listItemIndex < 0) continue;
+
       firstText.content = firstText.content.slice(match[0].length);
       const checked = match[1]?.toLowerCase() === "x";
       const checkbox = new state.Token("html_inline", "", 0);
       checkbox.content = `<input type="checkbox"${checked ? " checked" : ""} disabled aria-label="${checked ? "Completed" : "Incomplete"} task"> `;
       inline.children.unshift(checkbox);
-      for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
-        const candidate = state.tokens[cursor];
-        if (candidate?.type === "list_item_open") {
-          candidate.attrJoin("class", "task-list-item");
-          break;
-        }
-        if (candidate?.type === "list_item_close") break;
-      }
+      state.tokens[listItemIndex]?.attrJoin("class", "task-list-item");
     }
   });
 

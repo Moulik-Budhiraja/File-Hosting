@@ -34,6 +34,8 @@ assert(executablePath, "No supported Chrome/Chromium executable was found");
 
 const markdown = `# Production Markdown probe
 
+[x] top-level marker remains
+
 A normal paragraph with **strong**, *emphasis*, ~~removed~~, [safe link](https://example.test/path), and https://example.test/autolink.
 
 - nested list
@@ -115,6 +117,10 @@ try {
     assert.equal(await page.locator("article.markdown-body strong").count(), 1);
     assert.equal(await page.locator("article.markdown-body table").count(), 1);
     assert.equal(await page.locator("article.markdown-body input[type=checkbox]").count(), 2);
+    assert.equal(
+      await page.locator("article.markdown-body").getByText("[x] top-level marker remains", { exact: true }).count(),
+      1,
+    );
     assert.equal(await page.locator("article.markdown-body img").count(), 0);
     assert.equal(await page.locator("script").count(), 0);
     assert.equal(await page.evaluate(() => globalThis.markdownProbePwned), undefined);
