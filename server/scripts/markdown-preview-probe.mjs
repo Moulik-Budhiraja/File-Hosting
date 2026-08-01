@@ -42,6 +42,7 @@ A normal paragraph with **strong**, *emphasis*, ~~removed~~, [safe link](https:/
   - child item
   - [x] completed task
   - [ ] pending task
+  - **[x]** formatted marker remains
 
 > A readable blockquote.
 
@@ -114,11 +115,15 @@ try {
     assert.match(headers["content-security-policy"] ?? "", /frame-ancestors 'none'/u);
 
     assert.equal(await page.locator("article.markdown-body h1").textContent(), "Production Markdown probe");
-    assert.equal(await page.locator("article.markdown-body strong").count(), 1);
+    assert.equal(await page.locator("article.markdown-body strong").count(), 2);
     assert.equal(await page.locator("article.markdown-body table").count(), 1);
     assert.equal(await page.locator("article.markdown-body input[type=checkbox]").count(), 2);
     assert.equal(
       await page.locator("article.markdown-body").getByText("[x] top-level marker remains", { exact: true }).count(),
+      1,
+    );
+    assert.equal(
+      await page.locator("article.markdown-body strong").getByText("[x]", { exact: true }).count(),
       1,
     );
     assert.equal(await page.locator("article.markdown-body img").count(), 0);

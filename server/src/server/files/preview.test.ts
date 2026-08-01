@@ -118,13 +118,20 @@ const value = "safe";
 
 - ordinary item
 
-  [ ] Later paragraph marker`);
+  [ ] Later paragraph marker
+
+- **[x]** Strong marker
+- *[ ]* Emphasis marker
+- \`[x]\` Code marker`);
     const preview = mainContent(html);
 
     assert.equal((preview.match(/type="checkbox"/gu) ?? []).length, 1);
     assert.match(preview, /<h1>\[x\] Heading marker<\/h1>/u);
     assert.match(preview, /<p>\[x\] Paragraph marker<\/p>/u);
     assert.match(preview, /<p>\[ \] Later paragraph marker<\/p>/u);
+    assert.match(preview, /<strong>\[x\]<\/strong> Strong marker/u);
+    assert.match(preview, /<em>\[ \]<\/em> Emphasis marker/u);
+    assert.match(preview, /<code>\[x\]<\/code> Code marker/u);
   });
 
   it("never turns hostile raw HTML or event attributes into executable markup", async () => {

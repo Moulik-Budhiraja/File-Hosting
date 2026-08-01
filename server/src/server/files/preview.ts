@@ -177,9 +177,10 @@ function createMarkdownRenderer() {
     for (let index = 0; index < state.tokens.length; index += 1) {
       const inline = state.tokens[index];
       if (inline?.type !== "inline" || !inline.children) continue;
-      const firstText = inline.children.find((token) => token.type === "text");
-      const match = /^\[([ xX])\]\s+/u.exec(firstText?.content ?? "");
-      if (!match || !firstText) continue;
+      const firstText = inline.children[0];
+      if (firstText?.type !== "text") continue;
+      const match = /^\[([ xX])\]\s+/u.exec(firstText.content);
+      if (!match) continue;
 
       let listItemIndex = -1;
       for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
