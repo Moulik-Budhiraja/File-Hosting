@@ -366,7 +366,14 @@ export async function renderPreview(
       .code-scroll code { background: transparent; border: 0; padding: 0; }
       .table-scroll { margin: 1rem 0; }
       .markdown-body table { border-collapse: collapse; min-width: 32rem; width: 100%; }
-      .markdown-body th, .markdown-body td { border: 1px solid var(--border); padding: .45rem .65rem; text-align: left; }
+      .markdown-body th, .markdown-body td {
+        border: 1px solid var(--border);
+        min-width: 8rem;
+        overflow-wrap: normal;
+        padding: .45rem .65rem;
+        text-align: left;
+        word-break: normal;
+      }
       .markdown-body th { background: var(--code); font-weight: 700; }
       .image-alt { border-left: .2rem solid var(--border); color: var(--muted); display: inline-block; padding-left: .5rem; }
       .text-preview {
