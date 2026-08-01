@@ -339,6 +339,41 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.doesNotMatch(html, /<script>alert/u);
   });
 
+  it("renders Markdown semantically with defensive preview response headers", async () => {
+    const markdown = await service.upload(
+      chunks(
+        "# Safe reader\n\n[link](https://example.test)\n\n<script>alert(1)</script>",
+      ),
+      {
+        name: "reader.md",
+        tags: ["markdown"],
+        visibility: "public",
+        archive: null,
+        mimeType: "text/markdown",
+      },
+    );
+    const response = await previewFile(
+      new Request(`http://localhost/${markdown.id}`),
+      routeContext(markdown.id),
+    );
+    assert.equal(response.status, 200);
+    assert.equal(
+      response.headers.get("content-type"),
+      "text/html; charset=utf-8",
+    );
+    assert.equal(response.headers.get("cache-control"), "no-store");
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("referrer-policy"), "no-referrer");
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /default-src 'none'/u);
+    assert.match(csp, /frame-ancestors 'none'/u);
+    assert.doesNotMatch(csp, /script-src|unsafe-eval/u);
+    const html = await response.text();
+    assert.match(html, /<h1>Safe reader<\/h1>/u);
+    assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
+    assert.doesNotMatch(html, /<script>alert/u);
+  });
+
   it("serves raw bytes, byte ranges, HEAD, security headers, and no-store caching", async () => {
     const full = await rawFile(
       new Request(`http://localhost/raw/${uploadedId}`),
@@ -426,6 +461,18 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.equal(hidden.status, 404);
     assert.equal(missing.status, 404);
     assert.deepEqual(await hidden.json(), await missing.json());
+
+    const hiddenPreview = await previewFile(
+      new Request(`http://localhost/${uploadedId}`),
+      routeContext(uploadedId),
+    );
+    const missingPreview = await previewFile(
+      new Request("http://localhost/0000000"),
+      routeContext("0000000"),
+    );
+    assert.equal(hiddenPreview.status, 404);
+    assert.equal(missingPreview.status, 404);
+    assert.deepEqual(await hiddenPreview.json(), await missingPreview.json());
 
     const authenticated = await rawFile(
       new Request(`http://localhost/raw/${uploadedId}`, {
