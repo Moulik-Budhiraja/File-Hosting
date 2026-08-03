@@ -1,15 +1,14 @@
 import { open } from "node:fs/promises";
 
 import { extractFirstMarkdownHeading } from "./preview";
-import { inspectRasterInWorker } from "./raster-worker";
+import { derivePreview, type PreviewExtraction } from "./preview-renderers";
 import type { FileService } from "./service";
-import { sanitizePublicText } from "./text-safety";
+import { sanitizeLocatorFreeText, sanitizePublicText } from "./text-safety";
 import { BASE62_ID_PATTERN, type StoredFile } from "./types";
 
 const TITLE_MAX_BYTES = 300;
 const DESCRIPTION_MAX_BYTES = 400;
 const MARKDOWN_READ_LIMIT = 256 * 1024;
-const RASTER_MIME_TYPES = new Set(["image/jpeg", "image/png", "image/webp"]);
 const MAX_RASTER_SOURCE_BYTES = 20 * 1024 * 1024;
 const MAX_RASTER_PIXELS = 40_000_000;
 
@@ -22,8 +21,18 @@ export interface PublicUnfurlModel {
   imageUrl: string;
   imageAlt: string;
   kind:
-    "markdown" | "document" | "image" | "pdf" | "audio" | "video" | "binary";
+    | "markdown"
+    | "document"
+    | "text"
+    | "code"
+    | "image"
+    | "pdf"
+    | "audio"
+    | "video"
+    | "archive"
+    | "binary";
   eligibleRaster: boolean;
+  preview?: PreviewExtraction;
 }
 
 export const sanitizeUnfurlText = sanitizePublicText;
@@ -56,35 +65,6 @@ export function publicUnfurlRevisionMatches(
   );
 }
 
-function formatBytes(size: number): string {
-  if (size < 1024) return `${size} B`;
-  const units = ["KB", "MB", "GB", "TB"];
-  let value = size;
-  let unit = "B";
-  for (const next of units) {
-    value /= 1024;
-    unit = next;
-    if (value < 1024) break;
-  }
-  return `${value.toFixed(value >= 10 ? 1 : 2)} ${unit}`;
-}
-
-function classify(file: StoredFile): PublicUnfurlModel["kind"] {
-  if (
-    file.mimeType === "text/markdown" ||
-    file.mimeType === "text/x-markdown" ||
-    /\.(?:md|markdown|mdown|mkd)$/iu.test(file.name)
-  ) {
-    return "markdown";
-  }
-  if (file.mimeType === "application/pdf") return "pdf";
-  if (file.mimeType.startsWith("audio/")) return "audio";
-  if (file.mimeType.startsWith("video/")) return "video";
-  if (file.mimeType.startsWith("image/")) return "image";
-  if (file.mimeType.startsWith("text/")) return "document";
-  return "binary";
-}
-
 export function rasterEnvelopeEligible(
   sourceBytes: number,
   width: number,
@@ -100,38 +80,6 @@ export function rasterEnvelopeEligible(
     height > 0 &&
     width <= Math.floor(MAX_RASTER_PIXELS / height)
   );
-}
-
-interface RasterDimensions {
-  width: number;
-  height: number;
-}
-
-async function inspectEligibleRaster(
-  service: FileService,
-  file: StoredFile,
-): Promise<RasterDimensions | null> {
-  if (
-    !RASTER_MIME_TYPES.has(file.mimeType) ||
-    file.size > MAX_RASTER_SOURCE_BYTES
-  ) {
-    return null;
-  }
-  try {
-    const dimensions = await inspectRasterInWorker(
-      service.storagePath(file),
-      file.mimeType,
-    );
-    return rasterEnvelopeEligible(
-      file.size,
-      dimensions.width,
-      dimensions.height,
-    )
-      ? dimensions
-      : null;
-  } catch {
-    return null;
-  }
 }
 
 async function markdownHeading(
@@ -163,37 +111,45 @@ export async function buildUnfurlModel(
 ): Promise<PublicUnfurlModel> {
   if (file.visibility !== "public")
     throw new Error("Unfurls require a public file");
-  const kind = classify(file);
-  const filename =
-    sanitizeUnfurlText(file.name, TITLE_MAX_BYTES) || "Untitled file";
-  const title =
-    kind === "markdown"
-      ? ((await markdownHeading(service, file)) ?? filename)
-      : filename;
-  const labels: Record<PublicUnfurlModel["kind"], string> = {
-    markdown: "Markdown",
-    document: "Text document",
-    image:
-      file.mimeType === "image/jpeg"
-        ? "JPEG image"
-        : file.mimeType === "image/png"
-          ? "PNG image"
-          : file.mimeType === "image/webp"
-            ? "WebP image"
-            : "Image",
-    pdf: "PDF",
-    audio: "Audio",
-    video: "Video",
-    binary: "Binary file",
-  };
-  const raster =
-    kind === "image" ? await inspectEligibleRaster(service, file) : null;
-  const dimensions = raster ? `${raster.width} × ${raster.height} · ` : "";
+  const preview = await derivePreview({
+    trustedMime: file.mimeType,
+    name: file.name,
+    size: file.size,
+    sha256: file.sha256,
+    sourcePath: service.storagePath(file),
+  });
+  const supportedKinds = new Set<PublicUnfurlModel["kind"]>([
+    "markdown",
+    "document",
+    "text",
+    "code",
+    "image",
+    "pdf",
+    "audio",
+    "video",
+    "archive",
+    "binary",
+  ]);
+  const kind: PublicUnfurlModel["kind"] = supportedKinds.has(
+    preview.family as PublicUnfurlModel["kind"],
+  )
+    ? (preview.family as PublicUnfurlModel["kind"])
+    : "binary";
+  const filename = sanitizeLocatorFreeText(file.name, TITLE_MAX_BYTES, "File");
+  const heading =
+    kind === "markdown" ? await markdownHeading(service, file) : null;
+  const title = sanitizeLocatorFreeText(
+    heading ?? filename,
+    TITLE_MAX_BYTES,
+    filename || "File",
+  );
   const description = sanitizeUnfurlText(
-    `${labels[kind]} · ${dimensions}${formatBytes(file.size)}`,
+    [preview.label, ...preview.facts].filter(Boolean).join(" · "),
     DESCRIPTION_MAX_BYTES,
   );
-  const eligibleRaster = raster !== null;
+  const eligibleRaster = ["image", "poster", "page", "artwork"].includes(
+    preview.visual.kind,
+  );
   const canonicalUrl = publicShareUrl(service.config.publicUrl, file.id);
   const imageUrl = `${service.config.publicUrl.replace(/\/+$/u, "")}/og/${file.id}.png`;
   const altLabel =
@@ -201,25 +157,26 @@ export async function buildUnfurlModel(
       ? "Markdown document"
       : kind === "pdf"
         ? "PDF document"
-        : labels[kind];
-  const imageAlt =
-    kind === "image"
-      ? `Image hosted on File-Hosting: ${filename}`
-      : `File-Hosting preview card: ${title}, ${altLabel}`;
+        : preview.label;
+  const imageAlt = `File-Hosting preview card: ${title}, ${altLabel}`;
 
   return {
     title,
     description,
-    ogType:
-      kind === "markdown" || kind === "document" || kind === "pdf"
-        ? "article"
-        : "website",
-    twitterCard: eligibleRaster ? "summary_large_image" : "summary",
+    ogType: ["markdown", "document", "text", "code", "pdf"].includes(kind)
+      ? "article"
+      : "website",
+    twitterCard: "summary_large_image",
     canonicalUrl,
     imageUrl,
-    imageAlt: sanitizeUnfurlText(imageAlt, DESCRIPTION_MAX_BYTES),
+    imageAlt: sanitizeLocatorFreeText(
+      imageAlt,
+      DESCRIPTION_MAX_BYTES,
+      "File-Hosting file preview",
+    ),
     kind,
     eligibleRaster,
+    preview,
   };
 }
 

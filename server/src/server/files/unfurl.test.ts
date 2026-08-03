@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -8,6 +9,7 @@ import sharp from "sharp";
 
 import { BoundedWorkerPool, RASTER_WORKER_LIMITS } from "./raster-worker";
 import type { FileService } from "./service";
+import { sanitizeLocatorFreeText } from "./text-safety";
 import type { StoredFile } from "./types";
 import {
   buildUnfurlModel,
@@ -56,6 +58,7 @@ async function modelFor(
   const service = await fakeService(contents);
   const file = storedFile({
     size: Buffer.byteLength(contents),
+    sha256: createHash("sha256").update(contents).digest("hex"),
     ...overrides,
   });
   return buildUnfurlModel(service, file);
@@ -110,6 +113,35 @@ describe("unfurl text sanitizer", () => {
     // 4-byte emoji must be dropped whole rather than split.
     assert.equal(sanitizeUnfurlText("ab\u{1F600}c", 5), "ab");
     assert.equal(sanitizeUnfurlText("", 300), "");
+  });
+
+  it("removes raw, encoded, Unicode-obscured, email, host, and path locators while preserving safe filenames", () => {
+    assert.equal(sanitizeLocatorFreeText("notes.md", 300, "File"), "notes.md");
+    assert.equal(
+      sanitizeLocatorFreeText("quarterly report.pdf", 300, "File"),
+      "quarterly report.pdf",
+    );
+    for (const hostile of [
+      "https://secret.example/token",
+      "https%253A%252F%252Fsecret.example%252Ftoken",
+      "www.secret.example",
+      "person@secret.example",
+      "/private/storage/object",
+      "..\\private\\storage",
+      "SENSITIVE—https://secret.example/a",
+      "secret.example.com",
+      "https-secret.example-token.md",
+    ]) {
+      assert.equal(sanitizeLocatorFreeText(hostile, 300, "File"), "File");
+    }
+    assert.equal(
+      sanitizeLocatorFreeText(
+        "Safe line https://secret.example/a remains",
+        300,
+        "File",
+      ),
+      "Safe line remains",
+    );
   });
 
   it("keeps plain HTML-dangerous characters for the sink escaper", () => {
@@ -189,6 +221,7 @@ describe("public unfurl view-model", () => {
       name: "bounded.png",
       mimeType: "image/png",
       size: raster.length,
+      sha256: createHash("sha256").update(raster).digest("hex"),
     });
     const models = await Promise.all(
       Array.from({ length: 3 }, () => buildUnfurlModel(service, file)),
@@ -227,7 +260,7 @@ describe("public unfurl view-model", () => {
     const model = await modelFor("# Deploy Runbook\n\nSecret body text.\n");
     assert.equal(model.title, "Deploy Runbook");
     assert.equal(model.ogType, "article");
-    assert.equal(model.twitterCard, "summary");
+    assert.equal(model.twitterCard, "summary_large_image");
     assert.match(model.description ?? "", /^Markdown · \d+ B$/u);
     assert.equal(model.canonicalUrl, `${PUBLIC_URL}/Ab3dE5g`);
     assert.equal(model.imageUrl, `${PUBLIC_URL}/og/Ab3dE5g.png`);
@@ -240,9 +273,9 @@ describe("public unfurl view-model", () => {
       name: "notes.txt",
       mimeType: "text/plain",
     });
-    assert.equal(model.kind, "document");
+    assert.equal(model.kind, "text");
     assert.equal(model.ogType, "article");
-    assert.match(model.description ?? "", /^Text document · \d+ B$/u);
+    assert.match(model.description ?? "", /^Text · \d+ B$/u);
     assert.doesNotMatch(model.description ?? "", /synthetic body/u);
   });
 
@@ -270,10 +303,7 @@ describe("public unfurl view-model", () => {
       name: "safe-fallback.md",
     });
     assert.equal(model.title, "safe-fallback.md");
-    assert.equal(
-      model.imageAlt,
-      "File-Hosting preview card: safe-fallback.md, Markdown document",
-    );
+    assert.equal(model.imageAlt, "File-Hosting preview Markdown document");
   });
 
   it("rejects malformed UTF-8 headings and falls back without replacement characters", async () => {
@@ -313,8 +343,8 @@ describe("public unfurl view-model", () => {
     });
     assert.equal(model.ogType, "website");
     assert.equal(model.twitterCard, "summary_large_image");
-    assert.match(model.description ?? "", /^PNG image · 16 × 9 · \d+ B$/u);
-    assert.equal(model.imageAlt, "Image hosted on File-Hosting: survey.png");
+    assert.match(model.description ?? "", /^PNG · 16×9 · \d+ B$/u);
+    assert.equal(model.imageAlt, "File-Hosting preview survey.png, PNG");
   });
 
   it("uses a summary card when declared raster bytes are malformed or MIME-mismatched", async () => {
@@ -322,7 +352,7 @@ describe("public unfurl view-model", () => {
       name: "broken.png",
       mimeType: "image/png",
     });
-    assert.equal(malformed.twitterCard, "summary");
+    assert.equal(malformed.twitterCard, "summary_large_image");
     assert.equal(malformed.eligibleRaster, false);
 
     const jpeg = await sharp({
@@ -339,27 +369,31 @@ describe("public unfurl view-model", () => {
       name: "spoofed.png",
       mimeType: "image/png",
     });
-    assert.equal(mismatched.twitterCard, "summary");
+    assert.equal(mismatched.twitterCard, "summary_large_image");
     assert.equal(mismatched.eligibleRaster, false);
   });
 
-  it("keeps oversized or non-raster images on the plain summary card", async () => {
-    const oversized = await modelFor("x", {
-      name: "huge.png",
-      mimeType: "image/png",
-      size: 21 * 1024 * 1024,
-    });
-    assert.equal(oversized.twitterCard, "summary");
+  it("fails closed on source identity mismatches and uses truthful family fallbacks", async () => {
+    await assert.rejects(
+      modelFor("x", {
+        name: "huge.png",
+        mimeType: "image/png",
+        size: 21 * 1024 * 1024,
+      }),
+      /preview source unavailable/u,
+    );
     const svg = await modelFor("<svg/>", {
       name: "vector.svg",
       mimeType: "image/svg+xml",
     });
-    assert.equal(svg.twitterCard, "summary");
+    assert.equal(svg.twitterCard, "summary_large_image");
+    assert.equal(svg.preview?.family, "image");
     const gif = await modelFor("gif", {
       name: "anim.gif",
       mimeType: "image/gif",
     });
-    assert.equal(gif.twitterCard, "summary");
+    assert.equal(gif.twitterCard, "summary_large_image");
+    assert.equal(gif.preview?.visual.kind, "binary");
   });
 
   it("describes PDF, audio, video, and binary with terse structural facts only", async () => {
@@ -368,25 +402,25 @@ describe("public unfurl view-model", () => {
         { name: "audit.pdf", mimeType: "application/pdf" },
         /^PDF · \d+ B$/u,
         "article",
-        "summary",
+        "summary_large_image",
       ],
       [
         { name: "standup.m4a", mimeType: "audio/mp4" },
         /^Audio · \d+ B$/u,
         "website",
-        "summary",
+        "summary_large_image",
       ],
       [
         { name: "demo.mp4", mimeType: "video/mp4" },
-        /^Video · \d+ B$/u,
+        /^MP4 · \d+ B$/u,
         "website",
-        "summary",
+        "summary_large_image",
       ],
       [
         { name: "firmware.bin", mimeType: "application/octet-stream" },
-        /^Binary file · \d+ B$/u,
+        /^Binary · \d+ B$/u,
         "website",
-        "summary",
+        "summary_large_image",
       ],
     ];
     for (const [overrides, description, ogType, twitterCard] of cases) {
@@ -415,7 +449,7 @@ describe("unfurl head rendering", () => {
     assert.equal(tags.get("og:image:width"), "1200");
     assert.equal(tags.get("og:image:height"), "630");
     assert.equal(tags.get("og:image:type"), "image/png");
-    assert.equal(tags.get("twitter:card"), "summary");
+    assert.equal(tags.get("twitter:card"), "summary_large_image");
     assert.equal(tags.get("twitter:title"), tags.get("og:title"));
     assert.equal(tags.get("twitter:description"), tags.get("og:description"));
     assert.equal(tags.get("twitter:image"), tags.get("og:image"));

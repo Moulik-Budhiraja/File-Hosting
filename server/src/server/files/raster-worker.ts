@@ -63,11 +63,13 @@ try {
       width: orientedWidth,
       height: orientedHeight,
     }));
-  } else if (mode === "thumbnail") {
+  } else if (mode === "thumbnail" || mode === "preview") {
+    const width = mode === "preview" ? 1200 : 386;
+    const height = mode === "preview" ? 630 : 386;
     const thumbnail = await sharp(source, inputOptions)
       .timeout({ seconds: 2 })
       .rotate()
-      .resize(386, 386, { fit: "cover", position: "centre" })
+      .resize(width, height, { fit: "cover", position: "centre" })
       .toColorspace("srgb")
       .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
       .toBuffer();
@@ -98,7 +100,7 @@ export class BoundedWorkerPool {
     private readonly queueTimeoutMs: number,
   ) {}
 
-  async acquire(): Promise<void> {
+  async acquire(timeoutMs = this.queueTimeoutMs): Promise<void> {
     if (this.activeWorkers < this.maxConcurrent) {
       this.activeWorkers += 1;
       return;
@@ -110,11 +112,14 @@ export class BoundedWorkerPool {
       const waiter: WorkerWaiter = {
         resolve,
         reject,
-        timeout: setTimeout(() => {
-          const index = this.workerWaiters.indexOf(waiter);
-          if (index >= 0) this.workerWaiters.splice(index, 1);
-          reject(new Error("raster worker queue wait timed out"));
-        }, this.queueTimeoutMs),
+        timeout: setTimeout(
+          () => {
+            const index = this.workerWaiters.indexOf(waiter);
+            if (index >= 0) this.workerWaiters.splice(index, 1);
+            reject(new Error("raster worker queue wait timed out"));
+          },
+          Math.min(this.queueTimeoutMs, Math.max(1, timeoutMs)),
+        ),
       };
       this.workerWaiters.push(waiter);
     });
@@ -128,6 +133,10 @@ export class BoundedWorkerPool {
       return;
     }
     this.activeWorkers -= 1;
+  }
+
+  state(): { active: number; queued: number } {
+    return { active: this.activeWorkers, queued: this.workerWaiters.length };
   }
 }
 
@@ -159,11 +168,13 @@ function rasterWorkerEnvironment(): NodeJS.ProcessEnv {
 }
 
 async function runRasterWorker(
-  mode: "metadata" | "thumbnail",
+  mode: "metadata" | "thumbnail" | "preview",
   filePath: string,
   mimeType: string,
+  timeoutMs: number = RASTER_WORKER_LIMITS.wallTimeoutMs,
 ): Promise<Buffer> {
-  await workerPool.acquire();
+  const deadline = Date.now() + Math.max(1, timeoutMs);
+  await workerPool.acquire(Math.max(1, deadline - Date.now()));
   try {
     return await new Promise<Buffer>((resolve, reject) => {
       execFile(
@@ -184,7 +195,7 @@ async function runRasterWorker(
           env: rasterWorkerEnvironment(),
           killSignal: "SIGKILL",
           maxBuffer: RASTER_WORKER_LIMITS.maxOutputBytes,
-          timeout: RASTER_WORKER_LIMITS.wallTimeoutMs,
+          timeout: Math.max(1, deadline - Date.now()),
           windowsHide: true,
         },
         (error, stdout, stderr) => {
@@ -209,8 +220,14 @@ async function runRasterWorker(
 export async function inspectRasterInWorker(
   filePath: string,
   mimeType: string,
+  timeoutMs?: number,
 ): Promise<{ width: number; height: number }> {
-  const output = await runRasterWorker("metadata", filePath, mimeType);
+  const output = await runRasterWorker(
+    "metadata",
+    filePath,
+    mimeType,
+    timeoutMs,
+  );
   const parsed: unknown = JSON.parse(output.toString("utf8"));
   if (
     typeof parsed !== "object" ||
@@ -223,6 +240,14 @@ export async function inspectRasterInWorker(
     throw new Error("invalid raster worker response");
   }
   return { width: parsed.width, height: parsed.height };
+}
+
+export async function deriveRasterPreviewInWorker(
+  filePath: string,
+  mimeType: string,
+  timeoutMs?: number,
+): Promise<Buffer> {
+  return runRasterWorker("preview", filePath, mimeType, timeoutMs);
 }
 
 export async function deriveRasterThumbnailInWorker(

@@ -33,15 +33,15 @@ cp .env.example .env
 
 The server accepts the following environment variables:
 
-| Variable | Default in Compose | Purpose |
-| --- | --- | --- |
-| `FS_TOKEN` | required | Shared bearer token for authenticated operations |
-| `DATABASE_URL` | `file:/data/sqlite/files.db` | SQLite connection URL |
-| `FS_STORAGE_DIR` | `/data/files` | Object-storage directory |
-| `FS_PUBLIC_URL` | `https://files.moulik.dev` | Base URL placed in API responses |
-| `FS_MAX_UPLOAD_BYTES` | `10737418240` | Server upload limit (10 GiB) |
-| `FS_MIN_FREE_BYTES` | `1073741824` | Free space reserved before accepting an upload (1 GiB) |
-| `FS_PORT` | `37641` | Loopback-only host port for local diagnostics |
+| Variable              | Default in Compose           | Purpose                                                |
+| --------------------- | ---------------------------- | ------------------------------------------------------ |
+| `FS_TOKEN`            | required                     | Shared bearer token for authenticated operations       |
+| `DATABASE_URL`        | `file:/data/sqlite/files.db` | SQLite connection URL                                  |
+| `FS_STORAGE_DIR`      | `/data/files`                | Object-storage directory                               |
+| `FS_PUBLIC_URL`       | `https://files.moulik.dev`   | Base URL placed in API responses                       |
+| `FS_MAX_UPLOAD_BYTES` | `10737418240`                | Server upload limit (10 GiB)                           |
+| `FS_MIN_FREE_BYTES`   | `1073741824`                 | Free space reserved before accepting an upload (1 GiB) |
+| `FS_PORT`             | `37641`                      | Loopback-only host port for local diagnostics          |
 
 The token is sent as `Authorization: Bearer <token>`. Do not put it in URLs,
 commit it, or include it in logs.
@@ -97,22 +97,38 @@ temporary SQLite and object storage, tests a restart, and removes its state.
 See `tests/README.md` for details and `cli/README.md` for CLI installation and
 usage.
 
+Preview extraction and rasterization use fixed concurrency/queue limits and bounded
+input, output, memory, and wall-clock budgets. The extraction deadline starts when
+work is enqueued; trusted strategies receive the absolute `deadlineAt` and must
+propagate it to subprocesses. If a strategy misses that deadline, the request fails
+closed but its slot remains occupied until the strategy settles, so timed-out work
+cannot escape pool accounting.
+
+Generated social-card rendering runs in a bounded child process. On POSIX,
+the server launches that worker in a dedicated process group; a deadline or
+output-limit breach sends `SIGKILL` to the group, waits for the launcher to be
+reaped and the group to disappear, and only then releases the render slot. The
+process-tree regression covers launcher, child, and grandchild termination,
+repeated-timeout RSS, queue recovery, and a subsequent successful render.
+Windows currently terminates only the immediate child and does not claim the
+same descendant-tree guarantee; the POSIX tree regression is skipped there.
+
 ## API overview
 
 Authenticated API requests use the bearer token. Public preview and raw links
 need no token; private entries require authentication and otherwise behave as
 not found.
 
-| Method and route | Purpose |
-| --- | --- |
-| `GET /healthz` | Health check |
-| `POST /api/files` | Stream a new upload with metadata and tags |
-| `GET /api/files` | List or search entries |
-| `GET /api/files/{id}` | Read one entry's metadata |
-| `PATCH /api/files/{id}` | Change tags or visibility |
-| `DELETE /api/files/{id}` | Delete an entry and its stored object |
-| `GET /{id}` | Browser metadata and safe preview page |
-| `GET /raw/{id}` | Raw file bytes |
+| Method and route         | Purpose                                    |
+| ------------------------ | ------------------------------------------ |
+| `GET /healthz`           | Health check                               |
+| `POST /api/files`        | Stream a new upload with metadata and tags |
+| `GET /api/files`         | List or search entries                     |
+| `GET /api/files/{id}`    | Read one entry's metadata                  |
+| `PATCH /api/files/{id}`  | Change tags or visibility                  |
+| `DELETE /api/files/{id}` | Delete an entry and its stored object      |
+| `GET /{id}`              | Browser metadata and safe preview page     |
+| `GET /raw/{id}`          | Raw file bytes                             |
 
 HTML and SVG content is shown as escaped source on the preview page rather than
 executed. Other unsupported preview types are presented as downloads.

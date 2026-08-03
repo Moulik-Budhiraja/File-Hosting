@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { crc32 } from "node:zlib";
@@ -81,11 +81,11 @@ function privacySnapshot(response: Response, body: Buffer) {
 }
 
 describe("OG image title layout", () => {
-  it("fits wide glyphs, replaces unsupported pictographs, and signals truncation", () => {
+  it("fits wide glyphs, preserves pictographs, and signals truncation", () => {
     const lines = layoutOgTitle(`${"長한".repeat(80)}${"😀".repeat(8)}`, 34, 3);
     assert.equal(lines.length, 3);
     assert.match(lines.at(-1) ?? "", /…$/u);
-    assert.doesNotMatch(lines.join(""), /\p{Extended_Pictographic}/u);
+    assert.equal(layoutOgTitle("ship 🚀 now", 34, 3).join(" "), "ship 🚀 now");
     for (const line of lines) {
       const wideGlyphs = [...line].filter((character) =>
         /[\p{Script=Han}\p{Script=Hangul}]/u.test(character),
@@ -123,9 +123,12 @@ describe("OG image title layout", () => {
 
   it("bounds the complete in-process card renderer", async () => {
     assert.deepEqual(OG_RENDER_LIMITS, {
-      maxConcurrent: 2,
+      maxConcurrent: 1,
       maxQueued: 16,
+      maxOldSpaceMiB: 256,
+      maxOutputBytes: 8 * 1024 * 1024,
       queueTimeoutMs: 2_500,
+      wallTimeoutMs: 2_500,
     });
     const model: PublicUnfurlModel = {
       title: "bounded-card.txt",
@@ -146,8 +149,8 @@ describe("OG image title layout", () => {
     const fulfilled = results.filter(({ status }) => status === "fulfilled");
     const rejected = results.filter(({ status }) => status === "rejected");
 
-    assert.equal(fulfilled.length, 18);
-    assert.equal(rejected.length, 22);
+    assert.equal(fulfilled.length, 17);
+    assert.equal(rejected.length, 23);
     for (const result of results) {
       if (result.status === "rejected") {
         assert.match(String(result.reason), /Preview rendering is busy/u);
@@ -214,14 +217,13 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       "og:image:width": "1200",
       "og:image:height": "630",
       "og:image:type": "image/png",
-      "og:image:alt":
-        "File-Hosting preview card: Canonical title, Markdown document",
-      "twitter:card": "summary",
+      "og:image:alt": "File-Hosting preview Canonical title, Markdown document",
+      "twitter:card": "summary_large_image",
       "twitter:title": "Canonical title",
       "twitter:description": `Markdown · ${file.size} B`,
       "twitter:image": `https://canonical.example.test/og/${file.id}.png`,
       "twitter:image:alt":
-        "File-Hosting preview card: Canonical title, Markdown document",
+        "File-Hosting preview Canonical title, Markdown document",
       canonical: `https://canonical.example.test/${file.id}`,
     });
     const head = /<head>([\s\S]*?)<\/head>/u.exec(html)?.[1] ?? "";
@@ -232,11 +234,11 @@ describe("rich unfurl routes", { concurrency: false }, () => {
 
   it("emits the exact allowlisted tag set for every public file class", async () => {
     const cases = [
-      ["notes.txt", "text/plain", "Text document", "article"],
+      ["notes.txt", "text/plain", "Text", "article"],
       ["audit.pdf", "application/pdf", "PDF", "article"],
-      ["recording.mp3", "audio/mpeg", "Audio", "website"],
-      ["clip.mp4", "video/mp4", "Video", "website"],
-      ["archive.zip", "application/zip", "Binary file", "website"],
+      ["recording.mp3", "audio/mpeg", "MP3", "website"],
+      ["clip.mp4", "video/mp4", "MP4", "website"],
+      ["archive.zip", "application/zip", "Archive", "website"],
     ] as const;
     const expectedKeys = [
       "canonical",
@@ -275,7 +277,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       assert.deepEqual([...tags.keys()].sort(), expectedKeys);
       assert.equal(tags.get("og:title"), name);
       assert.equal(tags.get("og:type"), ogType);
-      assert.equal(tags.get("twitter:card"), "summary");
+      assert.equal(tags.get("twitter:card"), "summary_large_image");
       assert.equal(tags.get("og:description"), `${label} · ${file.size} B`);
       assert.equal(tags.get("twitter:description"), tags.get("og:description"));
       assert.equal(
@@ -367,6 +369,51 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       );
     } finally {
       service.storagePath = originalStoragePath;
+    }
+  });
+
+  it("fails closed on same-size source replacement after page and image rendering", async () => {
+    for (const target of ["page", "image"] as const) {
+      const originalBytes = `# ${target} original`;
+      const replacementBytes = `# ${target} replaced`;
+      assert.equal(
+        Buffer.byteLength(originalBytes),
+        Buffer.byteLength(replacementBytes),
+      );
+      const file = await service.upload(bytes(originalBytes), {
+        name: `${target}-same-size.md`,
+        tags: [],
+        visibility: "public",
+        archive: null,
+        mimeType: "text/markdown",
+      });
+      const originalGet = service.get.bind(service);
+      let targetReads = 0;
+      service.get = async (id: string) => {
+        if (id === file.id) {
+          targetReads += 1;
+          if (targetReads === 2) {
+            await writeFile(service.storagePath(file), replacementBytes);
+          }
+        }
+        return originalGet(id);
+      };
+      try {
+        const response =
+          target === "page"
+            ? await getPreview(
+                new Request(`https://canonical.example.test/${file.id}`),
+                routeContext(file.id),
+              )
+            : await getOgImage(
+                new Request(`https://canonical.example.test/og/${file.id}.png`),
+                ogRouteContext(file.id),
+              );
+        assert.equal(response.status, 404);
+        assert.doesNotMatch(await response.text(), /original|replaced/u);
+      } finally {
+        service.get = originalGet;
+      }
     }
   });
 
@@ -632,7 +679,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       .removeAlpha()
       .raw()
       .toBuffer();
-    assert.deepEqual([...corner], [0x15, 0x17, 0x1c]);
+    assert.deepEqual([...corner], [0x0d, 0x0e, 0x10]);
     assert.deepEqual(firstBytes, secondBytes);
     for (const forbidden of [
       file.id,
@@ -726,7 +773,9 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         .removeAlpha()
         .raw()
         .toBuffer();
-      assert.ok((corner[0] ?? 255) < 100);
+      assert.ok((corner[0] ?? 0) > 150);
+      assert.ok((corner[1] ?? 255) < 80);
+      assert.ok((corner[2] ?? 255) < 100);
       for (const forbidden of [
         "synthetic-forbidden-copyright",
         "forbidden-raster-tag",
@@ -765,7 +814,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     );
     assert.equal(
       parsedHead(await response.text()).get("og:description"),
-      `JPEG image · 60 × 120 · ${file.size} B`,
+      `JPEG · 60×120 · ${file.size} B`,
     );
   });
 
@@ -819,7 +868,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       );
       assert.equal(
         parsedHead(await page.text()).get("twitter:card"),
-        "summary",
+        "summary_large_image",
       );
       const first = await getOgImage(
         new Request(`https://canonical.example.test/og/${file.id}.png`),

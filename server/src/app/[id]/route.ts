@@ -1,9 +1,15 @@
+import { AppError } from "@/server/files/errors";
 import { errorResponse, notFound } from "@/server/files/http";
 import { renderPreview } from "@/server/files/preview";
+import {
+  isPreviewBusy,
+  isPreviewSourceUnavailable,
+} from "@/server/files/preview-renderers";
 import { getViewableFile } from "@/server/files/request";
 import {
+  captureSourceIdentity,
   isMissingSourceError,
-  sourceMatchesFile,
+  sourceIdentityMatches,
 } from "@/server/files/source-state";
 import {
   buildUnfurlModel,
@@ -28,7 +34,8 @@ async function responseFor(
       request,
       (await context.params).id,
     );
-    if (!(await sourceMatchesFile(service, file))) throw notFound();
+    const sourceIdentity = await captureSourceIdentity(service, file);
+    if (!sourceIdentity) throw notFound();
     const unfurlHead =
       file.visibility === "public"
         ? renderUnfurlHead(await buildUnfurlModel(service, file))
@@ -40,7 +47,8 @@ async function responseFor(
     ) {
       throw notFound();
     }
-    if (!(await sourceMatchesFile(service, file))) throw notFound();
+    if (!(await sourceIdentityMatches(service, file, sourceIdentity)))
+      throw notFound();
     return new Response(includeBody ? html : null, {
       headers: {
         "cache-control": "no-store",
@@ -53,7 +61,11 @@ async function responseFor(
     });
   } catch (error) {
     const response = errorResponse(
-      isMissingSourceError(error) ? notFound() : error,
+      isPreviewBusy(error)
+        ? new AppError(503, "preview_busy", "Preview rendering is busy")
+        : isMissingSourceError(error) || isPreviewSourceUnavailable(error)
+          ? notFound()
+          : error,
     );
     return includeBody
       ? response
