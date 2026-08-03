@@ -5,6 +5,8 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import { PDFDocument } from "pdf-lib";
+
 import {
   DELETE as deleteFile,
   GET as getFile,
@@ -380,6 +382,36 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.match(html, /<h1>Safe reader<\/h1>/u);
     assert.match(html, /&lt;script&gt;alert\(1\)&lt;\/script&gt;/u);
     assert.doesNotMatch(html, /<script>alert/u);
+  });
+
+  it("permits the inline PDF raster in CSP while forbidding obsolete frames", async () => {
+    const document = await PDFDocument.create();
+    document.addPage([612, 792]);
+    const bytes = await document.save({ useObjectStreams: false });
+    async function* pdfBytes(): AsyncGenerator<Uint8Array> {
+      yield bytes;
+    }
+    const pdf = await service.upload(pdfBytes(), {
+      name: "responsive-report.pdf",
+      tags: ["responsive"],
+      visibility: "public",
+      archive: null,
+      mimeType: "application/pdf",
+      contentLength: bytes.length,
+    });
+    const response = await previewFile(
+      new Request(`http://localhost/${pdf.id}`),
+      routeContext(pdf.id),
+    );
+    assert.equal(response.status, 200);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /img-src 'self' data:/u);
+    assert.doesNotMatch(csp, /frame-src/u);
+    const html = await response.text();
+    assert.match(
+      html,
+      /class="pdf-page-preview"[^>]+src="data:image\/png;base64,/u,
+    );
   });
 
   it("serves raw bytes, byte ranges, HEAD, security headers, and no-store caching", async () => {

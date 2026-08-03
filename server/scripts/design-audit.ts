@@ -710,10 +710,10 @@ const DIRECT_REVIEW_REGION_HASHES: Readonly<
   },
 });
 
-// Exact bytes approved after the second iMessage review; independent of the
-// runtime asset read below, so unrelated replacement art cannot self-authorize.
-const PINNED_DIRECT_UNAVAILABLE_SHA256 =
-  "70c8fd46276607e0d848cdaff49d90994c9b2bbca7114450dbb13180585d9f48";
+// Exact frozen Paper bytes are the independently approved unavailable-card
+// authority. Runtime art must not self-authorize a replacement.
+const PINNED_UNAVAILABLE_SHA256 =
+  "8f007a4470db37963d5d9fcd95fdd0b47af8fe3d959861c1dcedbf12b614eb4a";
 
 function phoneRegion(region: Region): Region {
   const scaleX = 332 / 1200;
@@ -790,6 +790,45 @@ async function inkCentroidY(image: Buffer, region: Region): Promise<number> {
     }
   }
   return count === 0 ? Number.POSITIVE_INFINITY : weightedY / count;
+}
+
+async function inkGeometry(image: Buffer): Promise<{
+  bounds: Region;
+  centroid: { x: number; y: number };
+}> {
+  const width = 1200;
+  const height = 630;
+  const data = await sharp(image).removeAlpha().raw().toBuffer();
+  let left = width;
+  let right = -1;
+  let top = height;
+  let bottom = -1;
+  let weightedX = 0;
+  let weightedY = 0;
+  let count = 0;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
+      const distance = Math.sqrt(
+        ((data[offset] ?? 13) - 13) ** 2 +
+          ((data[offset + 1] ?? 14) - 14) ** 2 +
+          ((data[offset + 2] ?? 16) - 16) ** 2,
+      );
+      if (distance < 24) continue;
+      left = Math.min(left, x);
+      right = Math.max(right, x);
+      top = Math.min(top, y);
+      bottom = Math.max(bottom, y);
+      weightedX += x;
+      weightedY += y;
+      count += 1;
+    }
+  }
+  assert(count > 0, "unavailable composition must contain visible ink");
+  return {
+    bounds: { left, top, width: right - left + 1, height: bottom - top + 1 },
+    centroid: { x: weightedX / count, y: weightedY / count },
+  };
 }
 
 async function stats(image: Buffer, region: Region): Promise<PixelStats> {
@@ -1443,38 +1482,75 @@ try {
   );
   assert.equal(
     sha256(unavailable),
-    PINNED_DIRECT_UNAVAILABLE_SHA256,
-    "unavailable output must match the independently approved direct-review bytes",
+    PINNED_UNAVAILABLE_SHA256,
+    "unavailable output must match the independently pinned Paper bytes",
   );
-  assert.notDeepEqual(
+  assert.deepEqual(
     unavailable,
     frozenUnavailable,
-    "direct iMessage review requires the enlarged unavailable composition to supersede the frozen frame",
+    "unavailable runtime output must remain pixel-identical to the frozen Paper frame",
   );
   const unavailableBlank = await sharp(blank).png().toBuffer();
   assert.notDeepEqual(unavailable, unavailableBlank);
   const unavailableRegions = {
-    artwork: { left: 470, top: 70, width: 260, height: 240 },
-    brand: { left: 430, top: 300, width: 340, height: 65 },
-    title: { left: 360, top: 360, width: 480, height: 115 },
+    forbiddenArtwork: { left: 470, top: 70, width: 260, height: 170 },
+    brand: { left: 450, top: 245, width: 300, height: 50 },
+    title: { left: 410, top: 300, width: 380, height: 85 },
   } as const;
   const evaluateUnavailable = async (image: Buffer) => {
-    const [artwork, brand, title] = await Promise.all([
-      stats(image, unavailableRegions.artwork),
+    const [forbiddenArtwork, brand, title, geometry] = await Promise.all([
+      stats(image, unavailableRegions.forbiddenArtwork),
       stats(image, unavailableRegions.brand),
       stats(image, unavailableRegions.title),
+      inkGeometry(image),
     ]);
     const reasons: string[] = [];
-    if (artwork.inkFraction < 0.035 || artwork.edgeFraction < 0.006)
-      reasons.push("unavailable artwork occupancy too small");
+    if (forbiddenArtwork.inkFraction > 0.002)
+      reasons.push(
+        "generic centered artwork stack is not part of the Paper composition",
+      );
     if (brand.accentFraction < 0.0008 || brand.inkFraction < 0.01)
       reasons.push("unavailable brand hierarchy missing");
-    if (title.lightFraction < 0.035 || title.edgeFraction < 0.01)
+    if (title.lightFraction < 0.02 || title.edgeFraction < 0.008)
       reasons.push("unavailable title occupancy too small");
-    return { reasons, artwork, brand, title };
+    if (
+      geometry.bounds.left < 420 ||
+      geometry.bounds.left > 435 ||
+      geometry.bounds.top < 250 ||
+      geometry.bounds.top > 265 ||
+      geometry.bounds.width < 340 ||
+      geometry.bounds.width > 365 ||
+      geometry.bounds.height < 100 ||
+      geometry.bounds.height > 120
+    )
+      reasons.push("unavailable Paper geometry shifted");
+    if (
+      geometry.centroid.x < 590 ||
+      geometry.centroid.x > 610 ||
+      geometry.centroid.y < 315 ||
+      geometry.centroid.y > 345
+    )
+      reasons.push("unavailable center of mass shifted");
+    return { reasons, forbiddenArtwork, brand, title, geometry };
   };
   const unavailableResult = await evaluateUnavailable(unavailable);
   assert.deepEqual(unavailableResult.reasons, []);
+  const phoneUnavailable = await sharp(unavailable)
+    .resize(332, 174)
+    .png()
+    .toBuffer();
+  const [phoneBrand, phoneTitle] = await Promise.all([
+    stats(phoneUnavailable, phoneRegion(unavailableRegions.brand)),
+    stats(phoneUnavailable, phoneRegion(unavailableRegions.title)),
+  ]);
+  assert(
+    phoneBrand.edgeFraction >= 0.008 && phoneBrand.inkFraction >= 0.01,
+    "unavailable brand must remain legible at 332x174",
+  );
+  assert(
+    phoneTitle.edgeFraction >= 0.008 && phoneTitle.lightFraction >= 0.015,
+    "unavailable title must remain legible at 332x174",
+  );
   const tinyUnavailable = await sharp({
     create: { width: 1200, height: 630, channels: 3, background: "#0d0e10" },
   })
@@ -1491,7 +1567,29 @@ try {
   const tinyUnavailableResult = await evaluateUnavailable(tinyUnavailable);
   assert(
     tinyUnavailableResult.reasons.length > 0,
-    "tiny unavailable icon/title mutant must fail regional occupancy",
+    "tiny unavailable title/brand mutant must fail regional geometry",
+  );
+  const centeredArtworkMutant = await sharp(unavailable)
+    .composite([
+      {
+        input: Buffer.from(
+          '<svg xmlns="http://www.w3.org/2000/svg" width="260" height="170"><path d="M82 12h64l42 42v92a12 12 0 0 1-12 12H82a12 12 0 0 1-12-12V24a12 12 0 0 1 12-12z" fill="#1b1e23" stroke="#9fa3a9" stroke-width="8"/><path d="M146 12v42h42" fill="none" stroke="#9fa3a9" stroke-width="8"/></svg>',
+        ),
+        left: unavailableRegions.forbiddenArtwork.left,
+        top: unavailableRegions.forbiddenArtwork.top,
+      },
+    ])
+    .removeAlpha()
+    .png()
+    .toBuffer();
+  const centeredArtworkResult = await evaluateUnavailable(
+    centeredArtworkMutant,
+  );
+  assert(
+    centeredArtworkResult.reasons.includes(
+      "generic centered artwork stack is not part of the Paper composition",
+    ),
+    "generic centered artwork/title stack mutant must fail independently pinned composition constraints",
   );
   await writeFile(
     path.join(outputRoot, "generated-13-unavailable.png"),
@@ -1500,16 +1598,19 @@ try {
   generatedByCase.set("13-unavailable", unavailable);
   metrics["13-unavailable"] = {
     reference: "raw-13-unavailable.png",
-    directReviewRefinement:
-      "enlarged artwork/title supersedes frozen visual bytes",
     exactRuntimeBytes: true,
-    independentlyPinnedDirectReviewDigest: PINNED_DIRECT_UNAVAILABLE_SHA256,
+    independentlyPinnedPaperDigest: PINNED_UNAVAILABLE_SHA256,
     sha256: sha256(unavailable),
     regions: unavailableRegions,
     observed: unavailableResult,
+    phone332x174: { brand: phoneBrand, title: phoneTitle },
     tinyMutant: {
       rejected: true,
       reasons: tinyUnavailableResult.reasons,
+    },
+    centeredArtworkMutant: {
+      rejected: true,
+      reasons: centeredArtworkResult.reasons,
     },
     blankMutant: { rejected: true, reason: "exact byte equality required" },
   };
@@ -1669,10 +1770,10 @@ try {
       "exact production unavailable output paired with frozen light/dark review overlay",
     productionOutput: true,
     safeArea:
-      "enlarged direct-review unavailable hierarchy inside fixed 1200x630 safe regions",
+      "frozen Paper brand/title hierarchy inside independently pinned 1200x630 regions",
     noTofuOverlapClipping: true,
     exactRuntimeBytes: true,
-    directReviewRefinement: true,
+    frozenPaperPixelIdentity: true,
     sha256: sha256(unavailable),
   };
   assert.equal(
@@ -1907,7 +2008,7 @@ try {
     determinism: { productionCasesByteIdenticalOnRepeat: cases.length },
     unavailable: {
       exactRuntimeByteEquality: true,
-      directReviewRefinementSupersedesFrozenPixels: true,
+      frozenPaperPixelIdentity: true,
       sha256: sha256(unavailable),
     },
     actualMessagesProof: false,

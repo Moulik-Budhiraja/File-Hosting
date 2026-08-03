@@ -296,12 +296,16 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
       return changed;
     };
     assert.ok(
-      changedIn(132, 33, 68, 48) >= 420,
-      "unavailable artwork must be prominent at 332px",
+      changedIn(130, 20, 72, 46) <= 4,
+      "unavailable Paper composition must not regain a generic centered artwork stack",
     );
     assert.ok(
-      changedIn(70, 103, 192, 20) >= 780,
-      "unavailable title must have large effective occupancy",
+      changedIn(124, 68, 83, 14) >= 150,
+      "unavailable brand must remain legible at 332px",
+    );
+    assert.ok(
+      changedIn(113, 83, 105, 24) >= 500,
+      "unavailable title must remain legible at 332px",
     );
   });
 

@@ -1,5 +1,8 @@
 import { notFound } from "@/server/files/http";
-import { renderPreview } from "@/server/files/preview";
+import {
+  PREVIEW_CONTENT_SECURITY_POLICY,
+  renderPreview,
+} from "@/server/files/preview";
 import { PreviewBusyError } from "@/server/files/preview-renderers";
 import { getViewableFile } from "@/server/files/request";
 import {
@@ -60,8 +63,7 @@ async function responseFor(
     return new Response(includeBody ? html : null, {
       headers: {
         "cache-control": "no-store",
-        "content-security-policy":
-          "default-src 'none'; style-src 'unsafe-inline'; img-src 'self'; media-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+        "content-security-policy": PREVIEW_CONTENT_SECURITY_POLICY,
         "content-type": "text/html; charset=utf-8",
         "referrer-policy": "no-referrer",
         "x-content-type-options": "nosniff",
