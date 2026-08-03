@@ -9,11 +9,12 @@ export interface KillableProcessOptions {
   input?: Buffer;
   /** Darwin-only escape hatch for trusted test harnesses that exercise child trees. */
   allowSubprocesses?: boolean;
+  /** Darwin sandbox mode for native codecs that require worker threads. */
+  allowSandboxForks?: boolean;
 }
 
 export interface KillableProcessResult {
   stdout: Buffer;
-  stderr: Buffer;
 }
 
 export class ProcessDeadlineError extends Error {
@@ -30,11 +31,8 @@ export class ProcessExecutionError extends Error {
   }
 }
 
-function killProcessTree(
-  child: ReturnType<typeof spawn>,
-  childExited: boolean,
-): void {
-  if (child.pid === undefined || childExited) return;
+function killProcessTree(child: ReturnType<typeof spawn>): void {
+  if (child.pid === undefined || child.exitCode !== null) return;
   if (process.platform !== "win32") {
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -49,6 +47,33 @@ function killProcessTree(
     // Close/reaping below is authoritative.
   }
 }
+
+// The direct child is an identity-safe ownership sentinel. It cannot exit while
+// the command or any descendant still holds an inherited output pipe, so its
+// detached process-group remains live and owned until settlement.
+const SUPERVISOR_SOURCE = String.raw`
+const { spawn } = require("node:child_process");
+const spec = JSON.parse(process.argv[1]);
+const child = spawn(spec.command, spec.args, {
+  cwd: spec.cwd,
+  env: spec.env,
+  shell: false,
+  stdio: [spec.hasInput ? "pipe" : "ignore", "pipe", "pipe"],
+  windowsHide: true,
+});
+if (spec.hasInput) process.stdin.pipe(child.stdin);
+child.stdout.pipe(process.stdout);
+child.stderr.pipe(process.stderr);
+child.once("error", () => {
+  process.exitCode = 127;
+});
+child.once("close", (code, signal) => {
+  if (spec.hasInput) process.stdin.unpipe(child.stdin);
+  process.stdin.destroy();
+  const exitCode = typeof code === "number" ? code : signal ? 128 : 1;
+  process.stdout.write("", () => process.exit(exitCode));
+});
+`;
 
 export async function runKillableProcess(
   command: string,
@@ -100,28 +125,45 @@ export async function runKillableProcess(
     const spawnArguments = restrictForks
       ? [
           "-p",
-          "(version 1)(allow default)(deny process-fork)(deny network*)",
+          options.allowSandboxForks
+            ? "(version 1)(allow default)(deny network*)"
+            : "(version 1)(allow default)(deny process-fork)(deny network*)",
           command,
           ...arguments_,
         ]
       : restrictLinux
         ? [...sandboxRootArguments, command, ...arguments_]
         : [...arguments_];
-    const child = spawn(spawnCommand, spawnArguments, {
-      cwd: options.cwd,
-      detached: process.platform !== "win32",
-      env: options.env,
-      shell: false,
-      stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"],
-      windowsHide: true,
-    });
+    const supervised = !options.allowSandboxForks;
+    const child = spawn(
+      supervised ? process.execPath : spawnCommand,
+      supervised
+        ? [
+            "-e",
+            SUPERVISOR_SOURCE,
+            JSON.stringify({
+              command: spawnCommand,
+              args: spawnArguments,
+              cwd: options.cwd,
+              env: options.env,
+              hasInput: Boolean(options.input),
+            }),
+          ]
+        : spawnArguments,
+      {
+        cwd: options.cwd,
+        detached: process.platform !== "win32",
+        env: options.env,
+        shell: false,
+        stdio: [options.input ? "pipe" : "ignore", "pipe", "pipe"],
+        windowsHide: true,
+      },
+    );
     const stdout: Buffer[] = [];
-    const stderr: Buffer[] = [];
     let outputBytes = 0;
     let deadlineExceeded = false;
     let outputExceeded = false;
     let spawnError = false;
-    let childExited = false;
     let treeKillAttempted = false;
     let settled = false;
     let hardSettleTimer: NodeJS.Timeout | undefined;
@@ -143,7 +185,7 @@ export async function runKillableProcess(
     const terminateTreeOnce = (): void => {
       if (treeKillAttempted) return;
       treeKillAttempted = true;
-      killProcessTree(child, childExited);
+      killProcessTree(child);
       child.stdin?.destroy();
       hardSettleTimer = setTimeout(() => {
         child.stdout?.destroy();
@@ -184,15 +226,10 @@ export async function runKillableProcess(
       if (outputBytes > options.maxOutputBytes) {
         outputExceeded = true;
         terminateTreeOnce();
-        return;
       }
-      stderr.push(chunk);
     });
     child.once("error", () => {
       spawnError = true;
-    });
-    child.once("exit", () => {
-      childExited = true;
     });
     child.once("close", (code) => {
       if (deadlineExceeded || outputExceeded) return;
@@ -200,10 +237,7 @@ export async function runKillableProcess(
         finishReject(new ProcessExecutionError());
         return;
       }
-      finishResolve({
-        stdout: Buffer.concat(stdout),
-        stderr: Buffer.concat(stderr),
-      });
+      finishResolve({ stdout: Buffer.concat(stdout) });
     });
   });
 }

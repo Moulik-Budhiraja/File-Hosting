@@ -1,9 +1,11 @@
 import { writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
+const fontDirectory = fileURLToPath(new URL("./fonts/", import.meta.url));
 process.env.FONTCONFIG_FILE = fileURLToPath(
   new URL("./fonts/fonts.conf", import.meta.url),
 );
+process.env.FONTCONFIG_PATH = fontDirectory;
 const { default: sharp } = await import("sharp");
 
 const MAX_SVG_BYTES = 10 * 1024 * 1024;

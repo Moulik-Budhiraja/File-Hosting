@@ -1,5 +1,6 @@
 import { notFound } from "@/server/files/http";
 import { renderPreview } from "@/server/files/preview";
+import { PreviewBusyError } from "@/server/files/preview-renderers";
 import { getViewableFile } from "@/server/files/request";
 import {
   captureSourceIdentity,
@@ -10,7 +11,10 @@ import {
   publicUnfurlRevisionMatches,
   renderUnfurlHead,
 } from "@/server/files/unfurl";
-import { unavailablePageResponse } from "@/server/files/unavailable";
+import {
+  settleUnavailableTiming,
+  unavailablePageResponse,
+} from "../../server/files/unavailable";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -24,6 +28,11 @@ async function responseFor(
   context: RouteContext,
   includeBody: boolean,
 ): Promise<Response> {
+  const unavailableStartedAt = performance.now();
+  const unavailable = async (): Promise<Response> => {
+    await settleUnavailableTiming(unavailableStartedAt);
+    return unavailablePageResponse(includeBody);
+  };
   try {
     const { service, file } = await getViewableFile(
       request,
@@ -31,10 +40,14 @@ async function responseFor(
     );
     const sourceIdentity = await captureSourceIdentity(service, file);
     if (!sourceIdentity) throw notFound();
-    const unfurlHead =
-      file.visibility === "public"
-        ? renderUnfurlHead(await buildUnfurlModel(service, file))
-        : "";
+    let unfurlHead = "";
+    if (file.visibility === "public") {
+      try {
+        unfurlHead = renderUnfurlHead(await buildUnfurlModel(service, file));
+      } catch (error) {
+        if (!(error instanceof PreviewBusyError)) throw error;
+      }
+    }
     const html = await renderPreview(service, file, unfurlHead);
     if (
       file.visibility === "public" &&
@@ -55,7 +68,7 @@ async function responseFor(
       },
     });
   } catch {
-    return unavailablePageResponse(includeBody);
+    return unavailable();
   }
 }
 

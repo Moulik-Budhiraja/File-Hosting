@@ -1,12 +1,12 @@
 import { constants as fsConstants } from "node:fs";
 import { createHash } from "node:crypto";
 import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { gunzipSync } from "node:zlib";
 
-import { runKillableProcess } from "./process-tree";
+import { ProcessExecutionError, runKillableProcess } from "./process-tree";
+import { withNativeAdmission } from "./native-admission";
 import {
   BoundedWorkerPool,
   deriveRasterPreviewInWorker,
@@ -288,41 +288,29 @@ function sourceFrom(probe: RendererProbe): Buffer {
   return source;
 }
 
+const CODE_LABELS = new Map([
+  ["application/json", "JSON"],
+  ["application/ld+json", "JSON-LD"],
+  ["application/rss+xml", "RSS"],
+  ["application/toml", "TOML"],
+  ["application/xml", "XML"],
+  ["application/yaml", "YAML"],
+  ["text/css", "CSS"],
+  ["text/html", "HTML"],
+  ["text/javascript", "JS"],
+  ["text/x-python", "PY"],
+  ["text/x-shellscript", "SH"],
+  ["text/x-typescript", "TS"],
+]);
+
 function codeLabel(input: RendererInput): string {
-  const extension = path.extname(input.name).slice(1).toUpperCase();
-  const allowed = new Set([
-    "TS",
-    "TSX",
-    "JS",
-    "JSX",
-    "JSON",
-    "PY",
-    "RB",
-    "GO",
-    "RS",
-    "JAVA",
-    "C",
-    "CPP",
-    "CSS",
-    "HTML",
-    "XML",
-    "YAML",
-    "YML",
-    "TOML",
-    "SH",
-  ]);
-  if (allowed.has(extension)) return extension;
-  if (input.trustedMime === "application/json") return "JSON";
-  return "SOURCE";
+  return CODE_LABELS.get(input.trustedMime) ?? "SOURCE";
 }
 
-function archiveLabel(input: RendererInput): string {
+function archiveLabel(input: RendererInput, validatedTarGzip = false): string {
   if (input.trustedMime === "application/zip") return "ZIP";
   if (input.trustedMime === "application/x-tar") return "TAR";
-  if (
-    input.trustedMime === "application/gzip" &&
-    /(?:\.tar\.gz|\.tgz)$/iu.test(input.name)
-  )
+  if (input.trustedMime === "application/gzip" && validatedTarGzip)
     return "TAR.GZ";
   if (input.trustedMime === "application/gzip") return "GZIP";
   return "ARCHIVE";
@@ -598,11 +586,22 @@ export function isPreviewSourceUnavailable(error: unknown): boolean {
   return error instanceof PreviewSourceUnavailableError;
 }
 
-const require = createRequire(import.meta.url);
-const packagedFfmpeg = require("ffmpeg-static") as string | null;
-const packagedFfprobe = (require("ffprobe-static") as { path?: unknown }).path;
-const MEDIA_TIMEOUT_MS = 2_000;
+const packagedFfmpeg = path.resolve(
+  process.cwd(),
+  "node_modules/ffmpeg-static",
+  process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+);
+const packagedFfprobe = path.resolve(
+  process.cwd(),
+  "node_modules/ffprobe-static/bin",
+  process.platform,
+  process.arch,
+  process.platform === "win32" ? "ffprobe.exe" : "ffprobe",
+);
+const MEDIA_TIMEOUT_MS = 2_500;
 const MEDIA_OUTPUT_LIMIT = 8 * 1024 * 1024;
+const MEDIA_WARMUP_TIMEOUT_MS = 10_000;
+let mediaWarmup: Promise<void> | undefined;
 
 function remainingExtractionMs(input: RendererInput): number {
   const remaining =
@@ -625,6 +624,20 @@ function mediaEnvironment(): NodeJS.ProcessEnv {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
   return environment;
+}
+
+export function warmPreviewMediaTools(): Promise<void> {
+  mediaWarmup ??= (async () => {
+    for (const command of [packagedFfprobe, packagedFfmpeg]) {
+      await runKillableProcess(command, ["-version"], {
+        timeoutMs: MEDIA_WARMUP_TIMEOUT_MS,
+        maxOutputBytes: 256 * 1024,
+        env: mediaEnvironment(),
+        allowSandboxForks: true,
+      });
+    }
+  })();
+  return mediaWarmup;
 }
 
 async function documentExcerpt(input: RendererInput): Promise<string[]> {
@@ -716,14 +729,42 @@ function durationLabel(value: number): string {
     : `${String(minutes).padStart(2, "0")}:${String(remainder).padStart(2, "0")}`;
 }
 
+async function runMediaCommand(
+  input: RendererInput,
+  command: string,
+  arguments_: readonly string[],
+  maxOutputBytes: number,
+): Promise<Buffer> {
+  for (let attempt = 0; attempt < 2; attempt += 1) {
+    try {
+      const result = await runKillableProcess(command, arguments_, {
+        timeoutMs: remainingExtractionMs(input),
+        maxOutputBytes,
+        env: mediaEnvironment(),
+        allowSandboxForks: true,
+      });
+      return result.stdout;
+    } catch (error) {
+      if (
+        !(error instanceof ProcessExecutionError) ||
+        attempt > 0 ||
+        (input.deadlineAt ?? Date.now()) - Date.now() < 100
+      )
+        throw error;
+    }
+  }
+  throw new ProcessExecutionError();
+}
+
 async function probeMedia(
   input: RendererInput,
   sourcePath: string,
 ): Promise<{ duration: number; width?: number; height?: number }> {
-  if (typeof packagedFfprobe !== "string" || !packagedFfprobe) {
+  if (!packagedFfprobe) {
     throw new Error("packaged ffprobe unavailable");
   }
-  const result = await runKillableProcess(
+  const output = await runMediaCommand(
+    input,
     packagedFfprobe,
     [
       "-v",
@@ -736,13 +777,9 @@ async function probeMedia(
       "json",
       sourcePath,
     ],
-    {
-      timeoutMs: remainingExtractionMs(input),
-      maxOutputBytes: 256 * 1024,
-      env: mediaEnvironment(),
-    },
+    256 * 1024,
   );
-  const parsed = JSON.parse(result.stdout.toString("utf8")) as {
+  const parsed = JSON.parse(output.toString("utf8")) as {
     format?: { duration?: string };
     streams?: Array<{ codec_type?: string; width?: number; height?: number }>;
   };
@@ -773,7 +810,8 @@ async function videoPoster(
         metadata.width * metadata.height > 40_000_000
       )
         throw new Error("unsupported video geometry");
-      const result = await runKillableProcess(
+      const raster = await runMediaCommand(
+        input,
         packagedFfmpeg,
         [
           "-v",
@@ -796,14 +834,10 @@ async function videoPoster(
           "png",
           "pipe:1",
         ],
-        {
-          timeoutMs: remainingExtractionMs(input),
-          maxOutputBytes: MEDIA_OUTPUT_LIMIT,
-          env: mediaEnvironment(),
-        },
+        MEDIA_OUTPUT_LIMIT,
       );
       return {
-        raster: result.stdout,
+        raster,
         duration: durationLabel(metadata.duration),
       };
     });
@@ -825,7 +859,8 @@ async function audioArtwork(
         metadata.width * metadata.height > 40_000_000
       )
         throw new Error("artwork absent");
-      const result = await runKillableProcess(
+      const raster = await runMediaCommand(
+        input,
         packagedFfmpeg,
         [
           "-v",
@@ -850,14 +885,10 @@ async function audioArtwork(
           "png",
           "pipe:1",
         ],
-        {
-          timeoutMs: remainingExtractionMs(input),
-          maxOutputBytes: MEDIA_OUTPUT_LIMIT,
-          env: mediaEnvironment(),
-        },
+        MEDIA_OUTPUT_LIMIT,
       );
       return {
-        raster: result.stdout,
+        raster,
         duration: durationLabel(metadata.duration),
       };
     });
@@ -893,7 +924,8 @@ async function compressedAudioWaveform(
   try {
     return await withVerifiedSnapshot(input, async (sourcePath) => {
       const metadata = await probeMedia(input, sourcePath);
-      const result = await runKillableProcess(
+      const raster = await runMediaCommand(
+        input,
         packagedFfmpeg,
         [
           "-v",
@@ -917,13 +949,9 @@ async function compressedAudioWaveform(
           "pcm_s16le",
           "pipe:1",
         ],
-        {
-          timeoutMs: remainingExtractionMs(input),
-          maxOutputBytes: MEDIA_OUTPUT_LIMIT,
-          env: mediaEnvironment(),
-        },
+        MEDIA_OUTPUT_LIMIT,
       );
-      const samples = pcmWaveform(result.stdout);
+      const samples = pcmWaveform(raster);
       if (!samples.length) throw new Error("audio samples unavailable");
       return { samples, duration: durationLabel(metadata.duration) };
     });
@@ -959,6 +987,8 @@ const DOCUMENT_MIMES = new Set([
 ]);
 const CODE_MIMES = new Set([
   "application/json",
+  "application/ld+json",
+  "application/rss+xml",
   "application/toml",
   "application/xml",
   "application/yaml",
@@ -982,6 +1012,18 @@ const RASTER_MIMES = new Map([
   ["image/jpeg", "JPG"],
   ["image/png", "PNG"],
   ["image/webp", "WebP"],
+  ["image/gif", "GIF"],
+  ["image/avif", "AVIF"],
+  ["image/tiff", "TIFF"],
+  ["image/bmp", "BMP"],
+  ["image/svg+xml", "SVG"],
+]);
+const VIDEO_LABELS = new Map([
+  ["video/mp4", "MP4"],
+  ["video/webm", "WebM"],
+  ["video/x-msvideo", "AVI"],
+  ["video/mpeg", "MPEG"],
+  ["video/quicktime", "QuickTime"],
 ]);
 
 export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry {
@@ -1087,11 +1129,14 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
               ? zipEntries(source)
               : probe.input.trustedMime === "application/x-tar"
                 ? tarEntries(source)
-                : probe.input.trustedMime === "application/gzip" &&
-                    /(?:\.tar\.gz|\.tgz)$/iu.test(probe.input.name)
+                : probe.input.trustedMime === "application/gzip"
                   ? gzipTarEntries(source, probe.input.deadlineAt)
                   : [];
-          const label = archiveLabel(probe.input);
+          const label = archiveLabel(
+            probe.input,
+            probe.input.trustedMime === "application/gzip" &&
+              entries.length > 0,
+          );
           return baseExtraction(
             probe,
             "archive",
@@ -1161,7 +1206,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
           return baseExtraction(
             probe,
             "video",
-            probe.input.trustedMime === "video/quicktime" ? "QuickTime" : "MP4",
+            VIDEO_LABELS.get(probe.input.trustedMime) ?? "Video",
             poster
               ? { kind: "poster", raster: poster.raster }
               : { kind: "binary" },
@@ -1270,21 +1315,24 @@ export async function derivePreview(
   }
 
   let operationSettled = false;
-  const operation = (async () => {
-    await readVerifiedSource(deadlineInput);
-    const renderer = registry.resolve(deadlineInput);
-    const probe = await renderer.probe(deadlineInput);
-    if (probe.rendererId !== renderer.id || probe.input !== deadlineInput) {
-      throw new Error("renderer probe contract violated");
-    }
-    const extracted = await renderer.extract(probe);
-    if (extracted.sourceDigest !== deadlineInput.sha256) {
-      throw new Error("renderer source identity mismatch");
-    }
-    remainingExtractionMs(deadlineInput);
-    await readVerifiedSource(deadlineInput);
-    return renderer.renderMetadata(extracted);
-  })().finally(() => {
+  const operation = withNativeAdmission(
+    Math.max(1, deadlineAt - Date.now()),
+    async () => {
+      await readVerifiedSource(deadlineInput);
+      const renderer = registry.resolve(deadlineInput);
+      const probe = await renderer.probe(deadlineInput);
+      if (probe.rendererId !== renderer.id || probe.input !== deadlineInput) {
+        throw new Error("renderer probe contract violated");
+      }
+      const extracted = await renderer.extract(probe);
+      if (extracted.sourceDigest !== deadlineInput.sha256) {
+        throw new Error("renderer source identity mismatch");
+      }
+      remainingExtractionMs(deadlineInput);
+      await readVerifiedSource(deadlineInput);
+      return renderer.renderMetadata(extracted);
+    },
+  ).finally(() => {
     operationSettled = true;
   });
 

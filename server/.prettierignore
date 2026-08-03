@@ -1,0 +1,2 @@
+# Canonical evidence is checksum-pinned and must remain byte-identical.
+test-fixtures/og-design-v2/

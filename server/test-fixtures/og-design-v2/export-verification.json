@@ -1,0 +1,206 @@
+[
+  {
+    "file": "contact-sheet.png",
+    "width": 5092,
+    "height": 2900,
+    "sha256": "8a194d43b4fadc6ea0b99eb6bd1dca0bca6cf0dc66c929a330f492d53691d11e"
+  },
+  {
+    "file": "imessage-01-image-landscape.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "7b20ef13bfd128b924a6ef4aacfbaadb0251e825eff2839cecbb58bb8e793a9e"
+  },
+  {
+    "file": "imessage-02-image-portrait.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "1b2969f4d39ba6d55c2d440c7a8db3afa6cbb35c4291e93a939af7f10351ebee"
+  },
+  {
+    "file": "imessage-03-video-poster.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "966373e063adeea322bbca3d4e82f799cc73b41296a183947fdb2fa85368b8d2"
+  },
+  {
+    "file": "imessage-04-video-no-poster.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "811cc504d242a09be6eb2eb9ad210d3aa8e3c9c7ee3422391a37069c2fb6d1d2"
+  },
+  {
+    "file": "imessage-05-pdf-first-page.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "f073f09986b4a98eec800d725f6b402a66c4bb8d2da61ff7ed1da89e0d76bc2e"
+  },
+  {
+    "file": "imessage-06-document-title.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "10813b30a22a3070e6057a8a173235dfafad0728e0ff78d47418f60dbe5a32e3"
+  },
+  {
+    "file": "imessage-07-markdown.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "187e319b9b61dec39a704ebeb60edfd86d00e12257fefc3d49b9a4f1dfd44ea3"
+  },
+  {
+    "file": "imessage-08-code-text.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "ae361dd376f29ca265b5deef6f42a444210215c3cd3354c71cf209436db3916c"
+  },
+  {
+    "file": "imessage-09-audio-artwork.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "0c1b885f171438632508b2b45d8e374fc774e8c6bb98d4a3210e2c2b1e59c625"
+  },
+  {
+    "file": "imessage-10-audio-waveform.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "cf30b766a252e9ba348e9b4854c74ad1065efe5f699b9759e4d437f1d5f2061f"
+  },
+  {
+    "file": "imessage-11-archive-targz.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "7001b92db4662d5637ef8c9f88db0d21f970d01017c291ac306cd54b8c990572"
+  },
+  {
+    "file": "imessage-12-generic-binary.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "322fdc6d124059829ec310d54162a3805e1c03abf72c0c4683a406a51266d298"
+  },
+  {
+    "file": "imessage-13-unavailable.png",
+    "width": 2880,
+    "height": 1020,
+    "sha256": "9041cd483e4c7cc78f39f91951f195e4c0d585dc67982dfc2e478334b129b127"
+  },
+  {
+    "file": "raw-01-image-landscape.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "56bb5c20a233b99bdf18f635e932a75901d22b2e77f7941b1b92d7c7ce8a38a4"
+  },
+  {
+    "file": "raw-02-image-portrait.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "f8063350cda1818de38145ce718271483f3cb44ea9977384c87e349b3e9e887d"
+  },
+  {
+    "file": "raw-03-video-poster.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "c75a74873d0d393cdcf5b387fdd232587fee28ce41337249dc142d6a8bbe436d"
+  },
+  {
+    "file": "raw-04-video-no-poster.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "556699bdb02e597b884c5bba92cd50ad7496255fe6e8109d0323ee2a90bfdff4"
+  },
+  {
+    "file": "raw-05-pdf-first-page.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "d3fef7cfc63d842fe4cd24c384eef6a4e70a22fb5aeb114ae2478d1c4de44063"
+  },
+  {
+    "file": "raw-06-document-title.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "cc3ad8ee61d5865792fba0ed836fa15c8fb3580a4905e8c69bdfdf0d5b9d7716"
+  },
+  {
+    "file": "raw-07-markdown.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "e829252c3e7736fc7d5af1172ac19db06265a4c228e47c9b8fb8244c28bd2565"
+  },
+  {
+    "file": "raw-08-code-text.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "940fd54b66d0081fb6a785522d91cce02d717cfb5265fa195633abca429a5648"
+  },
+  {
+    "file": "raw-09-audio-artwork.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "5c291066fc998a19a66f83e35f0bfb58509605ae33aec62bd63b5b32a43d04ec"
+  },
+  {
+    "file": "raw-10-audio-waveform.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "b0d9e921a2923850d6e453d1d6a426cc0bd15ae486c50571846248d9733849ce"
+  },
+  {
+    "file": "raw-11-archive-targz.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "d7706294b59d8b30681cba3caf8eb65282111255330cf33002f608f415e43e5e"
+  },
+  {
+    "file": "raw-12-generic-binary.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "9792bf9063e41bdf8e44f4aee7d7f8706fcb086336ff3980c09853cae9a4ecb5"
+  },
+  {
+    "file": "raw-13-unavailable.png",
+    "width": 1200,
+    "height": 630,
+    "sha256": "8f007a4470db37963d5d9fcd95fdd0b47af8fe3d959861c1dcedbf12b614eb4a"
+  },
+  {
+    "file": "stress-01-long-filename.png",
+    "width": 1312,
+    "height": 820,
+    "sha256": "b1b69037872292a56b5b42567db2f4434239d68acd0ca47e68fad8872b9bd12b"
+  },
+  {
+    "file": "stress-02-unicode.png",
+    "width": 1312,
+    "height": 820,
+    "sha256": "1fbed4721d692bb2e71aae884e95941e7c86966b6bdd02affd42898524ea4deb"
+  },
+  {
+    "file": "stress-03-portrait-safe-area.png",
+    "width": 1312,
+    "height": 820,
+    "sha256": "bfab30693a26eca1db59236ea711363289ad834f8631cfdbd154a00bde370df8"
+  },
+  {
+    "file": "stress-04-extreme-landscape.png",
+    "width": 1312,
+    "height": 820,
+    "sha256": "feb1517100092e512aa8225a2a065b9ce70482196dd839c623e7063c4029d0c0"
+  },
+  {
+    "file": "stress-05-no-thumbnail.png",
+    "width": 3944,
+    "height": 880,
+    "sha256": "534b2dc23f76f7127ccb160ca9fa73b71cfe6238272ed215ddc5e2f8b7d4d0cd"
+  },
+  {
+    "file": "stress-06-mobile-crop.png",
+    "width": 1312,
+    "height": 820,
+    "sha256": "75ddd300c8aba379640f4e002080e6aadfb043d7b6a031250c91beaade8765c9"
+  },
+  {
+    "file": "stress-07-light-dark.png",
+    "width": 2824,
+    "height": 902,
+    "sha256": "ad2d59ea9cbfc377ded5feade6d93ad0b1632bbd95b5293b0921caea1ff7739b"
+  }
+]

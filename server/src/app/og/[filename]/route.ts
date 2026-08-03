@@ -9,7 +9,10 @@ import {
   buildUnfurlModel,
   publicUnfurlRevisionMatches,
 } from "@/server/files/unfurl";
-import { unavailableImageResponse } from "@/server/files/unavailable";
+import {
+  settleUnavailableTiming,
+  unavailableImageResponse,
+} from "../../../server/files/unavailable";
 import { BASE62_ID_PATTERN } from "@/server/files/types";
 
 export const runtime = "nodejs";
@@ -32,6 +35,11 @@ async function responseFor(
   context: RouteContext,
   includeBody: boolean,
 ): Promise<Response> {
+  const unavailableStartedAt = performance.now();
+  const unavailable = async (): Promise<Response> => {
+    await settleUnavailableTiming(unavailableStartedAt);
+    return unavailableImageResponse(includeBody);
+  };
   try {
     const { filename } = await context.params;
     if (!filename.endsWith(".png")) throw notFound();
@@ -54,7 +62,7 @@ async function responseFor(
       headers,
     });
   } catch {
-    return unavailableImageResponse(includeBody);
+    return unavailable();
   }
 }
 

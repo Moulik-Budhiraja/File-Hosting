@@ -81,16 +81,18 @@ cp .env.example .env
 npm run dev
 ```
 
-Run every automated check from the project root:
+Run the canonical release gate from the project root:
 
 ```sh
-npm --prefix server run build
-npm --prefix server run check
-npm --prefix cli run typecheck
-npm --prefix cli test
-npm --prefix cli run build
-node --test tests/e2e.test.mjs
+./scripts/release-check.sh
 ```
+
+It installs locked server and CLI dependencies, runs formatting, lint, typechecks,
+full tests, package/runtime assertions, compiled and extracted-standalone semantic
+checks, frozen-design checks, production and development dependency audits, root
+E2E and Compose checks, and a guarded local rich-link visual probe. It also runs
+the real Docker Compose image when Docker is available; CI sets
+`REQUIRE_DOCKER=1`, so container execution cannot be waived there.
 
 The end-to-end suite starts real compiled server and CLI processes against
 temporary SQLite and object storage, tests a restart, and removes its state.
@@ -104,16 +106,16 @@ propagate it to subprocesses. If a strategy misses that deadline, the request fa
 closed but its slot remains occupied until the strategy settles, so timed-out work
 cannot escape pool accounting.
 
-Generated social-card rendering runs in a bounded child process. Node workers use
-Node's permission model: reads are limited to their worker/module/input paths,
-writes are denied except for the isolated font cache, network and child-process
-access are denied, and the environment excludes application credentials. On Darwin,
-the system sandbox additionally denies process creation and network access; sandbox
-startup failure is fail-closed. In Linux production, `/usr/bin/bwrap` is mandatory
-and launches workers without network or `/data`, with the application mounted
-read-only and only `/tmp` writable; the production image installs that sandbox and
-missing availability fails closed. Native media tools receive source bytes only on
-stdin with FFmpeg's protocol whitelist restricted to `pipe`.
+Generated social-card rendering runs in a bounded child process. Node's permission
+model limits worker reads to declared worker/module/input paths and writes to the
+isolated font cache; the environment excludes application credentials. Network and
+process containment come from the platform sandbox: Darwin sandbox profiles deny
+network access and disallowed forks, while Linux production requires `/usr/bin/bwrap`
+with no network or `/data`, a read-only application mount, and writable `/tmp` only.
+Sandbox startup failure is fail-closed. Native media tools receive a private, mode-0600 snapshot
+path inside that restricted filesystem, fixed arguments, and
+FFmpeg's `file,pipe` protocol whitelist; snapshots are checksum-bound before and
+after derivation and are removed at settlement.
 
 Explicitly trusted test harnesses may opt out to exercise ordinary
 launcher/child/grandchild process-group cleanup. On other non-production POSIX
@@ -181,17 +183,19 @@ data goes to stdout while progress and diagnostics go to stderr. See
 
 ## Production release
 
-1. Push a tested commit to `main`.
-2. In `~/hosting/file-hosting`, run `git pull --ff-only` and verify the desired
+1. Run `./scripts/release-check.sh` on the exact candidate commit and require the
+   `Release gate` GitHub check, including its mandatory Docker Compose runtime.
+2. Push the tested commit to `main`.
+3. In `~/hosting/file-hosting`, run `git pull --ff-only` and verify the desired
    commit with `git rev-parse HEAD`.
-3. Run `docker compose up --build -d`, wait for the health check, and inspect
+4. Run `docker compose up --build -d`, wait for the health check, and inspect
    `docker compose ps` plus `docker compose logs --tail=100 server`.
-4. In Cloudflare DNS, keep `files.moulik.dev` as a DNS-only `A` record pointing
+5. In Cloudflare DNS, keep `files.moulik.dev` as a DNS-only `A` record pointing
    to the host. DNS-only mode avoids Cloudflare proxy upload-size constraints
    for explicitly approved uploads over 1 GiB.
-5. In Nginx Proxy Manager, proxy `files.moulik.dev` over HTTP to
+6. In Nginx Proxy Manager, proxy `files.moulik.dev` over HTTP to
    `file-hosting-server:3000`.
-6. Add this in the Proxy Host's **Advanced** configuration so large requests
+7. Add this in the Proxy Host's **Advanced** configuration so large requests
    stream to the application instead of being buffered:
 
    ```nginx
@@ -202,9 +206,9 @@ data goes to stdout while progress and diagnostics go to stderr. See
    send_timeout 3600s;
    ```
 
-7. In NPM's SSL tab, request a Let's Encrypt certificate for
+8. In NPM's SSL tab, request a Let's Encrypt certificate for
    `files.moulik.dev`, enable Force SSL, and accept the Let's Encrypt terms.
-8. Verify the public health route, a small authenticated upload, preview and raw
+9. Verify the public health route, a small authenticated upload, preview and raw
    downloads, a private-file denial without authentication, and deletion before
    relying on the service.
 

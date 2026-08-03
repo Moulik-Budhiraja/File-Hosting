@@ -697,6 +697,42 @@ describe("actual-byte preview derivation", () => {
     });
   });
 
+  it("derives public labels from trusted MIME and validated parser results", async () => {
+    const cases = [
+      ["text/x-typescript", "misleading.py", "const x: string = 'a';", "TS"],
+      ["text/x-python", "misleading.ts", "value: str = 'a'", "PY"],
+      ["video/webm", "misleading.mp4", "not media", "WebM"],
+      ["video/x-msvideo", "misleading.mov", "not media", "AVI"],
+      ["video/mpeg", "misleading.webm", "not media", "MPEG"],
+      ["video/quicktime", "misleading.avi", "not media", "QuickTime"],
+      ["application/ld+json", "feed.xml", '{"@context":"x"}', "JSON-LD"],
+      ["application/rss+xml", "feed.json", "<rss/>", "RSS"],
+      ["application/xml", "feed.json", "<root/>", "XML"],
+    ] as const;
+    for (const [mime, name, contents, label] of cases) {
+      const preview = await derivePreview(
+        await fixture(Buffer.from(contents), mime, name),
+      );
+      assert.equal(preview.label, label, `${mime} must ignore ${name}`);
+    }
+    const plainGzip = await derivePreview(
+      await fixture(
+        gzipSync(Buffer.from("plain")),
+        "application/gzip",
+        "fake.tar.gz",
+      ),
+    );
+    assert.equal(plainGzip.label, "GZIP");
+    const validatedTar = await derivePreview(
+      await fixture(
+        gzipSync(tarWithEntry("entry.txt", "data"), { level: 9 }),
+        "application/gzip",
+        "misleading.gz",
+      ),
+    );
+    assert.equal(validatedTar.label, "TAR.GZ");
+  });
+
   it("checksum-binds a 26 MiB historical source and rejects a same-size replacement", async () => {
     const original = Buffer.alloc(26 * 1024 * 1024, 0x61);
     const source = await fixture(

@@ -16,7 +16,7 @@
     "preview": "next build && next start",
     "start": "node .next/standalone/server.js",
     "start:verified": "npm run assert:runtime && node server.js",
-    "test": "tsx --test src/server/auth/*.test.ts src/server/files/*.test.ts",
+    "test": "tsx --test --test-concurrency=1 src/server/auth/*.test.ts src/server/files/*.test.ts",
     "test:compiled": "npm run build && OG_E2E_MODE=compiled node scripts/standalone-og-e2e.mjs",
     "test:standalone": "npm run build && node scripts/standalone-og-e2e.mjs",
     "test:watch": "tsx --test --watch src/server/auth/*.test.ts src/server/files/*.test.ts",
@@ -30,6 +30,7 @@
   "dependencies": {
     "@libsql/client": "^0.14.0",
     "@napi-rs/canvas": "^0.1.80",
+    "@twemoji/svg": "15.0.0",
     "bcrypt": "^6.0.0",
     "ffmpeg-static": "^5.2.0",
     "ffprobe-static": "^3.1.0",

@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 
 const required = [
   "runtime/og-render-worker.mjs",
+  "runtime/font-probe-worker.mjs",
   "runtime/pdf-page-worker.mjs",
   "runtime/docx-text-worker.mjs",
   "runtime/fonts/fonts.conf",
@@ -12,6 +13,9 @@ const required = [
   "runtime/fonts/JetBrainsMono-OFL.txt",
   "runtime/fonts/NotoColorEmoji.ttf",
   "runtime/fonts/NotoEmoji-OFL.txt",
+  "runtime/fonts/NotoSansArabic.ttf",
+  "runtime/fonts/NotoSansCJKjp-Regular.otf",
+  "runtime/fonts/Noto-OFL.txt",
   "runtime/assets/twemoji/1f4e1.svg",
   "runtime/assets/twemoji/1f600.svg",
   "runtime/assets/twemoji/1f680.svg",

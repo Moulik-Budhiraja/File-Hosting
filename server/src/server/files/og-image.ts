@@ -1,8 +1,10 @@
+import { createHash } from "node:crypto";
 import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import { AppError } from "./errors";
-import { runKillableProcess } from "./process-tree";
+import { withNativeAdmission } from "./native-admission";
+import { ProcessExecutionError, runKillableProcess } from "./process-tree";
 import { BoundedWorkerPool } from "./raster-worker";
 import type { FileService } from "./service";
 import { sanitizePublicText } from "./text-safety";
@@ -23,6 +25,33 @@ const ogRenderPool = new BoundedWorkerPool(
   OG_RENDER_LIMITS.maxQueued,
   OG_RENDER_LIMITS.queueTimeoutMs,
 );
+const OG_RENDER_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const ogRenderCache = new Map<string, Buffer>();
+let ogRenderCacheBytes = 0;
+
+function cachedRender(key: string): Buffer | undefined {
+  const cached = ogRenderCache.get(key);
+  if (!cached) return undefined;
+  ogRenderCache.delete(key);
+  ogRenderCache.set(key, cached);
+  return Buffer.from(cached);
+}
+
+function cacheRender(key: string, output: Buffer): void {
+  if (output.length > OG_RENDER_CACHE_MAX_BYTES) return;
+  const existing = ogRenderCache.get(key);
+  if (existing) ogRenderCacheBytes -= existing.length;
+  ogRenderCache.delete(key);
+  const stored = Buffer.from(output);
+  ogRenderCache.set(key, stored);
+  ogRenderCacheBytes += stored.length;
+  while (ogRenderCacheBytes > OG_RENDER_CACHE_MAX_BYTES) {
+    const oldest = ogRenderCache.entries().next().value;
+    if (!oldest) break;
+    ogRenderCache.delete(oldest[0]);
+    ogRenderCacheBytes -= oldest[1].length;
+  }
+}
 
 function escapeXml(value: string): string {
   return value
@@ -37,10 +66,6 @@ function graphemeColumns(grapheme: string): number {
   return /[◆…A-Z0-9mw]|[^\u0000-\u007F]/u.test(grapheme) ? 2 : 1;
 }
 
-function displayGrapheme(grapheme: string): string {
-  return grapheme;
-}
-
 export function layoutOgTitle(
   title: string,
   maxColumns: number,
@@ -51,7 +76,7 @@ export function layoutOgTitle(
       title.trim(),
     ),
   ]
-    .map(({ segment }) => displayGrapheme(segment))
+    .map(({ segment }) => segment)
     .filter(Boolean);
   const units: string[][] = [];
   let unit: string[] = [];
@@ -127,22 +152,31 @@ export function layoutOgTitle(
 
 const SANS = "'Inter',sans-serif";
 const MONO = "'JetBrains Mono',monospace";
-const EMOJI_ASSETS: ReadonlyArray<readonly [string, string]> = [
-  ["📡", "1f4e1.svg"],
-  ["😀", "1f600.svg"],
-  ["🚀", "1f680.svg"],
-];
-const EMOJI_DATA = new Map<string, string>(
-  EMOJI_ASSETS.map(([grapheme, asset]) => [
-    grapheme,
-    `data:image/svg+xml;base64,${readFileSync(
-      path.join(process.cwd(), "runtime/assets/twemoji", asset),
-    ).toString("base64")}`,
-  ]),
+const EMOJI_DIRECTORY = path.resolve(
+  process.cwd(),
+  "node_modules/@twemoji/svg",
 );
+const EMOJI_DATA = new Map<string, string | null>();
 
 function knownEmojiData(grapheme: string): string | undefined {
-  return EMOJI_DATA.get(grapheme.replaceAll("\uFE0F", ""));
+  const asset = [...grapheme]
+    .map((character) => character.codePointAt(0))
+    .filter((codepoint) => codepoint !== undefined && codepoint !== 0xfe0f)
+    .map((codepoint) => codepoint!.toString(16))
+    .join("-");
+  if (!asset) return undefined;
+  const cached = EMOJI_DATA.get(asset);
+  if (cached !== undefined) return cached ?? undefined;
+  try {
+    const data = `data:image/svg+xml;base64,${readFileSync(
+      path.join(EMOJI_DIRECTORY, `${asset}.svg`),
+    ).toString("base64")}`;
+    EMOJI_DATA.set(asset, data);
+    return data;
+  } catch {
+    EMOJI_DATA.set(asset, null);
+    return undefined;
+  }
 }
 
 function titleGraphemeAdvance(grapheme: string, size: number): number {
@@ -194,9 +228,30 @@ function titleLineMarkup(
   return markup;
 }
 
-function cardSvg(model: PublicUnfurlModel): Buffer {
+export function truncateDisplayText(value: string, maxColumns: number): string {
+  let columns = 0;
+  let output = "";
+  for (const { segment } of new Intl.Segmenter(undefined, {
+    granularity: "grapheme",
+  }).segment(value)) {
+    const width = graphemeColumns(segment);
+    if (columns + width > maxColumns) break;
+    output += segment;
+    columns += width;
+  }
+  return output;
+}
+
+export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   const safeTitle = sanitizePublicText(model.title, 300) || "File";
-  const safeDescription = sanitizePublicText(model.description ?? "", 400);
+  const fullDescription = sanitizePublicText(model.description ?? "", 400);
+  const safeDescription =
+    model.preview?.visual.kind === "artwork"
+      ? fullDescription
+          .split(" · ")
+          .filter((fact) => !/^\d{2}:\d{2}(?::\d{2})?$/u.test(fact))
+          .join(" · ")
+      : fullDescription;
   const titleLines = layoutOgTitle(safeTitle, 34, 2);
   const twoLineTitle = titleLines.length > 1;
   const visual = model.preview?.visual;
@@ -243,7 +298,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
           .slice(0, 6)
           .map(
             (line, index) =>
-              `<text x="708" y="${130 + index * 54}" fill="#2a2e34" font-family="${SANS}" font-size="${index === 0 ? 28 : 20}" font-weight="${index === 0 ? 700 : 400}">${escapeXml(line.slice(0, 36))}</text>`,
+              `<text x="708" y="${130 + index * 54}" fill="#2a2e34" font-family="${SANS}" font-size="${index === 0 ? 28 : 20}" font-weight="${index === 0 ? 700 : 400}">${escapeXml(truncateDisplayText(line, 36))}</text>`,
           )
           .join("")}`;
     const pdfTitleLines = layoutOgTitle(safeTitle, 20, 2);
@@ -259,7 +314,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
       .slice(1, 3)
       .map(
         (line, index) =>
-          `<text x="312" y="${341 + index * 30}" fill="#63615d" font-family="${SANS}" font-size="20">${escapeXml(line.slice(0, 62))}</text>`,
+          `<text x="312" y="${341 + index * 30}" fill="#63615d" font-family="${SANS}" font-size="20">${escapeXml(truncateDisplayText(line, 62))}</text>`,
       )
       .join("");
     const documentLabel = contentLines[0]
@@ -271,7 +326,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
       .slice(0, 8)
       .map(
         (line, index) =>
-          `<text x="708" y="${120 + index * 48}" fill="${index === 0 ? "#202329" : "#5e5f60"}" font-family="${SANS}" font-size="${index === 0 ? 28 : 19}" font-weight="${index === 0 ? 700 : 400}">${escapeXml(line.slice(0, 38))}</text>`,
+          `<text x="708" y="${120 + index * 48}" fill="${index === 0 ? "#202329" : "#5e5f60"}" font-family="${SANS}" font-size="${index === 0 ? 28 : 19}" font-weight="${index === 0 ? 700 : 400}">${escapeXml(truncateDisplayText(line, 38))}</text>`,
       )
       .join("");
     body = `${brand()}<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${pageLines}${titleText(56, titleLines.length > 1 ? 430 : 480, 48, 20)}${facts(56, 576)}`;
@@ -281,17 +336,17 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
       .map((line) => {
         let markup: string;
         if (line.startsWith("# ")) {
-          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="30">#</text><text x="92" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="45" font-weight="700">${escapeXml(line.slice(2, 58))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="30">#</text><text x="92" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="45" font-weight="700">${escapeXml(truncateDisplayText(line.slice(2), 56))}</text>`;
           y += 61;
         } else if (line.startsWith("## ")) {
           y += 33;
-          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="20">##</text><text x="96" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="30" font-weight="700">${escapeXml(line.slice(3, 64))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="20">##</text><text x="96" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="30" font-weight="700">${escapeXml(truncateDisplayText(line.slice(3), 61))}</text>`;
           y += 52;
         } else if (/^(?:•|-|\*)\s/u.test(line)) {
-          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${SANS}" font-size="22">•</text><text x="79" y="${y}" fill="#a7aaaf" font-family="${SANS}" font-size="22">${escapeXml(line.replace(/^(?:•|-|\*)\s+/u, "").slice(0, 92))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${SANS}" font-size="22">•</text><text x="79" y="${y}" fill="#a7aaaf" font-family="${SANS}" font-size="22">${escapeXml(truncateDisplayText(line.replace(/^(?:•|-|\*)\s+/u, ""), 92))}</text>`;
           y += 38;
         } else {
-          markup = `<text x="56" y="${y}" fill="#a7aaaf" font-family="${SANS}" font-size="22">${escapeXml(line.slice(0, 100))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#a7aaaf" font-family="${SANS}" font-size="22">${escapeXml(truncateDisplayText(line, 100))}</text>`;
           y += 34;
         }
         return markup;
@@ -302,7 +357,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
     const excerpt = contentLines
       .map((line, index) => {
         const highlighted = /^\s*yield\b/u.test(line);
-        return `<text x="56" y="${82 + index * 44}" fill="${highlighted ? "#e7c47f" : index === 0 ? "#c7c9cd" : "#a7aaaf"}" font-family="${MONO}" font-size="22">${escapeXml(line.slice(0, 92))}</text>`;
+        return `<text xml:space="preserve" x="56" y="${82 + index * 44}" fill="${highlighted ? "#e7c47f" : index === 0 ? "#c7c9cd" : "#a7aaaf"}" font-family="${MONO}" font-size="22">${escapeXml(truncateDisplayText(line, 92))}</text>`;
       })
       .join("");
     body = `${excerpt}<line x1="56" y1="478" x2="1144" y2="478" stroke="#26292e"/>${titleText(56, twoLineTitle ? 518 : 540, 38, 42)}${facts(56, twoLineTitle ? 606 : 578)}${brand(1144, twoLineTitle ? 604 : 576, "end")}`;
@@ -326,7 +381,11 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
   } else if (model.kind === "archive") {
     const stack = `<rect x="986" y="65" width="150" height="16" rx="3" fill="#33373c"/><rect x="1016" y="91" width="120" height="16" rx="3" fill="#3b3f45"/><rect x="1046" y="117" width="90" height="16" rx="3" fill="#44484f"/>`;
     const archiveTitleLines = layoutOgTitle(safeTitle, 42, 2);
-    body = `${brand()}${stack}<text x="56" y="259" fill="#e3a44f" font-family="${MONO}" font-size="24" letter-spacing="4">${escapeXml(`${model.preview?.label ?? "Archive"} archive`.toUpperCase())}</text>${titleText(56, archiveTitleLines.length > 1 ? 458 : 522, 64, 42)}${facts(56, 576)}`;
+    const entry =
+      visual?.kind === "archive" && visual.entries[0]
+        ? `<text x="56" y="315" fill="#777b82" font-family="${MONO}" font-size="20">${escapeXml(truncateDisplayText(visual.entries[0], 72))}</text>`
+        : "";
+    body = `${brand()}${stack}<text x="56" y="259" fill="#e3a44f" font-family="${MONO}" font-size="24" letter-spacing="4">${escapeXml(`${model.preview?.label ?? "Archive"} archive`.toUpperCase())}</text>${entry}${titleText(56, archiveTitleLines.length > 1 ? 458 : 522, 64, 42)}${facts(56, 576)}`;
   } else if (visual?.kind === "binary" && visual.hex) {
     const groups = visual.hex.split(" ");
     const midpoint = Math.ceil(groups.length / 2);
@@ -359,7 +418,12 @@ interface RenderWorkerOptions {
 }
 
 function workerEnvironment(): NodeJS.ProcessEnv {
-  const environment: NodeJS.ProcessEnv = { NODE_ENV: process.env.NODE_ENV };
+  const fontDirectory = path.resolve(process.cwd(), "runtime/fonts");
+  const environment: NodeJS.ProcessEnv = {
+    NODE_ENV: process.env.NODE_ENV,
+    FONTCONFIG_FILE: path.join(fontDirectory, "fonts.conf"),
+    FONTCONFIG_PATH: fontDirectory,
+  };
   for (const key of [
     "PATH",
     "HOME",
@@ -394,39 +458,69 @@ export async function renderSvgInWorker(
     });
   }
   try {
+    const cacheKey =
+      options.workerPath === undefined &&
+      options.workerArguments === undefined &&
+      options.timeoutMs === undefined &&
+      options.allowSubprocesses === undefined
+        ? createHash("sha256").update(svg).digest("hex")
+        : undefined;
+    if (cacheKey) {
+      const cached = cachedRender(cacheKey);
+      if (cached) return cached;
+    }
     const workerPath =
       options.workerPath ??
       path.resolve(process.cwd(), "runtime/og-render-worker.mjs");
-    const result = await runKillableProcess(
-      process.execPath,
-      [
-        ...(options.allowSubprocesses
-          ? []
-          : [
-              "--experimental-permission",
-              "--allow-addons",
-              `--allow-fs-read=${path.resolve(process.cwd(), "runtime")}`,
-              `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
-              `--allow-fs-read=${realpathSync(path.dirname(workerPath))}`,
-              `--allow-fs-write=${realpathSync("/tmp")}/file-hosting-font-cache`,
-            ]),
-        `--max-old-space-size=${OG_RENDER_LIMITS.maxOldSpaceMiB}`,
-        workerPath,
-        ...(options.workerArguments ?? []),
-      ],
-      {
-        cwd: process.cwd(),
-        env: workerEnvironment(),
-        input: svg,
-        maxOutputBytes: OG_RENDER_LIMITS.maxOutputBytes,
-        timeoutMs: Math.max(1, deadline - Date.now()),
-        allowSubprocesses: options.allowSubprocesses,
+    const output = await withNativeAdmission(
+      Math.max(1, deadline - Date.now()),
+      async () => {
+        for (let attempt = 0; attempt < 2; attempt += 1) {
+          try {
+            const result = await runKillableProcess(
+              process.execPath,
+              [
+                ...(options.allowSubprocesses
+                  ? []
+                  : [
+                      "--experimental-permission",
+                      "--allow-addons",
+                      `--allow-fs-read=${path.resolve(process.cwd(), "runtime")}`,
+                      `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
+                      `--allow-fs-read=${realpathSync(path.dirname(workerPath))}`,
+                      `--allow-fs-write=${realpathSync("/tmp")}/file-hosting-font-cache`,
+                    ]),
+                `--max-old-space-size=${OG_RENDER_LIMITS.maxOldSpaceMiB}`,
+                workerPath,
+                ...(options.workerArguments ?? []),
+              ],
+              {
+                cwd: process.cwd(),
+                env: workerEnvironment(),
+                input: svg,
+                maxOutputBytes: OG_RENDER_LIMITS.maxOutputBytes,
+                timeoutMs: Math.max(1, deadline - Date.now()),
+                allowSubprocesses: options.allowSubprocesses,
+              },
+            );
+            return result.stdout;
+          } catch (error) {
+            if (
+              !(error instanceof ProcessExecutionError) ||
+              attempt > 0 ||
+              deadline - Date.now() < 100
+            )
+              throw error;
+          }
+        }
+        throw new ProcessExecutionError();
       },
     );
-    return result.stdout;
+    if (cacheKey) cacheRender(cacheKey, output);
+    return output;
   } finally {
-    // runKillableProcess resolves/rejects only after close, so the process group has
-    // been killed and the launcher reaped before admission is handed onward.
+    // Settlement retains the identity-safe supervisor until its owned group has
+    // been signalled and inherited pipes have closed before releasing this slot.
     ogRenderPool.release();
   }
 }
@@ -436,5 +530,5 @@ export async function renderOgImage(
   _file: StoredFile,
   model: PublicUnfurlModel,
 ): Promise<Buffer> {
-  return renderSvgInWorker(cardSvg(model));
+  return renderSvgInWorker(composeOgCardSvg(model));
 }

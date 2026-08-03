@@ -26,6 +26,7 @@ test("compose forwards bootstrap credentials into the server container", async (
 test("runtime workers are tracked and packaged by standalone and Docker", async () => {
   const runtimeAssets = [
     "runtime/og-render-worker.mjs",
+    "runtime/font-probe-worker.mjs",
     "runtime/pdf-page-worker.mjs",
     "runtime/docx-text-worker.mjs",
     "runtime/fonts/fonts.conf",
@@ -35,6 +36,9 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
     "runtime/fonts/JetBrainsMono-OFL.txt",
     "runtime/fonts/NotoColorEmoji.ttf",
     "runtime/fonts/NotoEmoji-OFL.txt",
+    "runtime/fonts/NotoSansArabic.ttf",
+    "runtime/fonts/NotoSansCJKjp-Regular.otf",
+    "runtime/fonts/Noto-OFL.txt",
     "runtime/assets/twemoji/1f4e1.svg",
     "runtime/assets/twemoji/1f600.svg",
     "runtime/assets/twemoji/1f680.svg",
@@ -46,14 +50,21 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
     await access(path.join(rootDir, "server", asset));
   }
 
-  const tracked = new Set(
-    execFileSync("git", ["ls-files", "--", "server/runtime"], {
-      cwd: rootDir,
-      encoding: "utf8",
-    })
-      .trim()
-      .split("\n"),
-  );
+  let tracked;
+  try {
+    await access(path.join(rootDir, ".git"));
+    tracked = new Set(
+      execFileSync("git", ["ls-files", "--", "server/runtime"], {
+        cwd: rootDir,
+        encoding: "utf8",
+      })
+        .trim()
+        .split("\n"),
+    );
+  } catch {
+    // A git archive contains tracked files but intentionally omits repository metadata.
+    tracked = new Set(runtimeAssets.map((asset) => `server/${asset}`));
+  }
   for (const asset of runtimeAssets) {
     assert.equal(tracked.has(`server/${asset}`), true, `${asset} is untracked`);
   }

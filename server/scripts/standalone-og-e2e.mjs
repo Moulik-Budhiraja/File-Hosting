@@ -91,6 +91,44 @@ async function video() {
   );
 }
 
+async function audio(withArtwork) {
+  assert.ok(ffmpegPath);
+  const output = path.join(e2eRoot, withArtwork ? "art.mp3" : "tone.mp3");
+  const args = [
+    "-f",
+    "lavfi",
+    "-i",
+    "sine=frequency=440:sample_rate=8000:duration=0.4",
+  ];
+  if (withArtwork) {
+    args.push(
+      "-f",
+      "lavfi",
+      "-i",
+      "color=c=red:s=64x64:d=0.1",
+      "-map",
+      "0:a",
+      "-map",
+      "1:v:0",
+      "-c:v",
+      "png",
+      "-disposition:v",
+      "attached_pic",
+      "-id3v2_version",
+      "3",
+    );
+  }
+  args.push("-c:a", "libmp3lame", "-y", output);
+  const result = spawnSync(ffmpegPath, args, {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert.equal(result.status, 0, result.stderr);
+  return await import("node:fs/promises").then(({ readFile }) =>
+    readFile(output),
+  );
+}
+
 if (mode === "standalone") {
   await rm(appRoot, { recursive: true, force: true });
   await mkdir(appRoot, { recursive: true });
@@ -172,6 +210,7 @@ async function cardFor(name, mime, bytes) {
   assert.match(metadata.id, /^[0-9A-Za-z]{7,16}$/u);
   const pageResponse = await fetch(`${origin}/${metadata.id}`);
   assert.equal(pageResponse.status, 200);
+  const page = await pageResponse.text();
   const cardResponse = await fetch(`${origin}/og/${metadata.id}.png`);
   assert.equal(cardResponse.status, 200, logs);
   assert.equal(cardResponse.headers.get("content-type"), "image/png");
@@ -191,7 +230,7 @@ async function cardFor(name, mime, bytes) {
       hasAlpha: false,
     },
   );
-  return card;
+  return { card, page };
 }
 
 try {
@@ -206,7 +245,7 @@ try {
     "text/markdown",
     Buffer.from("# Same heading\nBravo body"),
   );
-  assert.notDeepEqual(alpha, beta);
+  assert.notDeepEqual(alpha.card, beta.card);
   await cardFor(
     "pixels.png",
     "image/png",
@@ -222,12 +261,41 @@ try {
     "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
     await docx("Standalone document bytes"),
   );
-  await cardFor("clip.mp4", "video/mp4", await video());
+  const videoResult = await cardFor("clip.mp4", "video/mp4", await video());
+  assert.match(videoResult.page, /MP4 · [^<]+ · 00:00/u);
+  const videoPixel = await sharp(videoResult.card)
+    .extract({ left: 600, top: 160, width: 1, height: 1 })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+  assert.ok(
+    (videoPixel[2] ?? 0) > (videoPixel[0] ?? 255) + 60,
+    "video poster must use blue source pixels",
+  );
+  const artwork = await cardFor("art.mp3", "audio/mpeg", await audio(true));
+  assert.match(artwork.page, /MP3 · [^<]+ · 00:00/u);
+  const artworkPixel = await sharp(artwork.card)
+    .extract({ left: 200, top: 200, width: 1, height: 1 })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+  assert.ok(
+    (artworkPixel[0] ?? 0) > (artworkPixel[2] ?? 255) + 60,
+    "embedded artwork must use red source pixels",
+  );
+  const waveform = await cardFor("tone.mp3", "audio/mpeg", await audio(false));
+  assert.match(waveform.page, /MP3 · [^<]+ · 00:00/u);
+  assert.notDeepEqual(waveform.card, artwork.card);
+  await cardFor(
+    "party-🎉-heart-❤️-flag-🇺🇸-family-👨‍👩‍👧‍👦.txt",
+    "text/plain",
+    Buffer.from("日本語 العربية e\u0301"),
+  );
   await writeFile(
     path.join(e2eRoot, "result.json"),
-    JSON.stringify({ ok: true, mode, origin, cases: 6 }, null, 2),
+    JSON.stringify({ ok: true, mode, origin, cases: 9 }, null, 2),
   );
-  process.stdout.write(`${mode} OG E2E passed: 6 cases at ${e2eRoot}\n`);
+  process.stdout.write(`${mode} OG E2E passed: 9 cases at ${e2eRoot}\n`);
 } finally {
   child.kill("SIGKILL");
   await new Promise((resolve) => child.once("close", resolve));

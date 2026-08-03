@@ -17,8 +17,8 @@ services:
       FS_BOOTSTRAP_USERNAME: ${FS_BOOTSTRAP_USERNAME:-}
       FS_BOOTSTRAP_PASSWORD: ${FS_BOOTSTRAP_PASSWORD:-}
     volumes:
-      - ./runtime/files:/data/files
-      - ./runtime/sqlite:/data/sqlite
+      - ${FS_FILES_DIR:-./runtime/files}:/data/files
+      - ${FS_SQLITE_DIR:-./runtime/sqlite}:/data/sqlite
     expose:
       - "3000"
     ports:

@@ -238,7 +238,7 @@ describe("public unfurl view-model", () => {
     );
   });
 
-  it("fails closed when a large source cannot be checksum-bound within the public deadline", async () => {
+  it("uses truthful metadata-only fallback when a large public source cannot be checksum-bound within the preview deadline", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-unfurl-sparse-"),
     );
@@ -254,10 +254,14 @@ describe("public unfurl view-model", () => {
       storagePath: () => objectPath,
     } as unknown as FileService;
 
-    await assert.rejects(
-      buildUnfurlModel(service, storedFile({ size: 128 * 1024 * 1024 })),
-      /preview source unavailable/u,
+    const model = await buildUnfurlModel(
+      service,
+      storedFile({ size: 128 * 1024 * 1024 }),
     );
+    assert.equal(model.kind, "markdown");
+    assert.equal(model.description, "Markdown · 128 MB");
+    assert.equal(model.preview?.visual.kind, "binary");
+    assert.equal(JSON.stringify(model).includes("Sparse heading"), false);
   });
 
   it("uses the approved filename title and keeps Markdown headings in the excerpt", async () => {

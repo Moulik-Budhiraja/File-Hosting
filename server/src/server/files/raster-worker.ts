@@ -1,6 +1,7 @@
 import path from "node:path";
 
 import { runKillableProcess } from "./process-tree";
+import { withNativeAdmission } from "./native-admission";
 
 export const RASTER_WORKER_LIMITS = Object.freeze({
   maxConcurrent: 2,
@@ -178,30 +179,35 @@ async function runRasterWorker(
   const deadline = Date.now() + Math.max(1, timeoutMs);
   await workerPool.acquire(Math.max(1, deadline - Date.now()));
   try {
-    const result = await runKillableProcess(
-      process.execPath,
-      [
-        "--experimental-permission",
-        "--allow-addons",
-        `--allow-fs-read=${filePath}`,
-        `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
-        `--max-old-space-size=${RASTER_WORKER_LIMITS.maxOldSpaceMiB}`,
-        "--input-type=module",
-        "--eval",
-        WORKER_PROGRAM,
-        "--",
-        mode,
-        filePath,
-        mimeType,
-      ],
-      {
-        cwd: process.cwd(),
-        env: rasterWorkerEnvironment(),
-        maxOutputBytes: RASTER_WORKER_LIMITS.maxOutputBytes,
-        timeoutMs: Math.max(1, deadline - Date.now()),
+    return await withNativeAdmission(
+      Math.max(1, deadline - Date.now()),
+      async () => {
+        const result = await runKillableProcess(
+          process.execPath,
+          [
+            "--experimental-permission",
+            "--allow-addons",
+            `--allow-fs-read=${filePath}`,
+            `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
+            `--max-old-space-size=${RASTER_WORKER_LIMITS.maxOldSpaceMiB}`,
+            "--input-type=module",
+            "--eval",
+            WORKER_PROGRAM,
+            "--",
+            mode,
+            filePath,
+            mimeType,
+          ],
+          {
+            cwd: process.cwd(),
+            env: rasterWorkerEnvironment(),
+            maxOutputBytes: RASTER_WORKER_LIMITS.maxOutputBytes,
+            timeoutMs: Math.max(1, deadline - Date.now()),
+          },
+        );
+        return result.stdout;
       },
     );
-    return result.stdout;
   } finally {
     workerPool.release();
   }

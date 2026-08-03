@@ -97,6 +97,61 @@ describe(
       assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
     });
 
+    it("retains ownership when an early-exited child leaves inherited pipes with a descendant", async () => {
+      const directory = await mkdtemp(
+        path.join(os.tmpdir(), "fs-og-inherited-"),
+      );
+      temporaryDirectories.push(directory);
+      const pidFile = path.join(directory, "pids.txt");
+      const launcher = path.join(directory, "launcher.mjs");
+      await writeFile(
+        launcher,
+        `import { appendFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nappendFileSync(process.argv[2], String(process.pid));\nconst descendant = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: ["ignore", "inherit", "inherit"] });\nappendFileSync(process.argv[2], \` \${descendant.pid}\`);\nprocess.exit(0);\n`,
+      );
+
+      for (let attempt = 0; attempt < 5; attempt += 1) {
+        const run = runKillableProcess(process.execPath, [launcher, pidFile], {
+          timeoutMs: 400,
+          maxOutputBytes: 1024,
+          allowSubprocesses: true,
+        });
+        const rejection = assert.rejects(run, ProcessDeadlineError);
+        let pids: number[] = [];
+        for (let poll = 0; poll < 30 && pids.length !== 2; poll += 1) {
+          try {
+            pids = (await readFile(pidFile, "utf8"))
+              .trim()
+              .split(/\s+/u)
+              .map(Number)
+              .filter(Number.isSafeInteger);
+          } catch {
+            // Launcher has not published both identities yet.
+          }
+          if (pids.length !== 2)
+            await new Promise((resolve) => setTimeout(resolve, 10));
+        }
+        assert.equal(pids.length, 2);
+        await new Promise((resolve) => setTimeout(resolve, 40));
+        assert.equal(
+          processExists(pids[0] ?? 0),
+          false,
+          "launcher must exit early",
+        );
+        assert.equal(
+          processExists(pids[1] ?? 0),
+          true,
+          "descendant must still hold the pipe",
+        );
+        await rejection;
+        assert.equal(
+          processExists(pids[1] ?? 0),
+          false,
+          "owned descendant survived settlement",
+        );
+        await rm(pidFile, { force: true });
+      }
+    });
+
     it(
       "fails closed by denying a setsid descendant before the hard bound",
       { skip: process.platform !== "darwin" },
@@ -190,13 +245,41 @@ describe(
       assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
     });
 
-    it("enforces one combined stdout and stderr output budget", async () => {
+    it("returns successful binary stdout unchanged and discards diagnostics", async () => {
+      const binary = Buffer.from([0, 255, 1, 254, 2, 253]);
+      const result = await runKillableProcess(
+        process.execPath,
+        [
+          "-e",
+          `process.stdout.write(Buffer.from(${JSON.stringify([...binary])})); process.stderr.write("ffmpeg diagnostic");`,
+        ],
+        { timeoutMs: 1_000, maxOutputBytes: 1024 },
+      );
+      assert.deepEqual(result.stdout, binary);
+      assert.deepEqual(Object.keys(result), ["stdout"]);
+    });
+
+    it("enforces one combined stdout and stderr budget without exposing stderr", async () => {
       await assert.rejects(
         runKillableProcess(
           process.execPath,
           [
             "-e",
             'process.stdout.write("123456"); process.stderr.write("abcdef");',
+          ],
+          { timeoutMs: 1_000, maxOutputBytes: 10 },
+        ),
+        /process output limit exceeded/u,
+      );
+    });
+
+    it("enforces the output budget without exposing child stderr", async () => {
+      await assert.rejects(
+        runKillableProcess(
+          process.execPath,
+          [
+            "-e",
+            'process.stdout.write("12345678901"); process.stderr.write("sensitive diagnostic");',
           ],
           { timeoutMs: 1_000, maxOutputBytes: 10 },
         ),

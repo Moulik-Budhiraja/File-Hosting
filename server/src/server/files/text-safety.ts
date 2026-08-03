@@ -30,8 +30,34 @@ export function sanitizePublicText(value: string, maxBytes: number): string {
 }
 
 const ENCODED_OCTET = /%[0-9a-f]{2}/iu;
-const LOCATOR =
-  /(?:[a-z][a-z0-9+.-]{0,31}\s*:|(?:https?:)?\/\/|www\.|(?:localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d+)?|[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,62}\.)+(?:com|net|org|dev|io|app|co|me|ai|xyz|test|invalid|local|md|so|ts)(?:[\/:?#]|\b)|[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}|(?:^|[^\p{L}\p{N}])[/?#][^\s]*|\\\\|[\p{L}\p{N}._-]+[\\/][\p{L}\p{N}._/?#-]+)/iu;
+const ABSOLUTE_LOCATOR =
+  /^(?:[a-z][a-z0-9+.-]{0,31}:\/\/|(?:https?:)?\/\/|www\.)/iu;
+const EMBEDDED_ABSOLUTE_LOCATOR =
+  /(?:[a-z][a-z0-9+.-]{0,31}:\/\/|(?:https?:)?\/\/|www\.)/iu;
+const LOCAL_LOCATOR =
+  /^(?:localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d+)?(?:[\/:?#]|$)/iu;
+const EMAIL_LOCATOR =
+  /^[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}(?:\p{P})?$/iu;
+const PATH_LOCATOR =
+  /^(?:[/?](?:[^#?\s]*[\\/]|[^\s]*[?#])|\\\\|[\p{L}\p{N}._-]+[\\/])[^\s]*$/iu;
+const DOMAIN_SUFFIXES = new Set([
+  "com",
+  "net",
+  "org",
+  "dev",
+  "io",
+  "app",
+  "co",
+  "me",
+  "ai",
+  "xyz",
+  "test",
+  "invalid",
+  "local",
+  "md",
+  "so",
+  "ts",
+]);
 
 const SAFE_FILENAME_EXTENSION =
   /\.(?:md|txt|png|jpe?g|gif|webp|avif|pdf|zip|tar|gz|tgz|mp3|wav|flac|m4a|mp4|mov|webm|csv|json|ya?ml|js|jsx|ts|tsx|py|html|css|docx?|xlsx?|pptx?)$/iu;
@@ -47,11 +73,55 @@ function isSafeFilename(token: string): boolean {
 }
 
 function isLocatorToken(token: string): boolean {
+  if (token.length > 2_048) return false;
+  const hostname = token
+    .replace(/^[([{'"`]+|[)\]}'"`,;!]+$/gu, "")
+    .split(/[/:?#]/u, 1)[0]
+    ?.toLocaleLowerCase();
+  const labels = hostname?.split(".") ?? [];
+  const domain =
+    labels.length > 1 &&
+    labels.every(
+      (label) =>
+        label.length >= 1 &&
+        label.length <= 63 &&
+        /^[\p{L}\p{N}](?:[\p{L}\p{N}-]*[\p{L}\p{N}])?$/u.test(label),
+    ) &&
+    DOMAIN_SUFFIXES.has(labels.at(-1) ?? "");
   return (
     QUERY_ASSIGNMENT.test(token) ||
     SANITIZED_SCHEME.test(token) ||
-    (!isSafeFilename(token) && LOCATOR.test(token))
+    (!isSafeFilename(token) &&
+      (ABSOLUTE_LOCATOR.test(token) ||
+        EMBEDDED_ABSOLUTE_LOCATOR.test(token) ||
+        LOCAL_LOCATOR.test(token) ||
+        EMAIL_LOCATOR.test(token) ||
+        PATH_LOCATOR.test(token) ||
+        domain))
   );
+}
+
+function scrubExcerptToken(token: string): string {
+  const markdown = token.replace(
+    /(\[[^\]\s]{1,256}\])\((?:[a-z][a-z0-9+.-]{0,31}:\/\/|\/\/|www\.)[^)\s]{1,1024}\)/giu,
+    "$1",
+  );
+  const embedded = EMBEDDED_ABSOLUTE_LOCATOR.exec(markdown);
+  if (embedded && embedded.index > 0) return markdown.slice(0, embedded.index);
+  return isLocatorToken(markdown) ? "" : markdown;
+}
+
+function clampForLocatorScan(value: string, maxBytes: number): string {
+  const limit = Math.min(2_048, Math.max(256, maxBytes * 4));
+  let bytes = 0;
+  let output = "";
+  for (const character of value) {
+    const next = Buffer.byteLength(character, "utf8");
+    if (bytes + next > limit) break;
+    output += character;
+    bytes += next;
+  }
+  return output;
 }
 
 function locatorProbe(value: string): {
@@ -77,8 +147,9 @@ function locatorProbe(value: string): {
 }
 
 export function sanitizeExcerptLine(value: string, maxBytes: number): string {
-  const leading = /^(?: {1,8}|\t{1,2})/u.exec(value)?.[0] ?? "";
-  const normalized = value
+  const bounded = clampForLocatorScan(value, maxBytes);
+  const leading = /^(?: {1,32}|\t{1,8})/u.exec(bounded)?.[0] ?? "";
+  const normalized = bounded
     .normalize("NFC")
     .replaceAll("\t", "    ")
     .replace(CONTROL_PATTERN, "")
@@ -90,12 +161,13 @@ export function sanitizeExcerptLine(value: string, maxBytes: number): string {
   if (probe.unsafeEncoding) return "";
   const scrubbed = probe.decoded
     .split(/(\s+)/u)
-    .filter((token) => /^\s+$/u.test(token) || !isLocatorToken(token))
+    .map((token) => (/^\s+$/u.test(token) ? token : scrubExcerptToken(token)))
     .join("")
+    .replace(/ {2,}/gu, " ")
     .trimEnd();
   const indentation = structuralPrefix
     ? ""
-    : leading.replaceAll("\t", "    ").slice(0, 8);
+    : leading.replaceAll("\t", "    ").slice(0, 32);
   const body = scrubbed.trimStart();
   const cleaned = `${structuralPrefix || indentation}${body}`;
   let bytes = 0;
