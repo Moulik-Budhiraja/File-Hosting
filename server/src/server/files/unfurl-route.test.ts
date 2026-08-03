@@ -125,7 +125,7 @@ describe("OG image title layout", () => {
       },
     );
     const { data } = await sharp(output)
-      .extract({ left: 220, top: 490, width: 100, height: 70 })
+      .extract({ left: 0, top: 350, width: 1100, height: 250 })
       .removeAlpha()
       .raw()
       .toBuffer({ resolveWithObject: true });

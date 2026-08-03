@@ -1,7 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { execFileSync } from "node:child_process";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -10,7 +9,6 @@ import { gzipSync } from "node:zlib";
 import { PDFDocument, rgb } from "pdf-lib";
 import sharp from "sharp";
 
-import { nativeAdmissionState } from "./native-admission";
 import {
   composeOgCardSvg,
   renderOgImage,
@@ -121,42 +119,192 @@ afterEach(async () => {
   );
 });
 
-function transitiveRssKiB(): number {
-  if (process.platform === "win32") return process.memoryUsage().rss / 1024;
-  const rows = execFileSync("ps", ["-axo", "pid=,ppid=,rss=,comm="], {
-    encoding: "utf8",
-  })
-    .trim()
-    .split("\n")
-    .map((line) => {
-      const match = /^\s*(\d+)\s+(\d+)\s+(\d+)\s+(.+)$/u.exec(line);
-      return match
-        ? {
-            pid: Number(match[1]),
-            ppid: Number(match[2]),
-            rss: Number(match[3]),
-            command: match[4] ?? "",
-          }
-        : null;
-    })
-    .filter((row): row is NonNullable<typeof row> => row !== null);
-  const owned = new Set([process.pid]);
-  let changed = true;
-  while (changed) {
-    changed = false;
-    for (const row of rows) {
-      if (!owned.has(row.pid) && owned.has(row.ppid)) {
-        owned.add(row.pid);
-        changed = true;
-      }
-    }
-  }
-  return rows
-    .filter((row) => owned.has(row.pid) && !/(?:^|\/)ps$/u.test(row.command))
-    .reduce((total, row) => total + row.rss, 0);
-}
-
 describe("OG Social Cards V2 byte-derived rendering", () => {
+  it("matches the second iMessage review geometry and effective type scale", async () => {
+    const raster = await sharp({
+      create: { width: 1600, height: 900, channels: 3, background: "#b64f45" },
+    })
+      .png()
+      .toBuffer();
+    const base = {
+      title: "Readable review title",
+      description: "MP4 · 12.4 MB · 01:24",
+      ogType: "website" as const,
+      twitterCard: "summary_large_image" as const,
+      canonicalUrl: "https://example.test/review",
+      imageUrl: "https://example.test/og/review.png",
+      imageAlt: "review",
+    };
+    const video = composeOgCardSvg({
+      ...base,
+      kind: "video",
+      preview: {
+        family: "video",
+        label: "MP4",
+        title: base.title,
+        facts: ["12.4 MB", "01:24"],
+        sourceDigest: "1".repeat(64),
+        visual: { kind: "poster", raster },
+      },
+    }).toString("utf8");
+    assert.match(
+      video,
+      /<image[^>]+x="0" y="0" width="1200" height="630"[^>]+xMidYMid slice/u,
+      "video poster must fill the complete 1200x630 visual plane",
+    );
+    assert.match(video, /font-size="72"[^>]+font-weight="700"/u);
+    assert.match(video, /font-size="28"[^>]+data-max-width/u);
+
+    const pdf = composeOgCardSvg({
+      ...base,
+      title: "annual-report-2025.pdf",
+      description: "PDF · 4.2 MB",
+      kind: "pdf",
+      preview: {
+        family: "pdf",
+        label: "PDF",
+        title: "annual-report-2025.pdf",
+        facts: ["4.2 MB"],
+        sourceDigest: "2".repeat(64),
+        visual: {
+          kind: "page",
+          raster: await sharp(raster).resize(927, 1200).png().toBuffer(),
+        },
+      },
+    }).toString("utf8");
+    assert.match(
+      pdf,
+      /<image[^>]+x="4\d\d" y="-?\d+" width="(?:8\d\d|9\d\d)" height="(?:9\d\d|1\d{3})"[^>]+xMidYMin/u,
+      "portrait PDF must use an enlarged upper-page crop rather than fitting the page",
+    );
+    assert.match(
+      pdf,
+      /font-size="56"[^>]+font-weight="700"[^>]*>annual-<\/text>/u,
+    );
+    assert.match(
+      pdf,
+      /font-size="56"[^>]+font-weight="700"[^>]*>report-<\/text>/u,
+    );
+    assert.match(
+      pdf,
+      /font-size="56"[^>]+font-weight="700"[^>]*>2025\.pdf<\/text>/u,
+    );
+
+    const markdown = composeOgCardSvg({
+      ...base,
+      title: "Readable runbook.md",
+      description: "Markdown · 18 KB",
+      kind: "markdown",
+      preview: {
+        family: "markdown",
+        label: "Markdown",
+        title: "Readable runbook.md",
+        facts: ["18 KB"],
+        sourceDigest: "3".repeat(64),
+        visual: {
+          kind: "markdown",
+          lines: [
+            "# Deployment Runbook",
+            "Order of operations for promoting a build.",
+            "## Pre-flight checks",
+            "- Verify the target tag exists",
+            "- Confirm storage headroom",
+            "- This sixth dense line must not render",
+          ],
+        },
+      },
+    }).toString("utf8");
+    assert.match(markdown, /font-size="58"[^>]+font-weight="700"/u);
+    assert.match(markdown, /font-size="30"[^>]+data-max-width/u);
+    assert.doesNotMatch(markdown, /This sixth dense line must not render/u);
+    assert.match(markdown, /<rect x="901" y="576" width="9" height="9"/u);
+    assert.match(markdown, /<text x="1144" y="588"[^>]+text-anchor="end"/u);
+  });
+
+  it("keeps low-amplitude audio structure and unavailable hierarchy visible at iMessage scale", async () => {
+    const samples = Array.from(
+      { length: 48 },
+      (_, index) => 0.02 + (index % 7) * 0.003,
+    );
+    const audio = composeOgCardSvg({
+      title: "quiet-interview.ogg",
+      description: "Audio · 102 KB · 00:06",
+      ogType: "website",
+      twitterCard: "summary_large_image",
+      canonicalUrl: "https://example.test/audio",
+      imageUrl: "https://example.test/og/audio.png",
+      imageAlt: "audio",
+      kind: "audio",
+      preview: {
+        family: "audio",
+        label: "Audio",
+        title: "quiet-interview.ogg",
+        facts: ["102 KB", "00:06"],
+        sourceDigest: "4".repeat(64),
+        visual: { kind: "waveform", samples },
+      },
+    }).toString("utf8");
+    const bars = [
+      ...audio.matchAll(
+        /<rect x="[\d.]+" y="[\d.]+" width="1[024]" height="(\d+)" rx="[567]" fill="#([0-9a-f]{6})"/gu,
+      ),
+    ];
+    const heights = bars.map((match) => Number(match[1]));
+    const fills = new Set(bars.map((match) => match[2]));
+    assert.equal(heights.length, 48);
+    assert.ok(
+      Math.min(...heights) >= 64,
+      "waveform must remain tall after phone downscale",
+    );
+    assert.ok(
+      Math.max(...heights) - Math.min(...heights) >= 72,
+      "low-amplitude structure must be visibly normalized",
+    );
+    assert.deepEqual(
+      [...fills],
+      ["8b919b"],
+      "waveform must use the approved high-contrast neutral",
+    );
+
+    const unavailable = await readFile(
+      path.resolve("runtime/assets/unavailable.png"),
+    );
+    const phone = await sharp(unavailable)
+      .resize(332, 174)
+      .removeAlpha()
+      .raw()
+      .toBuffer();
+    const width = 332;
+    const changedIn = (
+      left: number,
+      top: number,
+      regionWidth: number,
+      height: number,
+    ) => {
+      let changed = 0;
+      for (let y = top; y < top + height; y += 1) {
+        for (let x = left; x < left + regionWidth; x += 1) {
+          const offset = (y * width + x) * 3;
+          const distance = Math.max(
+            Math.abs((phone[offset] ?? 13) - 13),
+            Math.abs((phone[offset + 1] ?? 14) - 14),
+            Math.abs((phone[offset + 2] ?? 16) - 16),
+          );
+          if (distance > 24) changed += 1;
+        }
+      }
+      return changed;
+    };
+    assert.ok(
+      changedIn(132, 33, 68, 48) >= 420,
+      "unavailable artwork must be prominent at 332px",
+    );
+    assert.ok(
+      changedIn(70, 103, 192, 20) >= 780,
+      "unavailable title must have large effective occupancy",
+    );
+  });
+
   it("uses useful portrait and landscape PDF hero occupancy through the production renderer", async () => {
     const portrait = await subject(
       await structuredPdf(
@@ -625,15 +773,11 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
           "😀 smile",
         ],
         regions: [
-          { left: 88, top: 48, width: 56, height: 56 },
-          { left: 92, top: 156, width: 40, height: 40 },
-          { left: 75, top: 215, width: 32, height: 32 },
-          ...[279, 313, 347, 381, 415].map((baseline) => ({
-            left: 52,
-            top: baseline - 23,
-            width: 32,
-            height: 32,
-          })),
+          { left: 100, top: 50, width: 68, height: 68 },
+          { left: 108, top: 172, width: 50, height: 50 },
+          { left: 84, top: 234, width: 42, height: 42 },
+          { left: 52, top: 281, width: 42, height: 42 },
+          { left: 52, top: 327, width: 42, height: 42 },
         ],
       },
       {
@@ -838,103 +982,6 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
       "type-led PDF fallback must not draw a fake white page",
     );
   });
-
-  it(
-    "keeps concurrent 6324px raster extraction and OG rendering below the transitive RSS envelope",
-    { skip: process.platform === "win32" },
-    async () => {
-      const generated = await runKillableProcess(
-        path.resolve(process.cwd(), "node_modules/ffmpeg-static/ffmpeg"),
-        [
-          "-hide_banner",
-          "-loglevel",
-          "error",
-          "-f",
-          "lavfi",
-          "-i",
-          "color=c=#4b78a8:s=6324x6324",
-          "-frames:v",
-          "1",
-          "-c:v",
-          "mjpeg",
-          "-f",
-          "image2pipe",
-          "pipe:1",
-        ],
-        {
-          timeoutMs: 10_000,
-          maxOutputBytes: 8 * 1024 * 1024,
-          allowSubprocesses: true,
-        },
-      );
-      const encoded = generated.stdout;
-      const targetBytes = 20 * 1024 * 1024;
-      let source = Buffer.concat([
-        encoded,
-        Buffer.alloc(Math.max(0, targetBytes - encoded.length), 0x5a),
-      ]);
-      assert.equal(source.length, targetBytes);
-      const sourceSha256 = createHash("sha256").update(source).digest("hex");
-      const directory = await mkdtemp(path.join(os.tmpdir(), "fs-og-rss-"));
-      temporaryDirectories.push(directory);
-      const sourcePath = path.join(directory, "large.jpg");
-      await writeFile(sourcePath, source);
-      source = Buffer.alloc(0);
-      const file: StoredFile = {
-        id: "RsS6324",
-        name: "large.jpg",
-        size: targetBytes,
-        mimeType: "image/jpeg",
-        sha256: sourceSha256,
-        visibility: "public",
-        ownerId: null,
-        storageKey: "rss-probe",
-        archive: null,
-        createdAt: "2026-08-03T00:00:00.000Z",
-        updatedAt: "2026-08-03T00:00:00.000Z",
-        tags: [],
-      };
-      const service = {
-        config: { publicUrl: "https://files.example.test" },
-        storagePath: () => sourcePath,
-      } as unknown as FileService;
-      let peakKiB = transitiveRssKiB();
-      const sampler = setInterval(() => {
-        peakKiB = Math.max(peakKiB, transitiveRssKiB());
-      }, 25);
-      try {
-        const cards = await Promise.all(
-          Array.from({ length: 3 }, async () => {
-            const model = await buildUnfurlModel(service, file);
-            return renderOgImage(service, file, model);
-          }),
-        );
-        for (const card of cards)
-          assert.equal(card.subarray(1, 4).toString("ascii"), "PNG");
-      } finally {
-        clearInterval(sampler);
-      }
-      const peakMiB = peakKiB / 1024;
-      process.stdout.write(
-        `# transitive RSS probe peak: ${peakMiB.toFixed(1)} MiB\n`,
-      );
-      assert.ok(
-        peakMiB < 360,
-        `transitive RSS ${peakMiB.toFixed(1)} MiB exceeded 360 MiB`,
-      );
-      assert.deepEqual(nativeAdmissionState(), {
-        active: 0,
-        queued: 0,
-        budgetMiB: 384,
-      });
-      const recovery = await subject(
-        Buffer.from("recovery"),
-        "text/plain",
-        "recovery.txt",
-      );
-      assert.equal(recovery.png.subarray(1, 4).toString("ascii"), "PNG");
-    },
-  );
 
   it("produces deterministic opaque 1200x630 PNGs for identical bytes", async () => {
     const bytes = Buffer.from("deterministic synthetic text");

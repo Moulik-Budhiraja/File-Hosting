@@ -13,7 +13,7 @@ export const RASTER_WORKER_LIMITS = Object.freeze({
 });
 
 const WORKER_PROGRAM = String.raw`
-import { readFile, stat } from "node:fs/promises";
+import { stat } from "node:fs/promises";
 import { writeSync } from "node:fs";
 import { createRequire } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -30,24 +30,23 @@ const expectedFormats = {
 try {
   const expectedFormat = expectedFormats[mimeType];
   if (!expectedFormat || !filePath) throw new Error("unsupported raster source");
-  const sourceStat = await stat(filePath);
-  if (!sourceStat.isFile() || sourceStat.size > MAX_SOURCE_BYTES) {
+  const sourceStat = await stat(filePath, { bigint: true });
+  if (!sourceStat.isFile() || sourceStat.size > BigInt(MAX_SOURCE_BYTES)) {
     throw new Error("raster source exceeds byte limit");
   }
-  const source = await readFile(filePath);
-  if (source.length !== sourceStat.size || source.length > MAX_SOURCE_BYTES) {
-    throw new Error("raster source changed during read");
-  }
+
   const require = createRequire(import.meta.url);
   const sharpPath = require.resolve("sharp");
   const sharp = (await import(pathToFileURL(sharpPath).href)).default;
+  sharp.cache(false);
+  sharp.concurrency(1);
   const inputOptions = {
     failOn: "error",
     limitInputPixels: MAX_INPUT_PIXELS,
     pages: 1,
     sequentialRead: true,
   };
-  const metadata = await sharp(source, inputOptions)
+  const metadata = await sharp(filePath, inputOptions)
     .timeout({ seconds: 2 })
     .metadata();
   const orientedWidth = metadata.autoOrient?.width ?? metadata.width;
@@ -62,18 +61,34 @@ try {
     throw new Error("raster decoder or geometry mismatch");
   }
   if (mode === "metadata") {
+    const after = await stat(filePath, { bigint: true });
+    if (
+      after.size !== sourceStat.size ||
+      after.mtimeNs !== sourceStat.mtimeNs ||
+      after.ctimeNs !== sourceStat.ctimeNs
+    ) {
+      throw new Error("raster source changed during read");
+    }
     writeSync(1, JSON.stringify({
       width: orientedWidth,
       height: orientedHeight,
     }));
   } else if (mode === "preview") {
-    const thumbnail = await sharp(source, inputOptions)
+    const thumbnail = await sharp(filePath, inputOptions)
       .timeout({ seconds: 2 })
       .rotate()
       .resize(1200, 630, { fit: "cover", position: "centre" })
       .toColorspace("srgb")
       .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
       .toBuffer();
+    const after = await stat(filePath, { bigint: true });
+    if (
+      after.size !== sourceStat.size ||
+      after.mtimeNs !== sourceStat.mtimeNs ||
+      after.ctimeNs !== sourceStat.ctimeNs
+    ) {
+      throw new Error("raster source changed during read");
+    }
     writeSync(1, thumbnail);
   } else {
     throw new Error("unknown raster worker mode");

@@ -320,7 +320,7 @@ const landscapeMutation = await independentRaster(1600, 900, "#5f9de8");
 const portrait = await independentRaster(900, 1600, "#d9a14c", true);
 const portraitMutation = await independentRaster(900, 1600, "#78c68a", true);
 const topBrand = { left: 48, top: 42, width: 230, height: 38 };
-const bottomBrand = { left: 928, top: 548, width: 230, height: 42 };
+const bottomBrand = { left: 900, top: 548, width: 258, height: 42 };
 const cases: AuditCase[] = [
   {
     id: "01-image-landscape",
@@ -364,9 +364,11 @@ const cases: AuditCase[] = [
     expectedKind: "video",
     expectedVisual: "poster",
     brand: topBrand,
-    title: { left: 45, top: 445, width: 920, height: 115 },
-    facts: { left: 45, top: 552, width: 700, height: 42 },
-    primary: { left: 0, top: 0, width: 1200, height: 336 },
+    directReviewRefinement: true,
+    directReviewRegions: ["brand", "title", "facts", "primary"],
+    title: { left: 45, top: 395, width: 920, height: 170 },
+    facts: { left: 45, top: 560, width: 800, height: 50 },
+    primary: { left: 0, top: 0, width: 1200, height: 430 },
     minimumPrimaryVariance: 10,
     minimumPrimaryInk: 0.5,
   },
@@ -398,9 +400,9 @@ const cases: AuditCase[] = [
     directReviewRefinement: true,
     directReviewRegions: ["brand", "title", "facts", "primary"],
     brand: topBrand,
-    title: { left: 45, top: 430, width: 455, height: 135 },
-    facts: { left: 45, top: 562, width: 455, height: 42 },
-    primary: { left: 540, top: 0, width: 660, height: 630 },
+    title: { left: 45, top: 390, width: 345, height: 180 },
+    facts: { left: 45, top: 558, width: 345, height: 52 },
+    primary: { left: 400, top: 0, width: 800, height: 630 },
     minimumPrimaryVariance: 250,
     minimumPrimaryInk: 0.72,
     minimumPrimaryLight: 0.55,
@@ -439,9 +441,9 @@ const cases: AuditCase[] = [
     expectedVisual: "markdown",
     directReviewRegions: ["brand", "primary"],
     brand: bottomBrand,
-    title: { left: 45, top: 495, width: 850, height: 80 },
-    facts: { left: 45, top: 565, width: 720, height: 45 },
-    primary: { left: 45, top: 70, width: 1080, height: 390 },
+    title: { left: 45, top: 475, width: 850, height: 85 },
+    facts: { left: 45, top: 555, width: 720, height: 55 },
+    primary: { left: 45, top: 55, width: 1080, height: 390 },
     minimumPrimaryVariance: 380,
     minimumPrimaryInk: 0.03,
   },
@@ -492,9 +494,11 @@ const cases: AuditCase[] = [
     expectedKind: "audio",
     expectedVisual: "waveform",
     brand: topBrand,
-    title: { left: 45, top: 450, width: 1000, height: 110 },
-    facts: { left: 45, top: 552, width: 800, height: 42 },
-    primary: { left: 45, top: 140, width: 1110, height: 240 },
+    directReviewRefinement: true,
+    directReviewRegions: ["brand", "title", "facts", "primary"],
+    title: { left: 45, top: 420, width: 1000, height: 150 },
+    facts: { left: 45, top: 555, width: 800, height: 55 },
+    primary: { left: 45, top: 125, width: 1110, height: 270 },
     minimumPrimaryVariance: 120,
     minimumPrimaryInk: 0.04,
   },
@@ -537,7 +541,11 @@ const cases: AuditCase[] = [
 // raster gutter through the same occupancy/safe-edge checks and mutation oracle.
 for (const item of cases) {
   item.directReviewRegions = [
-    ...new Set([...(item.directReviewRegions ?? []), "title" as const]),
+    ...new Set([
+      ...(item.directReviewRegions ?? []),
+      "title" as const,
+      "facts" as const,
+    ]),
   ];
 }
 
@@ -622,13 +630,103 @@ const PINNED_REGION_HASHES: Readonly<
   },
 });
 
-// Direct-review regions are admitted by explicit occupancy/placement contracts.
-// Their first passing render becomes only this process's mutation oracle; it does
-// not replace or rewrite the independently frozen Paper references.
-const directReviewMutationBaselines = new Map<
-  string,
-  Partial<Record<DesignRegionName, string>>
->();
+// Pinned after exact read-only Fable review of the second iMessage correction.
+// These values are tracked independently of the current runtime output: no gate
+// code derives or rewrites them.
+const DIRECT_REVIEW_REGION_HASHES: Readonly<
+  Record<string, Readonly<Record<DesignRegionName, string>>>
+> = Object.freeze({
+  "01-image-landscape": {
+    brand: "00402348294fc6b1",
+    title: "cdc5e9e84652dac2",
+    facts: "7565616565090000",
+    primary: "998ece4948488890",
+  },
+  "02-image-portrait": {
+    brand: "0040174c294fc6b1",
+    title: "892c2c8c77343666",
+    facts: "0088669999c5cd8d",
+    primary: "64b418ede0884780",
+  },
+  "03-video-poster": {
+    brand: "0000334c294bc605",
+    title: "649abbb2d2658000",
+    facts: "00005a59591d0210",
+    primary: "0000000000000606",
+  },
+  "04-video-fallback": {
+    brand: "0040174c294fc6b1",
+    title: "cd35f2ead2522922",
+    facts: "000a051b1b1a1b1b",
+    primary: "00a5000001010501",
+  },
+  "05-pdf": {
+    brand: "0040174c294fc6b1",
+    title: "0000140970626e5e",
+    facts: "4a045b63634b1442",
+    primary: "02020202020a0602",
+  },
+  "06-document": {
+    brand: "0000008009a6b5b5",
+    title: "051d5c5e5c0f0204",
+    facts: "0000083634353533",
+    primary: "0149611587431000",
+  },
+  "07-markdown": {
+    brand: "a4b5a76211000000",
+    title: "1205bababab32916",
+    facts: "00010b1a1a190906",
+    primary: "010c0c0e2e636c0e",
+  },
+  "08-code": {
+    brand: "8009a6b5b7a25800",
+    title: "1e1b082c2c2d0e00",
+    facts: "0000001401153435",
+    primary: "0000030c3c1a3c32",
+  },
+  "09-audio-artwork": {
+    brand: "0040174c294fc6b1",
+    title: "0d521a1e365a5a1a",
+    facts: "00080659595b5919",
+    primary: "18181818587c703b",
+  },
+  "10-audio-waveform": {
+    brand: "0040174c294fc6b1",
+    title: "4c3adcc5f5294600",
+    facts: "0008353531351c01",
+    primary: "b6b6b63236b6b6b6",
+  },
+  "11-archive": {
+    brand: "0040174c294fc6b1",
+    title: "46ad9da6d3738c40",
+    facts: "0004020d0d0d0d04",
+    primary: "0003030000060600",
+  },
+  "12-binary": {
+    brand: "0040174c294fc6b1",
+    title: "25152c6a6a213518",
+    facts: "05050f0d05030000",
+    primary: "00001a1818031c1d",
+  },
+});
+
+// Exact bytes approved after the second iMessage review; independent of the
+// runtime asset read below, so unrelated replacement art cannot self-authorize.
+const PINNED_DIRECT_UNAVAILABLE_SHA256 =
+  "70c8fd46276607e0d848cdaff49d90994c9b2bbca7114450dbb13180585d9f48";
+
+function phoneRegion(region: Region): Region {
+  const scaleX = 332 / 1200;
+  const scaleY = 174 / 630;
+  const left = Math.max(0, Math.floor(region.left * scaleX));
+  const top = Math.max(0, Math.floor(region.top * scaleY));
+  const right = Math.min(332, Math.ceil((region.left + region.width) * scaleX));
+  const bottom = Math.min(
+    174,
+    Math.ceil((region.top + region.height) * scaleY),
+  );
+  return { left, top, width: right - left, height: bottom - top };
+}
 
 async function rawRegion(image: Buffer, region: Region): Promise<Buffer> {
   assertBounds(region);
@@ -736,7 +834,8 @@ async function evaluateCase(
   ) as Record<DesignRegionName, string>;
   const expectedHashes = PINNED_REGION_HASHES[item.id];
   assert(expectedHashes, `${item.id}: pinned regional references missing`);
-  const directBaseline = directReviewMutationBaselines.get(item.id);
+  const directBaseline = DIRECT_REVIEW_REGION_HASHES[item.id];
+  assert(directBaseline, `${item.id}: pinned direct-review regions missing`);
   const structureDistances = Object.fromEntries(
     (["brand", "title", "facts", "primary"] as const).map((name) => [
       name,
@@ -818,8 +917,8 @@ async function evaluateCase(
     ]);
   if (
     item.directReviewRefinement &&
-    (titleInkCentroidY > 90 ||
-      factsInkCentroidY > 24 ||
+    (titleInkCentroidY > Math.max(90, item.title.height - 28) ||
+      factsInkCentroidY > Math.max(24, item.facts.height - 12) ||
       titleLeftStats.inkFraction < 0.003 ||
       factsLeftStats.inkFraction < 0.003)
   )
@@ -935,6 +1034,46 @@ async function colorMutant(image: Buffer, region: Region): Promise<Buffer> {
   return sharp(image).extract(region).negate({ alpha: false }).png().toBuffer();
 }
 
+async function scaledRegion(
+  image: Buffer,
+  region: Region,
+  scale: number,
+): Promise<Buffer> {
+  const width = Math.max(1, Math.round(region.width * scale));
+  const height = Math.max(1, Math.round(region.height * scale));
+  const source = await sharp(image)
+    .extract(region)
+    .resize(width, height)
+    .png()
+    .toBuffer();
+  return sharp({
+    create: {
+      width: region.width,
+      height: region.height,
+      channels: 3,
+      background: "#0d0e10",
+    },
+  })
+    .composite([
+      {
+        input: source,
+        left: Math.floor((region.width - width) / 2),
+        top: Math.floor((region.height - height) / 2),
+      },
+    ])
+    .png()
+    .toBuffer();
+}
+
+async function darkenedRegion(image: Buffer, region: Region): Promise<Buffer> {
+  return sharp(image)
+    .extract(region)
+    .linear(0.18, 4)
+    .removeAlpha()
+    .png()
+    .toBuffer();
+}
+
 async function replaceRegion(image: Buffer, region: Region): Promise<Buffer> {
   return sharp(image)
     .composite([
@@ -1032,18 +1171,25 @@ try {
       [],
       `${item.id}: ${result.reasons.join("; ")}`,
     );
-    if (item.directReviewRegions) {
-      directReviewMutationBaselines.set(
-        item.id,
-        Object.fromEntries(
-          item.directReviewRegions.map((name) => [
-            name,
-            result.regionHashes[name],
-          ]),
-        ),
-      );
-    }
-
+    const phoneCard = await sharp(produced.card)
+      .resize(332, 174)
+      .png()
+      .toBuffer();
+    const phoneTitle = await stats(phoneCard, phoneRegion(item.title));
+    const phoneFacts = await stats(phoneCard, phoneRegion(item.facts));
+    const phonePrimary = await stats(phoneCard, phoneRegion(item.primary));
+    assert(
+      phoneTitle.edgeFraction >= 0.01 && phoneTitle.lightFraction >= 0.01,
+      `${item.id}: title must retain effective light-pixel height/occupancy at 332x174`,
+    );
+    assert(
+      phoneFacts.edgeFraction >= 0.01 && phoneFacts.inkFraction >= 0.012,
+      `${item.id}: key type/metadata must retain effective occupancy at 332x174`,
+    );
+    assert(
+      phonePrimary.edgeFraction >= 0.004 && phonePrimary.inkFraction >= 0.015,
+      `${item.id}: family content must retain meaningful occupancy at 332x174`,
+    );
     const blankResult = await evaluateCase(item, blank);
     assert(
       blankResult.reasons.length > 0,
@@ -1127,6 +1273,72 @@ try {
       adversarialResults[name] = evaluated.reasons;
     }
 
+    const reviewMutants: Record<string, string[]> = {};
+    let tinyType: Buffer<ArrayBufferLike> = produced.card;
+    for (const region of [item.title, item.facts]) {
+      tinyType = await compositeRegion(
+        tinyType,
+        region,
+        await scaledRegion(produced.card, region, 0.55),
+      );
+    }
+    const tinyTypeResult = await evaluateCase(item, tinyType);
+    assert(
+      tinyTypeResult.reasons.length > 0,
+      `${item.id}: tiny global type mutant must fail`,
+    );
+    reviewMutants.tinyGlobalType = tinyTypeResult.reasons;
+
+    const familyMutantName =
+      item.id === "03-video-poster"
+        ? "insetVideo"
+        : item.id === "05-pdf"
+          ? "fullTinyPdfPage"
+          : item.id === "07-markdown"
+            ? "denseTinyMarkdown"
+            : item.id === "10-audio-waveform"
+              ? "missingWaveform"
+              : undefined;
+    if (familyMutantName) {
+      const replacement =
+        familyMutantName === "missingWaveform"
+          ? await sharp({
+              create: {
+                width: item.primary.width,
+                height: item.primary.height,
+                channels: 3,
+                background: "#0d0e10",
+              },
+            })
+              .png()
+              .toBuffer()
+          : await scaledRegion(produced.card, item.primary, 0.55);
+      const familyResult = await evaluateCase(
+        item,
+        await compositeRegion(produced.card, item.primary, replacement),
+      );
+      assert(
+        familyResult.reasons.length > 0,
+        `${item.id}: ${familyMutantName} mutant must fail`,
+      );
+      reviewMutants[familyMutantName] = familyResult.reasons;
+    }
+    if (item.id === "10-audio-waveform") {
+      const lowContrastResult = await evaluateCase(
+        item,
+        await compositeRegion(
+          produced.card,
+          item.primary,
+          await darkenedRegion(produced.card, item.primary),
+        ),
+      );
+      assert(
+        lowContrastResult.reasons.length > 0,
+        "10-audio-waveform: low-contrast waveform mutant must fail",
+      );
+      reviewMutants.lowContrastWaveform = lowContrastResult.reasons;
+    }
+
     const mutation = await productionCard(
       item.name,
       item.mimeType,
@@ -1172,8 +1384,22 @@ try {
         minimumTitleLightFraction: 0.012,
         minimumTitleEdgeFraction: 0.006,
         minimumFactsInkFraction: 0.008,
+        phoneSize: "332x174",
+        minimumPhoneTitleEdgeFraction: 0.01,
+        minimumPhoneTitleLightFraction: 0.01,
+        minimumPhoneFactsEdgeFraction: 0.01,
+        minimumPhonePrimaryEdgeFraction: 0.004,
       },
-      observed: { ...result, reasons: undefined, brandRegionalRmse: brandRmse },
+      observed: {
+        ...result,
+        reasons: undefined,
+        brandRegionalRmse: brandRmse,
+        phone332x174: {
+          title: phoneTitle,
+          facts: phoneFacts,
+          primary: phonePrimary,
+        },
+      },
       blankMutant: { rejected: true, reasons: blankResult.reasons },
       primaryRemovalMutant: { rejected: true, reasons: primaryRemoval.reasons },
       titleRemovalMutant: { rejected: true, reasons: titleRemoval.reasons },
@@ -1181,6 +1407,12 @@ try {
       factsRemovalMutant: { rejected: true, reasons: factsRemoval.reasons },
       adversarialMutants: Object.fromEntries(
         Object.entries(adversarialResults).map(([name, reasons]) => [
+          name,
+          { rejected: true, reasons },
+        ]),
+      ),
+      directReviewMutants: Object.fromEntries(
+        Object.entries(reviewMutants).map(([name, reasons]) => [
           name,
           { rejected: true, reasons },
         ]),
@@ -1209,9 +1441,58 @@ try {
     unavailable,
     await readFile(path.resolve("runtime/assets/unavailable.png")),
   );
-  assert.deepEqual(unavailable, frozenUnavailable);
+  assert.equal(
+    sha256(unavailable),
+    PINNED_DIRECT_UNAVAILABLE_SHA256,
+    "unavailable output must match the independently approved direct-review bytes",
+  );
+  assert.notDeepEqual(
+    unavailable,
+    frozenUnavailable,
+    "direct iMessage review requires the enlarged unavailable composition to supersede the frozen frame",
+  );
   const unavailableBlank = await sharp(blank).png().toBuffer();
   assert.notDeepEqual(unavailable, unavailableBlank);
+  const unavailableRegions = {
+    artwork: { left: 470, top: 70, width: 260, height: 240 },
+    brand: { left: 430, top: 300, width: 340, height: 65 },
+    title: { left: 360, top: 360, width: 480, height: 115 },
+  } as const;
+  const evaluateUnavailable = async (image: Buffer) => {
+    const [artwork, brand, title] = await Promise.all([
+      stats(image, unavailableRegions.artwork),
+      stats(image, unavailableRegions.brand),
+      stats(image, unavailableRegions.title),
+    ]);
+    const reasons: string[] = [];
+    if (artwork.inkFraction < 0.035 || artwork.edgeFraction < 0.006)
+      reasons.push("unavailable artwork occupancy too small");
+    if (brand.accentFraction < 0.0008 || brand.inkFraction < 0.01)
+      reasons.push("unavailable brand hierarchy missing");
+    if (title.lightFraction < 0.035 || title.edgeFraction < 0.01)
+      reasons.push("unavailable title occupancy too small");
+    return { reasons, artwork, brand, title };
+  };
+  const unavailableResult = await evaluateUnavailable(unavailable);
+  assert.deepEqual(unavailableResult.reasons, []);
+  const tinyUnavailable = await sharp({
+    create: { width: 1200, height: 630, channels: 3, background: "#0d0e10" },
+  })
+    .composite([
+      {
+        input: await sharp(unavailable).resize(600, 315).png().toBuffer(),
+        left: 300,
+        top: 158,
+      },
+    ])
+    .removeAlpha()
+    .png()
+    .toBuffer();
+  const tinyUnavailableResult = await evaluateUnavailable(tinyUnavailable);
+  assert(
+    tinyUnavailableResult.reasons.length > 0,
+    "tiny unavailable icon/title mutant must fail regional occupancy",
+  );
   await writeFile(
     path.join(outputRoot, "generated-13-unavailable.png"),
     unavailable,
@@ -1219,8 +1500,17 @@ try {
   generatedByCase.set("13-unavailable", unavailable);
   metrics["13-unavailable"] = {
     reference: "raw-13-unavailable.png",
-    exactRuntimeAndFrozenBytes: true,
+    directReviewRefinement:
+      "enlarged artwork/title supersedes frozen visual bytes",
+    exactRuntimeBytes: true,
+    independentlyPinnedDirectReviewDigest: PINNED_DIRECT_UNAVAILABLE_SHA256,
     sha256: sha256(unavailable),
+    regions: unavailableRegions,
+    observed: unavailableResult,
+    tinyMutant: {
+      rejected: true,
+      reasons: tinyUnavailableResult.reasons,
+    },
     blankMutant: { rejected: true, reason: "exact byte equality required" },
   };
 
@@ -1238,7 +1528,7 @@ try {
       name: "研究データ📡-résumé-Δ-العربية.md",
       mime: "text/markdown",
       bytes: Buffer.from(
-        "# 観測ログ — العربية\n\n🎉\n❤️\n🇯🇵\n👨‍👩‍👧‍👦\n📡\n日本語\nالعربية\ne\u0301\n",
+        "# 観測ログ — العربية\n日本語\nالعربية\ne\u0301\n👨‍👩‍👧‍👦📡\n",
       ),
       base: "07-markdown",
     },
@@ -1285,7 +1575,7 @@ try {
       stress.id === "stress-02-unicode"
         ? {
             ...baseConfig,
-            brand: { left: 928, top: 576, width: 230, height: 42 },
+            brand: { left: 900, top: 576, width: 258, height: 42 },
             minimumPrimaryInk: 0.008,
           }
         : stress.id === "stress-04-extreme-landscape"
@@ -1299,31 +1589,26 @@ try {
     );
     let unicodeRegionalProof: unknown;
     if (stress.id === "stress-02-unicode") {
-      const emojiRegions: Region[] = [163, 197, 231, 265, 299].map(
-        (baseline) => ({
-          left: 52,
-          top: baseline - 22,
-          width: 32,
-          height: 30,
-        }),
-      );
+      const emojiRegions: Region[] = [
+        { left: 52, top: 291, width: 125, height: 40 },
+      ];
       const emojiColorPixels = await Promise.all(
         emojiRegions.map((region) => colorfulPixels(produced.card, region)),
       );
       assert(
         emojiColorPixels.every((count) => count > 12),
-        "Unicode stress party, heart, flag, family ZWJ, and satellite regions require bundled color artwork",
+        "Unicode stress family ZWJ and satellite region requires bundled color artwork",
       );
       const scriptRegions: Region[] = [
-        { left: 52, top: 309, width: 150, height: 32 },
-        { left: 52, top: 343, width: 190, height: 32 },
-        { left: 52, top: 377, width: 90, height: 32 },
+        { left: 52, top: 153, width: 170, height: 40 },
+        { left: 52, top: 199, width: 210, height: 40 },
+        { left: 52, top: 245, width: 95, height: 40 },
       ];
       const replacement = await productionCard(
         stress.name,
         stress.mime,
         Buffer.from(
-          "# replacement heading\n\nxx\nxx\nxx\nxx\nxx\nreplacement\nreplacement\nreplacement\n",
+          "# replacement heading\nreplacement\nreplacement\nreplacement\nreplacement\n",
         ),
       );
       const scriptDiffersFromReplacement = await Promise.all(
@@ -1383,9 +1668,11 @@ try {
     classification:
       "exact production unavailable output paired with frozen light/dark review overlay",
     productionOutput: true,
-    safeArea: "exact frozen 1200x630 unavailable card",
+    safeArea:
+      "enlarged direct-review unavailable hierarchy inside fixed 1200x630 safe regions",
     noTofuOverlapClipping: true,
-    exactFrozenBytes: true,
+    exactRuntimeBytes: true,
+    directReviewRefinement: true,
     sha256: sha256(unavailable),
   };
   assert.equal(
@@ -1619,7 +1906,8 @@ try {
     },
     determinism: { productionCasesByteIdenticalOnRepeat: cases.length },
     unavailable: {
-      exactFrozenAndRuntimeByteEquality: true,
+      exactRuntimeByteEquality: true,
+      directReviewRefinementSupersedesFrozenPixels: true,
       sha256: sha256(unavailable),
     },
     actualMessagesProof: false,

@@ -323,15 +323,21 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
     ? Number(dimensions[2]) > Number(dimensions[1])
     : false;
   const brand = (x = 56, y = 64, anchor = "start") =>
-    `<rect x="${anchor === "end" ? x - 196 : x}" y="${y - 12}" width="9" height="9" rx="2" fill="#e3a44f"/><text x="${anchor === "end" ? x : x + 20}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="20" font-weight="500" letter-spacing="2"${anchor === "end" ? ' text-anchor="end"' : ""}>files.moulik.dev</text>`;
-  const titleText = (x: number, y: number, size = 52, width = 34) =>
-    layoutOgTitle(safeTitle, width, 2)
+    `<rect x="${anchor === "end" ? x - 243 : x}" y="${y - 12}" width="9" height="9" rx="2" fill="#e3a44f"/><text x="${anchor === "end" ? x : x + 20}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="20" font-weight="500" letter-spacing="2"${anchor === "end" ? ' text-anchor="end"' : ""}>files.moulik.dev</text>`;
+  const titleText = (
+    x: number,
+    y: number,
+    size = 64,
+    width = 34,
+    maxLines = 2,
+  ) =>
+    layoutOgTitle(safeTitle, width, maxLines)
       .map((line, index) =>
         titleLineMarkup(line, x, y + index * (size + 5), size),
       )
       .join("");
-  const facts = (x = 56, y = 580) =>
-    textLineMarkup(safeDescription, x, y, 21, {
+  const facts = (x = 56, y = 590) =>
+    textLineMarkup(safeDescription, x, y, 28, {
       fill: "#9fa3a9",
       family: MONO,
       letterSpacing: 1.5,
@@ -347,7 +353,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       ? `${brand()}<image href="${raster}" x="590" y="0" width="440" height="630" preserveAspectRatio="xMidYMid slice"/>${titleText(56, portraitTitleLines.length > 1 ? 462 : 522, 58, 20)}${facts(56, 575)}`
       : `<image href="${raster}" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/><rect width="1200" height="630" fill="url(#shade)"/>${brand()}${titleText(56, twoLineTitle ? 480 : 526, 58, 30)}${facts()}`;
   } else if (model.kind === "video" && raster) {
-    body = `<image href="${raster}" x="0" y="0" width="1200" height="336" preserveAspectRatio="xMidYMid slice"/><rect x="0" y="336" width="1200" height="294" fill="#0d0e10"/>${brand()}${titleText(56, twoLineTitle ? 468 : 528, 58, 34)}${facts(56, 575)}${play(1112, 542)}`;
+    body = `<image href="${raster}" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/><rect width="1200" height="630" fill="url(#videoShade)"/>${brand()}${titleText(56, twoLineTitle ? 440 : 520, 72, 28)}${facts(56, 596)}${play(1104, 528)}`;
   } else if (model.kind === "video") {
     const timeline = `<line x1="56" y1="320" x2="1143" y2="320" stroke="#30343a" stroke-width="2"/><path d="M56 310v20M193 314v12M329 310v20M465 314v12M601 310v20M737 314v12M873 310v20M1009 314v12M1143 310v20" stroke="#44484f" stroke-width="2"/>`;
     body = `${brand()}${play(84, 224)}${timeline}${titleText(56, twoLineTitle ? 466 : 526, 60, 40)}${facts(56, 575)}`;
@@ -359,8 +365,8 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       pageDimensions.width / pageDimensions.height >= 1.2;
     const page = raster
       ? landscapePage
-        ? `<image href="${raster}" x="0" y="0" width="1200" height="390" preserveAspectRatio="xMidYMid slice"/>`
-        : `<image href="${raster}" x="540" y="0" width="660" height="630" preserveAspectRatio="xMidYMin slice"/>`
+        ? `<image href="${raster}" x="0" y="-170" width="1200" height="760" preserveAspectRatio="xMidYMin slice"/>`
+        : `<image href="${raster}" x="400" y="-12" width="800" height="1035" preserveAspectRatio="xMidYMin meet"/>`
       : `<rect x="540" y="0" width="660" height="630" fill="#f6f5f1"/>${contentLines
           .slice(0, 6)
           .map((line, index) =>
@@ -378,10 +384,14 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
             ),
           )
           .join("")}`;
-    const pdfTitleLines = layoutOgTitle(safeTitle, landscapePage ? 34 : 19, 2);
+    const pdfTitleLines = layoutOgTitle(
+      safeTitle,
+      landscapePage ? 27 : 12,
+      landscapePage ? 2 : 3,
+    );
     body = landscapePage
-      ? `${page}<rect x="0" y="360" width="1200" height="270" fill="url(#pdfShade)"/>${brand()}${titleText(56, pdfTitleLines.length > 1 ? 486 : 535, 52, 34)}${facts(56, 584)}`
-      : `${brand()}${page}<rect x="500" y="0" width="90" height="630" fill="url(#pageFade)"/>${titleText(56, pdfTitleLines.length > 1 ? 455 : 518, 52, 19)}${facts(56, 578)}`;
+      ? `${page}<rect x="0" y="330" width="1200" height="300" fill="url(#pdfShade)"/>${brand()}${titleText(56, pdfTitleLines.length > 1 ? 442 : 526, 68, 27)}${facts(56, 596)}`
+      : `${brand()}${page}<rect x="350" y="0" width="110" height="630" fill="url(#pageFade)"/>${titleText(56, pdfTitleLines.length > 2 ? 335 : pdfTitleLines.length > 1 ? 415 : 510, 56, 12, 3)}${facts(56, 594)}`;
   } else if (model.kind === "document" && visual?.kind !== "binary") {
     const documentHeading = layoutOgTitle(contentLines[0] ?? safeTitle, 26, 2)
       .map((line, index) =>
@@ -428,31 +438,33 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       .join("");
     body = `${brand()}<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${pageLines}${titleText(56, titleLines.length > 1 ? 430 : 480, 48, 20)}${facts(56, 576)}`;
   } else if (model.kind === "markdown") {
-    let y = 102;
+    let y = 104;
     const excerpt = contentLines
+      .slice(0, 5)
       .map((line) => {
         let markup: string;
         if (line.startsWith("# ")) {
-          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="30">#</text>${textLineMarkup(truncateDisplayText(line.slice(2), 56), 92, y, 45, { fill: "#f2f1ec", family: SANS, weight: 700 })}`;
-          y += 61;
+          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${MONO}" font-size="36">#</text>${textLineMarkup(truncateDisplayText(line.slice(2), 38), 104, y, 58, { fill: "#f2f1ec", family: SANS, weight: 700, maxWidth: 1038 })}`;
+          y += 78;
         } else if (line.startsWith("## ")) {
-          y += 33;
-          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="20">##</text>${textLineMarkup(truncateDisplayText(line.slice(3), 61), 96, y, 30, { fill: "#f2f1ec", family: SANS, weight: 700 })}`;
-          y += 52;
+          y += 26;
+          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${MONO}" font-size="26">##</text>${textLineMarkup(truncateDisplayText(line.slice(3), 48), 110, y, 40, { fill: "#f2f1ec", family: SANS, weight: 700, maxWidth: 1032 })}`;
+          y += 58;
         } else if (/^(?:•|-|\*)\s/u.test(line)) {
-          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${SANS}" font-size="22">•</text>${textLineMarkup(truncateDisplayText(line.replace(/^(?:•|-|\*)\s+/u, ""), 92), 79, y, 22, { fill: "#a7aaaf", family: SANS })}`;
-          y += 38;
+          markup = `<text x="56" y="${y}" fill="#8d929b" font-family="${SANS}" font-size="30">•</text>${textLineMarkup(truncateDisplayText(line.replace(/^(?:•|-|\*)\s+/u, ""), 68), 88, y, 30, { fill: "#b8bbc1", family: SANS, maxWidth: 1054 })}`;
+          y += 48;
         } else {
-          markup = textLineMarkup(truncateDisplayText(line, 100), 56, y, 22, {
-            fill: "#a7aaaf",
+          markup = textLineMarkup(truncateDisplayText(line, 72), 56, y, 30, {
+            fill: "#b8bbc1",
             family: SANS,
+            maxWidth: 1088,
           });
-          y += 34;
+          y += 46;
         }
         return markup;
       })
       .join("");
-    body = `${excerpt}<line x1="56" y1="482" x2="1144" y2="482" stroke="#26292e"/>${titleText(56, twoLineTitle ? 518 : 540, 38, 42)}${facts(56, twoLineTitle ? 606 : 578)}${brand(1144, twoLineTitle ? 604 : 576, "end")}`;
+    body = `${excerpt}<line x1="56" y1="456" x2="1144" y2="456" stroke="#30343a" stroke-width="2"/>${titleText(56, 530, 52, 34, 1)}${facts(56, 590)}${brand(1144, 588, "end")}`;
   } else if (model.kind === "code") {
     const excerpt = contentLines
       .map((line, index) => {
@@ -474,15 +486,21 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   } else if (visual?.kind === "waveform") {
     const duration =
       model.preview?.facts.find((fact) => fact.includes(":")) ?? "";
-    const bars = visual.samples
+    const sourceSamples = visual.samples.slice(0, 48);
+    const minimumSample = Math.min(...sourceSamples);
+    const maximumSample = Math.max(...sourceSamples);
+    const sampleRange = maximumSample - minimumSample;
+    const bars = sourceSamples
       .slice(0, 48)
       .map((sample, index) => {
-        const height = Math.max(28, Math.round(sample * 190));
+        const normalized =
+          sampleRange > 0.0001 ? (sample - minimumSample) / sampleRange : 0;
+        const height = 64 + Math.round(normalized * 176);
         const x = 56 + index * (1088 / Math.max(visual.samples.length - 1, 1));
-        return `<rect x="${x.toFixed(1)}" y="${260 - height / 2}" width="10" height="${height}" rx="5" fill="#4a4e55"/>`;
+        return `<rect x="${x.toFixed(1)}" y="${260 - height / 2}" width="12" height="${height}" rx="6" fill="#8b919b"/>`;
       })
       .join("");
-    body = `${brand()}<text x="1144" y="64" fill="#c9c4b8" font-family="${MONO}" font-size="25" text-anchor="end" letter-spacing="2">${escapeXml(duration)}</text>${bars}${titleText(56, twoLineTitle ? 478 : 529, 48, 38)}${facts()}`;
+    body = `${brand()}<text x="1144" y="68" fill="#d8d3c8" font-family="${MONO}" font-size="30" text-anchor="end" letter-spacing="2">${escapeXml(duration)}</text>${bars}${titleText(56, twoLineTitle ? 454 : 526, 64, 30)}${facts()}`;
   } else if (model.kind === "audio" && raster) {
     const duration =
       model.preview?.facts.find((fact) => fact.includes(":")) ?? "";
@@ -536,7 +554,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   }
 
   return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#090c0f" stop-opacity="0.04"/><stop offset="0.54" stop-color="#090c0f" stop-opacity="0.02"/><stop offset="1" stop-color="#090c0f" stop-opacity="0.96"/></linearGradient><linearGradient id="pdfShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d0e10" stop-opacity="0"/><stop offset="0.28" stop-color="#0d0e10" stop-opacity="0.82"/><stop offset="1" stop-color="#0d0e10" stop-opacity="1"/></linearGradient><linearGradient id="pageFade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0d0e10" stop-opacity="1"/><stop offset="1" stop-color="#0d0e10" stop-opacity="0"/></linearGradient></defs><rect width="1200" height="630" fill="#0d0e10"/>${body}</svg>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#090c0f" stop-opacity="0.04"/><stop offset="0.54" stop-color="#090c0f" stop-opacity="0.02"/><stop offset="1" stop-color="#090c0f" stop-opacity="0.96"/></linearGradient><linearGradient id="videoShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a0d" stop-opacity="0.08"/><stop offset="0.46" stop-color="#080a0d" stop-opacity="0.04"/><stop offset="0.72" stop-color="#080a0d" stop-opacity="0.72"/><stop offset="1" stop-color="#080a0d" stop-opacity="0.96"/></linearGradient><linearGradient id="pdfShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d0e10" stop-opacity="0"/><stop offset="0.28" stop-color="#0d0e10" stop-opacity="0.82"/><stop offset="1" stop-color="#0d0e10" stop-opacity="1"/></linearGradient><linearGradient id="pageFade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0d0e10" stop-opacity="1"/><stop offset="1" stop-color="#0d0e10" stop-opacity="0"/></linearGradient></defs><rect width="1200" height="630" fill="#0d0e10"/>${body}</svg>`,
   );
 }
 

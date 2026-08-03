@@ -258,20 +258,22 @@ async function withVerifiedSnapshot<T>(
   input: RendererInput,
   operation: (snapshotPath: string) => Promise<T>,
 ): Promise<T | null> {
-  const source = await readFullVerifiedSource(input);
-  if (!source) return null;
-  const directory = await mkdtemp(
-    path.join(os.tmpdir(), "file-hosting-preview-"),
-  );
-  const snapshotPath = path.join(directory, "source");
-  try {
-    await writeFile(snapshotPath, source, { flag: "wx", mode: 0o600 });
-    const result = await operation(snapshotPath);
-    await readVerifiedSource(input);
-    return result;
-  } finally {
-    await rm(directory, { recursive: true, force: true });
-  }
+  return withNativeAdmission(remainingExtractionMs(input), async () => {
+    const source = await readFullVerifiedSource(input);
+    if (!source) return null;
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "file-hosting-preview-"),
+    );
+    const snapshotPath = path.join(directory, "source");
+    try {
+      await writeFile(snapshotPath, source, { flag: "wx", mode: 0o600 });
+      const result = await operation(snapshotPath);
+      await readVerifiedSource(input);
+      return result;
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
 }
 
 async function verifiedProbe(
