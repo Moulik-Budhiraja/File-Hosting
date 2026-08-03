@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
 import { createServer } from "node:net";
-import { cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { access, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
@@ -140,6 +140,19 @@ if (mode === "standalone") {
     path.join(serverRoot, ".next", "static"),
     path.join(appRoot, ".next", "static"),
     { recursive: true },
+  );
+  for (const required of [
+    "node_modules/@twemoji/svg/license",
+    "node_modules/@twemoji/svg/readme.md",
+    "node_modules/@napi-rs/canvas",
+    "node_modules/sharp",
+  ]) {
+    await access(path.join(appRoot, required));
+  }
+  await assert.rejects(
+    access(path.join(appRoot, "node_modules", "typescript")),
+    { code: "ENOENT" },
+    "standalone must exclude the TypeScript build toolchain",
   );
 }
 await rm(dataRoot, { recursive: true, force: true });

@@ -39,7 +39,7 @@ const LOCAL_LOCATOR =
 const EMAIL_LOCATOR =
   /^[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}(?:\p{P})?$/iu;
 const PATH_LOCATOR =
-  /^(?:[/?](?:[^#?\s]*[\\/]|[^\s]*[?#])|\\\\|[\p{L}\p{N}._-]+[\\/])[^\s]*$/iu;
+  /^(?:\/(?:[^#?\s]*[\\/]|[^\s]*[?#]|[^\s]+)|\\\\[^\s]+|[a-z]:[\\/][^\s]+|[A-Za-z0-9._-]+[\\/][^#?\s]*)$/iu;
 const DOMAIN_SUFFIXES = new Set([
   "com",
   "net",
@@ -54,16 +54,14 @@ const DOMAIN_SUFFIXES = new Set([
   "test",
   "invalid",
   "local",
-  "md",
-  "so",
-  "ts",
 ]);
 
 const SAFE_FILENAME_EXTENSION =
   /\.(?:md|txt|png|jpe?g|gif|webp|avif|pdf|zip|tar|gz|tgz|mp3|wav|flac|m4a|mp4|mov|webm|csv|json|ya?ml|js|jsx|ts|tsx|py|html|css|docx?|xlsx?|pptx?)$/iu;
 const UNSAFE_FILENAME_CHARACTER = /[\\/?#&=:]|[\p{Cc}\p{Cs}]/u;
 const QUERY_ASSIGNMENT = /\?[^\s]*[=&][^\s]*/u;
-const SANITIZED_SCHEME = /^(?:https?|ftp|file)[-_]/iu;
+const DEFANGED_SCHEME_LOCATOR =
+  /^(?:https?|ftp|file)[-_][^\s.]+(?:\.[^\s.]+){2,}(?:[/?#][^\s]*)?$/iu;
 
 function isSafeFilename(token: string): boolean {
   return (
@@ -89,10 +87,10 @@ function isLocatorToken(token: string): boolean {
     ) &&
     DOMAIN_SUFFIXES.has(labels.at(-1) ?? "");
   return (
-    QUERY_ASSIGNMENT.test(token) ||
-    SANITIZED_SCHEME.test(token) ||
+    DEFANGED_SCHEME_LOCATOR.test(token) ||
     (!isSafeFilename(token) &&
-      (ABSOLUTE_LOCATOR.test(token) ||
+      (QUERY_ASSIGNMENT.test(token) ||
+        ABSOLUTE_LOCATOR.test(token) ||
         EMBEDDED_ABSOLUTE_LOCATOR.test(token) ||
         LOCAL_LOCATOR.test(token) ||
         EMAIL_LOCATOR.test(token) ||

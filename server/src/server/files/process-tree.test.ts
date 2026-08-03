@@ -63,24 +63,46 @@ describe(
       );
 
       const rssBefore = process.memoryUsage().rss;
-      for (let attempt = 0; attempt < 5; attempt += 1) {
-        const run = renderSvgInWorker(Buffer.from("<svg/>"), {
-          workerPath: launcherScript,
-          workerArguments: [pidFile, childScript],
-          timeoutMs: 150,
-          allowSubprocesses: true,
-        });
-        const pids = await waitForPids(pidFile);
-        await assert.rejects(run, ProcessDeadlineError);
-        assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
-        for (const pid of pids) {
-          assert.equal(
-            processExists(pid),
-            false,
-            `pid ${pid} survived timeout`,
-          );
+      const unhandled: unknown[] = [];
+      const recordUnhandled = (reason: unknown) => unhandled.push(reason);
+      process.on("unhandledRejection", recordUnhandled);
+      try {
+        for (let attempt = 0; attempt < 12; attempt += 1) {
+          let pids: number[] = [];
+          const run = renderSvgInWorker(Buffer.from("<svg/>"), {
+            workerPath: launcherScript,
+            workerArguments: [pidFile, childScript],
+            timeoutMs: 150,
+            allowSubprocesses: true,
+          });
+          const rejection = assert.rejects(run, ProcessDeadlineError);
+          try {
+            pids = await waitForPids(pidFile);
+            await rejection;
+            assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
+            for (const pid of pids) {
+              assert.equal(
+                processExists(pid),
+                false,
+                `pid ${pid} survived timeout`,
+              );
+            }
+          } finally {
+            await rejection;
+            for (const pid of pids) {
+              if (processExists(pid)) process.kill(pid, "SIGKILL");
+            }
+            await rm(pidFile, { force: true });
+          }
         }
-        await rm(pidFile, { force: true });
+        await new Promise((resolve) => setImmediate(resolve));
+        assert.deepEqual(
+          unhandled,
+          [],
+          "deadline runs must stay rejection-handled",
+        );
+      } finally {
+        process.off("unhandledRejection", recordUnhandled);
       }
 
       assert.ok(

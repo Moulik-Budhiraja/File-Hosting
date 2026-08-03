@@ -10,7 +10,7 @@ import { gzipSync } from "node:zlib";
 import sharp from "sharp";
 
 import { nativeAdmissionState } from "./native-admission";
-import { composeOgCardSvg, renderOgImage } from "./og-image";
+import { composeOgCardSvg, renderOgImage, renderSvgInWorker } from "./og-image";
 import { runKillableProcess } from "./process-tree";
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
@@ -94,6 +94,41 @@ function transitiveRssKiB(): number {
 }
 
 describe("OG Social Cards V2 byte-derived rendering", () => {
+  it("changes SVG preview and final pixels for same-size valid source mutations without active rasterization", async () => {
+    const svg = (fill: string) =>
+      Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="80" height="40"><rect width="80" height="40" fill="${fill}"/></svg>`,
+      );
+    const firstBytes = svg("red");
+    const secondBytes = svg("tan");
+    assert.equal(firstBytes.length, secondBytes.length);
+
+    const first = await subject(firstBytes, "image/svg+xml", "same.svg");
+    const second = await subject(secondBytes, "image/svg+xml", "same.svg");
+
+    assert.equal(first.model.preview?.label, "SVG");
+    assert.equal(first.model.preview?.visual.kind, "svg-source");
+    assert.equal(second.model.preview?.visual.kind, "svg-source");
+    assert.notDeepEqual(
+      first.model.preview?.visual,
+      second.model.preview?.visual,
+    );
+    assert.notDeepEqual(first.png, second.png);
+
+    const hostile = await subject(
+      Buffer.from(
+        '<svg xmlns="http://www.w3.org/2000/svg" onload="globalThis.executed=true"><script>globalThis.executed=true</script><image href="https://attacker.invalid/a.png"/></svg>',
+      ),
+      "image/svg+xml",
+      "hostile.svg",
+    );
+    const composed = composeOgCardSvg(hostile.model).toString("utf8");
+    assert.equal(hostile.model.preview?.label, "SVG");
+    assert.equal(hostile.model.preview?.visual.kind, "svg-source");
+    assert.doesNotMatch(composed, /<script|onload=|attacker\.invalid/u);
+    assert.doesNotMatch(composed, /PHN2Zy/u);
+  });
+
   it("changes archive pixels when same-size validated TAR.GZ entries change", async () => {
     const tar = (name: string) => {
       const header = Buffer.alloc(512);
@@ -166,7 +201,19 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
         title: international,
         facts: ["1 B"],
         sourceDigest: "b".repeat(64),
-        visual: { kind: "text" as const, lines: [international] },
+        visual: {
+          kind: "text" as const,
+          lines: [
+            "🎉 party",
+            "❤️ heart",
+            "🇯🇵 flag",
+            "👨‍👩‍👧‍👦 family",
+            "📡 satellite",
+            "日本語",
+            "العربية",
+            "e\u0301",
+          ],
+        },
       },
     };
     const svg = composeOgCardSvg(model).toString("utf8");
@@ -175,16 +222,241 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
     assert.doesNotMatch(svg, /□|�/u);
     assert.equal(
       (svg.match(/data:image\/svg\+xml;base64/gu) ?? []).length,
-      4,
-      "party, heart, flag, and family ZWJ must use deterministic color artwork",
+      9,
+      "title and body party, heart, flag, family ZWJ, and satellite must use bundled deterministic artwork",
     );
     const png = await renderOgImage(
       null as unknown as FileService,
       null as unknown as StoredFile,
       model,
     );
-    const statistics = await sharp(png).stats();
-    assert.ok(statistics.channels.some((channel) => channel.stdev > 20));
+    const colorfulPixels = async (region: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    }) => {
+      const pixels = await sharp(png)
+        .extract(region)
+        .removeAlpha()
+        .raw()
+        .toBuffer();
+      let colorful = 0;
+      for (let offset = 0; offset < pixels.length; offset += 3) {
+        const channels = [
+          pixels[offset] ?? 0,
+          pixels[offset + 1] ?? 0,
+          pixels[offset + 2] ?? 0,
+        ];
+        if (Math.max(...channels) - Math.min(...channels) > 24) colorful += 1;
+      }
+      return colorful;
+    };
+    const emojiRegions: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    }[] = [
+      { left: 704, top: 92, width: 40, height: 40 },
+      { left: 704, top: 146, width: 32, height: 30 },
+      { left: 704, top: 194, width: 32, height: 30 },
+      { left: 704, top: 242, width: 32, height: 30 },
+      { left: 704, top: 290, width: 32, height: 30 },
+    ];
+    for (const [index, region] of emojiRegions.entries()) {
+      assert.ok(
+        (await colorfulPixels(region)) > 18,
+        `body emoji region ${index} must contain bundled color artwork, not monochrome tofu`,
+      );
+    }
+
+    const replacementModel = {
+      ...model,
+      preview: {
+        ...model.preview,
+        visual: {
+          kind: "text" as const,
+          lines: [
+            "party",
+            "heart",
+            "flag",
+            "family",
+            "satellite",
+            "�",
+            "�",
+            "�",
+          ],
+        },
+      },
+    };
+    const replacement = await renderOgImage(
+      null as unknown as FileService,
+      null as unknown as StoredFile,
+      replacementModel,
+    );
+    const scriptRegions: {
+      left: number;
+      top: number;
+      width: number;
+      height: number;
+    }[] = [
+      { left: 690, top: 325, width: 180, height: 44 },
+      { left: 660, top: 373, width: 210, height: 44 },
+      { left: 690, top: 421, width: 100, height: 44 },
+    ];
+    for (const [index, region] of scriptRegions.entries()) {
+      const [actual, tofu] = await Promise.all([
+        sharp(png).extract(region).removeAlpha().raw().toBuffer(),
+        sharp(replacement).extract(region).removeAlpha().raw().toBuffer(),
+      ]);
+      assert.notDeepEqual(
+        actual,
+        tofu,
+        `script region ${index} must differ from replacement-glyph rendering`,
+      );
+      const width = region.width;
+      const ink = (x: number, y: number) => {
+        const offset = (y * width + x) * 3;
+        return (
+          Math.abs((actual[offset] ?? 246) - 246) +
+            Math.abs((actual[offset + 1] ?? 245) - 245) +
+            Math.abs((actual[offset + 2] ?? 241) - 241) >
+          45
+        );
+      };
+      const borderInk =
+        Array.from({ length: region.width }, (_, x) => ink(x, 0)).filter(
+          Boolean,
+        ).length +
+        Array.from({ length: region.width }, (_, x) =>
+          ink(x, region.height - 1),
+        ).filter(Boolean).length;
+      assert.ok(
+        borderInk <= 4,
+        `script region ${index} must not clip vertically (${borderInk} border pixels)`,
+      );
+    }
+  });
+
+  it("renders bundled emoji artwork in document, code, and Markdown body regions", async () => {
+    const cases = [
+      {
+        kind: "document" as const,
+        visualKind: "text" as const,
+        lines: ["🚀 Heading", "😀 body", "🧑🏽‍💻 body"],
+        regions: [
+          { left: 308, top: 176, width: 56, height: 56 },
+          { left: 308, top: 316, width: 30, height: 30 },
+          { left: 308, top: 346, width: 30, height: 30 },
+        ],
+      },
+      {
+        kind: "markdown" as const,
+        visualKind: "markdown" as const,
+        lines: [
+          "# 🎉 H1",
+          "## ❤️ H2",
+          "- 🇯🇵 bullet",
+          "👨‍👩‍👧‍👦 plain",
+          "🧑🏽‍💻 technologist",
+          "📡 satellite",
+          "🚀 rocket",
+          "😀 smile",
+        ],
+        regions: [
+          { left: 88, top: 48, width: 56, height: 56 },
+          { left: 92, top: 156, width: 40, height: 40 },
+          { left: 75, top: 215, width: 32, height: 32 },
+          ...[279, 313, 347, 381, 415].map((baseline) => ({
+            left: 52,
+            top: baseline - 23,
+            width: 32,
+            height: 32,
+          })),
+        ],
+      },
+      {
+        kind: "code" as const,
+        visualKind: "code" as const,
+        lines: ["🎉", "❤️", "🇯🇵", "👨‍👩‍👧‍👦", "🧑🏽‍💻", "📡", "🚀", "😀"],
+        regions: [82, 126, 170, 214, 258, 302, 346, 390].map((baseline) => ({
+          left: 52,
+          top: baseline - 21,
+          width: 30,
+          height: 28,
+        })),
+      },
+    ];
+
+    for (const item of cases) {
+      const model = {
+        title: `${item.kind}.txt`,
+        description: "1 B",
+        ogType: "article" as const,
+        twitterCard: "summary_large_image" as const,
+        canonicalUrl: "https://example.test/u",
+        imageUrl: "https://example.test/og/u.png",
+        imageAlt: "safe",
+        kind: item.kind,
+        preview: {
+          family: item.kind,
+          label: item.kind.toUpperCase(),
+          title: `${item.kind}.txt`,
+          facts: ["1 B"],
+          sourceDigest: "c".repeat(64),
+          visual: { kind: item.visualKind, lines: item.lines },
+        },
+      };
+      const svg = composeOgCardSvg(model);
+      assert.equal(
+        (svg.toString("utf8").match(/data:image\/svg\+xml;base64/gu) ?? [])
+          .length,
+        item.regions.length,
+        `${item.kind} body must substitute every required emoji grapheme`,
+      );
+      const png = await renderSvgInWorker(svg);
+      for (const [index, region] of item.regions.entries()) {
+        const { data, info } = await sharp(png)
+          .extract(region)
+          .removeAlpha()
+          .raw()
+          .toBuffer({ resolveWithObject: true });
+        let colorful = 0;
+        for (let offset = 0; offset < data.length; offset += info.channels) {
+          const channels = [...data.subarray(offset, offset + 3)];
+          if (Math.max(...channels) - Math.min(...channels) > 24) colorful += 1;
+        }
+        assert.ok(
+          colorful > 12,
+          `${item.kind} body emoji region ${index} must contain color artwork without tofu, overlap, or clipping`,
+        );
+      }
+    }
+  });
+
+  it("loads bundled Inter and JetBrains Mono in the production OG worker", async () => {
+    const renderTextProbe = (family: string, text: string) =>
+      renderSvgInWorker(
+        Buffer.from(
+          `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="140"><rect width="900" height="140" fill="white"/><text x="20" y="100" fill="black" font-family="${family}" font-size="72">${text}</text></svg>`,
+        ),
+      );
+
+    const [inter, unknownSans, helvetica, mono, unknownMono, menlo] =
+      await Promise.all([
+        renderTextProbe("Inter", "Hamburgefonstiv 018"),
+        renderTextProbe("ZzNope,sans-serif", "Hamburgefonstiv 018"),
+        renderTextProbe("Helvetica", "Hamburgefonstiv 018"),
+        renderTextProbe("JetBrains Mono", "Hamburgefonstiv 018"),
+        renderTextProbe("ZzNope,monospace", "Hamburgefonstiv 018"),
+        renderTextProbe("Menlo", "Hamburgefonstiv 018"),
+      ]);
+
+    assert.notDeepEqual(inter, unknownSans);
+    assert.notDeepEqual(inter, helvetica);
+    assert.notDeepEqual(mono, unknownMono);
+    assert.notDeepEqual(mono, menlo);
   });
 
   it("renders bundled Latin, CJK, and Arabic fonts through native worker PNG probes", async () => {

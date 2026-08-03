@@ -33,6 +33,38 @@ describe("bounded excerpt sanitization", () => {
     );
   });
 
+  it("preserves ordinary identifiers and safe filenames while stripping true locators", () => {
+    const preserved = [
+      "name: file-hosting",
+      "file_path = os.environ['FS_STORAGE_DIR']",
+      "http_client = requests.Session()",
+      "ftp_server.connect()",
+      "libfoo.so is loaded at runtime",
+      "See file-hosting.md and release-v2.1.0.tar.gz",
+    ];
+    assert.deepEqual(
+      preserved.map((line) => sanitizeExcerptLine(line, 320)),
+      preserved,
+    );
+
+    const scrubbed = [
+      "fetch https://secret.example/token now",
+      "mirror ftp://secret.example/archive",
+      "open file:///etc/private.conf later",
+      "mail admin@secret.example.com safely",
+      "visit 192.168.1.5:8080/admin now",
+      "read /etc/secret/config.yaml next",
+      "request https://secret.example/path?token=secret&key=value now",
+    ];
+    for (const line of scrubbed) {
+      const output = sanitizeExcerptLine(line, 320);
+      assert.doesNotMatch(
+        output,
+        /secret\.example|admin@|192\.168|\/etc\/|token=|key=/u,
+      );
+    }
+  });
+
   it("clamps adversarial lines before locator analysis with a live linear latency bound", () => {
     for (const value of ["A".repeat(262_144), "a.".repeat(131_072)]) {
       const started = performance.now();

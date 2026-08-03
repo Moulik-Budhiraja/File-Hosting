@@ -66,13 +66,11 @@ try {
       width: orientedWidth,
       height: orientedHeight,
     }));
-  } else if (mode === "thumbnail" || mode === "preview") {
-    const width = mode === "preview" ? 1200 : 386;
-    const height = mode === "preview" ? 630 : 386;
+  } else if (mode === "preview") {
     const thumbnail = await sharp(source, inputOptions)
       .timeout({ seconds: 2 })
       .rotate()
-      .resize(width, height, { fit: "cover", position: "centre" })
+      .resize(1200, 630, { fit: "cover", position: "centre" })
       .toColorspace("srgb")
       .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
       .toBuffer();
@@ -171,7 +169,7 @@ function rasterWorkerEnvironment(): NodeJS.ProcessEnv {
 }
 
 async function runRasterWorker(
-  mode: "metadata" | "thumbnail" | "preview",
+  mode: "metadata" | "preview",
   filePath: string,
   mimeType: string,
   timeoutMs: number = RASTER_WORKER_LIMITS.wallTimeoutMs,
@@ -244,11 +242,4 @@ export async function deriveRasterPreviewInWorker(
   timeoutMs?: number,
 ): Promise<Buffer> {
   return runRasterWorker("preview", filePath, mimeType, timeoutMs);
-}
-
-export async function deriveRasterThumbnailInWorker(
-  filePath: string,
-  mimeType: string,
-): Promise<Buffer> {
-  return runRasterWorker("thumbnail", filePath, mimeType);
 }

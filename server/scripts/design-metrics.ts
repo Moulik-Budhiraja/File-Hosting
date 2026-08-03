@@ -94,6 +94,42 @@ export function rmse(left: Buffer, right: Buffer): number {
   return Number(Math.sqrt(squared / left.length).toFixed(3));
 }
 
+export function differenceHash(
+  pixels: Buffer,
+  width: number,
+  height: number,
+): string {
+  assert.equal(width, 9);
+  assert.equal(height, 8);
+  assert.equal(pixels.length, width * height * 3);
+  let hash = 0n;
+  let bit = 0n;
+  const luma = (offset: number) =>
+    (pixels[offset] ?? 0) * 0.2126 +
+    (pixels[offset + 1] ?? 0) * 0.7152 +
+    (pixels[offset + 2] ?? 0) * 0.0722;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width - 1; x += 1) {
+      const left = (y * width + x) * 3;
+      if (luma(left) > luma(left + 3)) hash |= 1n << bit;
+      bit += 1n;
+    }
+  }
+  return hash.toString(16).padStart(16, "0");
+}
+
+export function hammingDistance(left: string, right: string): number {
+  assert.match(left, /^[0-9a-f]{16}$/u);
+  assert.match(right, /^[0-9a-f]{16}$/u);
+  let difference = BigInt(`0x${left}`) ^ BigInt(`0x${right}`);
+  let count = 0;
+  while (difference > 0n) {
+    count += Number(difference & 1n);
+    difference >>= 1n;
+  }
+  return count;
+}
+
 export function assertBounds(region: Region, width = 1200, height = 630): void {
   assert(Number.isInteger(region.left) && Number.isInteger(region.top));
   assert(Number.isInteger(region.width) && Number.isInteger(region.height));

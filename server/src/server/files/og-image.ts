@@ -179,7 +179,15 @@ function knownEmojiData(grapheme: string): string | undefined {
   }
 }
 
-function titleGraphemeAdvance(grapheme: string, size: number): number {
+interface TextLineStyle {
+  fill: string;
+  family: string;
+  weight?: number;
+  letterSpacing?: number;
+  preserveWhitespace?: boolean;
+}
+
+function graphemeAdvance(grapheme: string, size: number): number {
   if (/^\s$/u.test(grapheme)) return size * 0.3;
   if (knownEmojiData(grapheme)) return size * 1.05;
   if (/[^\u0000-\u007F]/u.test(grapheme)) return size;
@@ -189,17 +197,19 @@ function titleGraphemeAdvance(grapheme: string, size: number): number {
   return size * 0.54;
 }
 
-function titleLineMarkup(
+function textLineMarkup(
   line: string,
   x: number,
   y: number,
   size: number,
+  style: TextLineStyle,
 ): string {
   const graphemes = [
     ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(line),
   ].map(({ segment }) => segment);
+  const attributes = `${style.preserveWhitespace ? ' xml:space="preserve"' : ""} fill="${style.fill}" font-family="${style.family}" font-size="${size}"${style.weight ? ` font-weight="${style.weight}"` : ""}${style.letterSpacing !== undefined ? ` letter-spacing="${style.letterSpacing}"` : ""} direction="auto" style="unicode-bidi:isolate"`;
   if (!graphemes.some((grapheme) => knownEmojiData(grapheme))) {
-    return `<text x="${x}" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="${size}" font-weight="700" letter-spacing="-1.3" direction="auto" style="unicode-bidi:isolate">${escapeXml(line)}</text>`;
+    return `<text x="${x}" y="${y}"${attributes}>${escapeXml(line)}</text>`;
   }
   let cursor = x;
   let run = "";
@@ -207,7 +217,7 @@ function titleLineMarkup(
   let markup = "";
   const flush = () => {
     if (!run) return;
-    markup += `<text x="${runX}" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="${size}" font-weight="700" letter-spacing="-1.3" direction="auto" style="unicode-bidi:isolate">${escapeXml(run)}</text>`;
+    markup += `<text x="${runX}" y="${y}"${attributes}>${escapeXml(run)}</text>`;
     run = "";
   };
   for (const grapheme of graphemes) {
@@ -216,16 +226,30 @@ function titleLineMarkup(
       flush();
       const emojiSize = size * 1.08;
       markup += `<image href="${emojiData}" x="${cursor}" y="${y - size * 0.88}" width="${emojiSize}" height="${emojiSize}" preserveAspectRatio="xMidYMid meet"/>`;
-      cursor += titleGraphemeAdvance(grapheme, size);
+      cursor += graphemeAdvance(grapheme, size);
       runX = cursor;
       continue;
     }
     if (!run) runX = cursor;
     run += grapheme;
-    cursor += titleGraphemeAdvance(grapheme, size);
+    cursor += graphemeAdvance(grapheme, size);
   }
   flush();
   return markup;
+}
+
+function titleLineMarkup(
+  line: string,
+  x: number,
+  y: number,
+  size: number,
+): string {
+  return textLineMarkup(line, x, y, size, {
+    fill: "#f2f1ec",
+    family: SANS,
+    weight: 700,
+    letterSpacing: -1.3,
+  });
 }
 
 export function truncateDisplayText(value: string, maxColumns: number): string {
@@ -296,25 +320,43 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       ? `<image href="${raster}" x="660" y="55" width="470" height="575" preserveAspectRatio="xMidYMid meet"/>`
       : `<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${contentLines
           .slice(0, 6)
-          .map(
-            (line, index) =>
-              `<text x="708" y="${130 + index * 54}" fill="#2a2e34" font-family="${SANS}" font-size="${index === 0 ? 28 : 20}" font-weight="${index === 0 ? 700 : 400}">${escapeXml(truncateDisplayText(line, 36))}</text>`,
+          .map((line, index) =>
+            textLineMarkup(
+              truncateDisplayText(line, 36),
+              708,
+              130 + index * 54,
+              index === 0 ? 28 : 20,
+              {
+                fill: "#2a2e34",
+                family: SANS,
+                weight: index === 0 ? 700 : 400,
+              },
+            ),
           )
           .join("")}`;
     const pdfTitleLines = layoutOgTitle(safeTitle, 20, 2);
     body = `${brand()}${page}${titleText(56, pdfTitleLines.length > 1 ? 463 : 520, 52, 20)}${facts(56, 576)}`;
   } else if (model.kind === "document" && visual?.kind !== "binary") {
     const documentHeading = layoutOgTitle(contentLines[0] ?? safeTitle, 26, 2)
-      .map(
-        (line, index) =>
-          `<text x="312" y="${224 + index * 54}" fill="#202329" font-family="${SANS}" font-size="45" font-weight="700" letter-spacing="-1">${escapeXml(line)}</text>`,
+      .map((line, index) =>
+        textLineMarkup(line, 312, 224 + index * 54, 45, {
+          fill: "#202329",
+          family: SANS,
+          weight: 700,
+          letterSpacing: -1,
+        }),
       )
       .join("");
     const documentBody = contentLines
       .slice(1, 3)
-      .map(
-        (line, index) =>
-          `<text x="312" y="${341 + index * 30}" fill="#63615d" font-family="${SANS}" font-size="20">${escapeXml(truncateDisplayText(line, 62))}</text>`,
+      .map((line, index) =>
+        textLineMarkup(
+          truncateDisplayText(line, 62),
+          312,
+          341 + index * 30,
+          20,
+          { fill: "#63615d", family: SANS },
+        ),
       )
       .join("");
     const documentLabel = contentLines[0]
@@ -324,9 +366,18 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   } else if (model.kind === "text" && visual && "lines" in visual) {
     const pageLines = contentLines
       .slice(0, 8)
-      .map(
-        (line, index) =>
-          `<text x="708" y="${120 + index * 48}" fill="${index === 0 ? "#202329" : "#5e5f60"}" font-family="${SANS}" font-size="${index === 0 ? 28 : 19}" font-weight="${index === 0 ? 700 : 400}">${escapeXml(truncateDisplayText(line, 38))}</text>`,
+      .map((line, index) =>
+        textLineMarkup(
+          truncateDisplayText(line, 38),
+          708,
+          120 + index * 48,
+          index === 0 ? 28 : 19,
+          {
+            fill: index === 0 ? "#202329" : "#5e5f60",
+            family: SANS,
+            weight: index === 0 ? 700 : 400,
+          },
+        ),
       )
       .join("");
     body = `${brand()}<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${pageLines}${titleText(56, titleLines.length > 1 ? 430 : 480, 48, 20)}${facts(56, 576)}`;
@@ -336,17 +387,20 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       .map((line) => {
         let markup: string;
         if (line.startsWith("# ")) {
-          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="30">#</text><text x="92" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="45" font-weight="700">${escapeXml(truncateDisplayText(line.slice(2), 56))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="30">#</text>${textLineMarkup(truncateDisplayText(line.slice(2), 56), 92, y, 45, { fill: "#f2f1ec", family: SANS, weight: 700 })}`;
           y += 61;
         } else if (line.startsWith("## ")) {
           y += 33;
-          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="20">##</text><text x="96" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="30" font-weight="700">${escapeXml(truncateDisplayText(line.slice(3), 61))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#5e6269" font-family="${MONO}" font-size="20">##</text>${textLineMarkup(truncateDisplayText(line.slice(3), 61), 96, y, 30, { fill: "#f2f1ec", family: SANS, weight: 700 })}`;
           y += 52;
         } else if (/^(?:•|-|\*)\s/u.test(line)) {
-          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${SANS}" font-size="22">•</text><text x="79" y="${y}" fill="#a7aaaf" font-family="${SANS}" font-size="22">${escapeXml(truncateDisplayText(line.replace(/^(?:•|-|\*)\s+/u, ""), 92))}</text>`;
+          markup = `<text x="56" y="${y}" fill="#777b82" font-family="${SANS}" font-size="22">•</text>${textLineMarkup(truncateDisplayText(line.replace(/^(?:•|-|\*)\s+/u, ""), 92), 79, y, 22, { fill: "#a7aaaf", family: SANS })}`;
           y += 38;
         } else {
-          markup = `<text x="56" y="${y}" fill="#a7aaaf" font-family="${SANS}" font-size="22">${escapeXml(truncateDisplayText(line, 100))}</text>`;
+          markup = textLineMarkup(truncateDisplayText(line, 100), 56, y, 22, {
+            fill: "#a7aaaf",
+            family: SANS,
+          });
           y += 34;
         }
         return markup;
@@ -357,7 +411,17 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
     const excerpt = contentLines
       .map((line, index) => {
         const highlighted = /^\s*yield\b/u.test(line);
-        return `<text xml:space="preserve" x="56" y="${82 + index * 44}" fill="${highlighted ? "#e7c47f" : index === 0 ? "#c7c9cd" : "#a7aaaf"}" font-family="${MONO}" font-size="22">${escapeXml(truncateDisplayText(line, 92))}</text>`;
+        return textLineMarkup(
+          truncateDisplayText(line, 92),
+          56,
+          82 + index * 44,
+          22,
+          {
+            fill: highlighted ? "#e7c47f" : index === 0 ? "#c7c9cd" : "#a7aaaf",
+            family: MONO,
+            preserveWhitespace: true,
+          },
+        );
       })
       .join("");
     body = `${excerpt}<line x1="56" y1="478" x2="1144" y2="478" stroke="#26292e"/>${titleText(56, twoLineTitle ? 518 : 540, 38, 42)}${facts(56, twoLineTitle ? 606 : 578)}${brand(1144, twoLineTitle ? 604 : 576, "end")}`;
@@ -378,6 +442,26 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       model.preview?.facts.find((fact) => fact.includes(":")) ?? "";
     const audioTitleLines = layoutOgTitle(safeTitle, 18, 2);
     body = `<image href="${raster}" x="0" y="0" width="630" height="630" preserveAspectRatio="xMidYMid slice"/><rect x="630" y="0" width="570" height="630" fill="#0d0e10"/>${brand(686, 64)}<text x="686" y="388" fill="#d8d3c8" font-family="${SANS}" font-size="58" font-weight="400">${escapeXml(duration)}</text>${titleText(686, audioTitleLines.length > 1 ? 468 : 520, 46, 18)}${facts(686, 576)}`;
+  } else if (visual?.kind === "svg-source") {
+    const cells = [...visual.digest.slice(0, 32)]
+      .map((nibble, index) => {
+        const value = Number.parseInt(nibble, 16);
+        const x = 56 + (index % 16) * 66;
+        const y = 148 + Math.floor(index / 16) * 66;
+        const lightness = 28 + value * 2.2;
+        return `<rect x="${x}" y="${y}" width="54" height="54" rx="8" fill="hsl(${Math.round(28 + value * 13)},42%,${lightness.toFixed(1)}%)"/>`;
+      })
+      .join("");
+    const digestLines = [
+      visual.digest.slice(0, 32).toUpperCase(),
+      visual.digest.slice(32).toUpperCase(),
+    ]
+      .map(
+        (line, index) =>
+          `<text x="56" y="${326 + index * 34}" fill="#9fa3a9" font-family="${MONO}" font-size="17" letter-spacing="1.5">${line}</text>`,
+      )
+      .join("");
+    body = `${brand()}<text x="56" y="112" fill="#e3a44f" font-family="${MONO}" font-size="22" letter-spacing="4">SAFE SVG SOURCE SIGNATURE</text>${cells}${digestLines}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
   } else if (model.kind === "archive") {
     const stack = `<rect x="986" y="65" width="150" height="16" rx="3" fill="#33373c"/><rect x="1016" y="91" width="120" height="16" rx="3" fill="#3b3f45"/><rect x="1046" y="117" width="90" height="16" rx="3" fill="#44484f"/>`;
     const archiveTitleLines = layoutOgTitle(safeTitle, 42, 2);

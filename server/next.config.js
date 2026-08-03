@@ -7,7 +7,7 @@ const config = {
       "./runtime/**/*",
       "./node_modules/@twemoji/svg/*.svg",
       "./node_modules/@twemoji/svg/package.json",
-      "./node_modules/@twemoji/svg/LICENSE*",
+      "./node_modules/@twemoji/svg/{license*,readme.md}",
       "./node_modules/ffmpeg-static/**/*",
       "./node_modules/ffprobe-static/index.js",
       "./node_modules/ffprobe-static/package.json",
@@ -24,6 +24,10 @@ const config = {
       "./node_modules/pend/**/*",
       "./node_modules/buffer-crc32/**/*",
     ],
+  },
+  outputFileTracingExcludes: {
+    "next-server": ["**/node_modules/typescript/**/*"],
+    "/*": ["**/node_modules/typescript/**/*"],
   },
 };
 

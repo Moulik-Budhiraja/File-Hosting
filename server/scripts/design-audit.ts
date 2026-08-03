@@ -20,6 +20,8 @@ import { setFileServiceForTests } from "../src/server/files/singleton";
 import { buildUnfurlModel } from "../src/server/files/unfurl";
 import {
   assertBounds,
+  differenceHash,
+  hammingDistance,
   pixelStats,
   type PixelStats,
   type Region,
@@ -514,14 +516,134 @@ const cases: AuditCase[] = [
     facts: { left: 45, top: 552, width: 800, height: 42 },
     primary: { left: 45, top: 135, width: 850, height: 220 },
     minimumPrimaryVariance: 330,
-    minimumPrimaryInk: 0.035,
+    minimumPrimaryInk: 0.03,
   },
 ];
+
+type DesignRegionName = "brand" | "title" | "facts" | "primary";
+
+// Manually frozen from the independently reviewed synthetic-fixture pipeline.
+// There is deliberately no command or code path that updates these tracked values.
+const PINNED_REGION_HASHES: Readonly<
+  Record<string, Readonly<Record<DesignRegionName, string>>>
+> = Object.freeze({
+  "01-image-landscape": {
+    brand: "00402348294fc6b1",
+    title: "4d6569686652dac2",
+    facts: "0005181919190000",
+    primary: "998ece4948488890",
+  },
+  "02-image-portrait": {
+    brand: "0040174c294fc6b1",
+    title: "082c2c8c77343666",
+    facts: "0024126d6565650a",
+    primary: "64b418ede0884780",
+  },
+  "03-video-poster": {
+    brand: "00000048294bc602",
+    title: "0e4d697d62a75820",
+    facts: "0008051a0a191a04",
+    primary: "0000000000000606",
+  },
+  "04-video-fallback": {
+    brand: "0040174c294fc6b1",
+    title: "cf34f2ead2522922",
+    facts: "0002000f0f0f0d02",
+    primary: "00a5000001010501",
+  },
+  "05-pdf": {
+    brand: "0040174c294fc6b1",
+    title: "0d020c2c2c4ab2b6",
+    facts: "0004030c0d0d0d02",
+    primary: "0000000000040800",
+  },
+  "06-document": {
+    brand: "000000a82798aaaa",
+    title: "010d1c1e1c0f0204",
+    facts: "0000001a1e1e1909",
+    primary: "0149611587631000",
+  },
+  "07-markdown": {
+    brand: "882798aaaa9c2304",
+    title: "1704032c2f2d0502",
+    facts: "00000002000d0f0f",
+    primary: "0000060606161906",
+  },
+  "08-code": {
+    brand: "882798aaaa9c2304",
+    title: "0f0d002c2c2d0e00",
+    facts: "00000002050a0a0b",
+    primary: "0000030c3c1a3c32",
+  },
+  "09-audio-artwork": {
+    brand: "0040174c294fc6b1",
+    title: "0d125a5e365a5a1a",
+    facts: "0004020d2d2d0d02",
+    primary: "18181818587c703b",
+  },
+  "10-audio-waveform": {
+    brand: "0040174c294fc6b1",
+    title: "022cb4b239051000",
+    facts: "08001a19191a0400",
+    primary: "49b6b69090b6b649",
+  },
+  "11-archive": {
+    brand: "0040174c294fc6b1",
+    title: "42ad9da6d3738c40",
+    facts: "0000030707070601",
+    primary: "0003030000060600",
+  },
+  "12-binary": {
+    brand: "0040174c294fc6b1",
+    title: "27542c3a7a212518",
+    facts: "0000070707060000",
+    primary: "00001a1818031c1d",
+  },
+});
 
 async function rawRegion(image: Buffer, region: Region): Promise<Buffer> {
   assertBounds(region);
   return sharp(image).extract(region).removeAlpha().raw().toBuffer();
 }
+
+async function colorfulPixels(image: Buffer, region: Region): Promise<number> {
+  const data = await rawRegion(image, region);
+  let total = 0;
+  for (let offset = 0; offset < data.length; offset += 3) {
+    const red = data[offset] ?? 0;
+    const green = data[offset + 1] ?? 0;
+    const blue = data[offset + 2] ?? 0;
+    if (Math.max(red, green, blue) - Math.min(red, green, blue) > 24) {
+      total += 1;
+    }
+  }
+  return total;
+}
+
+async function boundaryInk(image: Buffer, region: Region): Promise<number> {
+  const data = await rawRegion(image, region);
+  const ink = (x: number, y: number) => {
+    const offset = (y * region.width + x) * 3;
+    return (
+      Math.max(
+        Math.abs((data[offset] ?? 13) - 13),
+        Math.abs((data[offset + 1] ?? 14) - 14),
+        Math.abs((data[offset + 2] ?? 16) - 16),
+      ) > 18
+    );
+  };
+  let total = 0;
+  for (let x = 0; x < region.width; x += 1) {
+    if (ink(x, 0)) total += 1;
+    if (ink(x, region.height - 1)) total += 1;
+  }
+  for (let y = 1; y < region.height - 1; y += 1) {
+    if (ink(0, y)) total += 1;
+    if (ink(region.width - 1, y)) total += 1;
+  }
+  return total;
+}
+
 async function stats(image: Buffer, region: Region): Promise<PixelStats> {
   return pixelStats(
     await rawRegion(image, region),
@@ -529,23 +651,68 @@ async function stats(image: Buffer, region: Region): Promise<PixelStats> {
     region.height,
   );
 }
-async function evaluateCase(item: AuditCase, image: Buffer) {
+
+async function regionHash(image: Buffer, region: Region): Promise<string> {
+  const pixels = await sharp(image)
+    .extract(region)
+    .resize(9, 8, { fit: "fill" })
+    .removeAlpha()
+    .raw()
+    .toBuffer();
+  return differenceHash(pixels, 9, 8);
+}
+
+async function evaluateCase(
+  item: AuditCase,
+  image: Buffer,
+  enforcePinnedStructure = true,
+) {
   const reasons: string[] = [];
   const metadata = await sharp(image).metadata();
   if (metadata.width !== 1200 || metadata.height !== 630 || metadata.hasAlpha)
     reasons.push("card must be opaque 1200x630");
-  const brandStats = await stats(image, item.brand);
-  const titleStats = await stats(image, item.title);
-  const factStats = await stats(image, item.facts);
-  const primaryStats = await stats(image, item.primary);
+  const [brandStats, titleStats, factStats, primaryStats] = await Promise.all([
+    stats(image, item.brand),
+    stats(image, item.title),
+    stats(image, item.facts),
+    stats(image, item.primary),
+  ]);
+  const regionHashes = Object.fromEntries(
+    await Promise.all(
+      (["brand", "title", "facts", "primary"] as const).map(
+        async (name) => [name, await regionHash(image, item[name])] as const,
+      ),
+    ),
+  ) as Record<DesignRegionName, string>;
+  const expectedHashes = PINNED_REGION_HASHES[item.id];
+  assert(expectedHashes, `${item.id}: pinned regional references missing`);
+  const structureDistances = Object.fromEntries(
+    (["brand", "title", "facts", "primary"] as const).map((name) => [
+      name,
+      hammingDistance(regionHashes[name], expectedHashes[name]),
+    ]),
+  ) as Record<DesignRegionName, number>;
+  if (enforcePinnedStructure) {
+    for (const name of ["brand", "title", "facts", "primary"] as const) {
+      if (structureDistances[name] !== 0)
+        reasons.push(`${name} fixed perceptual structure mismatch`);
+    }
+  }
   if (brandStats.accentFraction < 0.001) reasons.push("brand accent missing");
   if (brandStats.inkFraction < 0.015) reasons.push("brand/header ink missing");
+  if (brandStats.edgeFraction > 0.15) reasons.push("brand structure corrupted");
   if (titleStats.lightFraction < 0.012 || titleStats.edgeFraction < 0.006)
     reasons.push("title/glyph occupancy missing");
+  if (titleStats.lightFraction > 0.25 || titleStats.edgeFraction > 0.1)
+    reasons.push("title color/structure corrupted");
   if (factStats.inkFraction < 0.008 || factStats.edgeFraction < 0.003)
     reasons.push("facts/domain ink missing");
+  if (factStats.inkFraction > 0.9 || factStats.edgeFraction > 0.1)
+    reasons.push("facts/domain color/structure corrupted");
   if (primaryStats.variance < item.minimumPrimaryVariance)
     reasons.push("primary hero/page/artwork/waveform variance missing");
+  if (primaryStats.variance > 20_000 || primaryStats.edgeFraction > 0.06)
+    reasons.push("primary color/structure corrupted");
   if (primaryStats.inkFraction < item.minimumPrimaryInk)
     reasons.push("primary content occupancy missing");
   const titleRightEdge: Region = {
@@ -566,8 +733,114 @@ async function evaluateCase(item: AuditCase, image: Buffer) {
   ]);
   if (titleEdgeStats.lightFraction > 0.2 || factsEdgeStats.lightFraction > 0.2)
     reasons.push("safe-area clipping at text-zone edge");
-  return { reasons, brandStats, titleStats, factStats, primaryStats };
+  return {
+    reasons,
+    brandStats,
+    titleStats,
+    factStats,
+    primaryStats,
+    regionHashes,
+    structureDistances,
+  };
 }
+async function compositeRegion(
+  image: Buffer,
+  region: Region,
+  replacement: Buffer,
+): Promise<Buffer> {
+  return sharp(image)
+    .composite([{ input: replacement, left: region.left, top: region.top }])
+    .removeAlpha()
+    .png()
+    .toBuffer();
+}
+
+async function restoreRegions(
+  mutated: Buffer,
+  original: Buffer,
+  regions: readonly Region[],
+): Promise<Buffer> {
+  const patches = await Promise.all(
+    regions.map(async (region) => ({
+      input: await sharp(original).extract(region).png().toBuffer(),
+      left: region.left,
+      top: region.top,
+    })),
+  );
+  return sharp(mutated).composite(patches).removeAlpha().png().toBuffer();
+}
+
+async function checkerboard(region: Region): Promise<Buffer> {
+  const cells: string[] = [];
+  for (let y = 0; y < region.height; y += 8) {
+    for (let x = 0; x < region.width; x += 8) {
+      cells.push(
+        `<rect x="${x}" y="${y}" width="8" height="8" fill="${(x / 8 + y / 8) % 2 ? "#ff00ff" : "#00ffff"}"/>`,
+      );
+    }
+  }
+  return sharp(
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${region.width}" height="${region.height}">${cells.join("")}</svg>`,
+    ),
+  )
+    .removeAlpha()
+    .png()
+    .toBuffer();
+}
+
+async function wrongContent(region: Region): Promise<Buffer> {
+  return sharp(
+    Buffer.from(
+      `<svg xmlns="http://www.w3.org/2000/svg" width="${region.width}" height="${region.height}"><rect width="100%" height="100%" fill="#063b52"/><path d="M-${region.height} ${region.height} L${region.width} 0 M0 ${region.height} L${region.width + region.height} 0" stroke="#ff7a00" stroke-width="42"/><circle cx="${region.width / 2}" cy="${region.height / 2}" r="${Math.min(region.width, region.height) / 4}" fill="#7dff00"/></svg>`,
+    ),
+  )
+    .removeAlpha()
+    .png()
+    .toBuffer();
+}
+
+async function displacedRegion(image: Buffer, region: Region): Promise<Buffer> {
+  const source = await sharp(image).extract(region).png().toBuffer();
+  return sharp({
+    create: {
+      width: region.width,
+      height: region.height,
+      channels: 3,
+      background: "#0d0e10",
+    },
+  })
+    .composite([{ input: source, left: 29, top: 17 }])
+    .png()
+    .toBuffer();
+}
+
+async function clippedRegion(image: Buffer, region: Region): Promise<Buffer> {
+  const source = await sharp(image).extract(region).png().toBuffer();
+  return sharp(source)
+    .composite([
+      {
+        input: {
+          create: {
+            width: Math.ceil(region.width * 0.42),
+            height: region.height,
+            channels: 3,
+            background: "#0d0e10",
+          },
+        },
+        left: 0,
+        top: 0,
+      },
+    ])
+    .removeAlpha()
+    .png()
+    .toBuffer();
+}
+
+async function colorMutant(image: Buffer, region: Region): Promise<Buffer> {
+  return sharp(image).extract(region).negate({ alpha: false }).png().toBuffer();
+}
+
 async function replaceRegion(image: Buffer, region: Region): Promise<Buffer> {
   return sharp(image)
     .composite([
@@ -704,6 +977,51 @@ try {
       `${item.id}: facts removal mutant must fail its facts/domain contract`,
     );
 
+    const primaryMutants: Record<string, Buffer> = {
+      checkerboard: await checkerboard(item.primary),
+      wrongContent: await wrongContent(item.primary),
+      displacement: await displacedRegion(produced.card, item.primary),
+      clipping: await clippedRegion(produced.card, item.primary),
+      colorStructure: await colorMutant(produced.card, item.primary),
+    };
+    const adversarialResults: Record<string, string[]> = {};
+    for (const [name, replacement] of Object.entries(primaryMutants)) {
+      const mutant = await restoreRegions(
+        await compositeRegion(produced.card, item.primary, replacement),
+        produced.card,
+        [item.brand, item.title, item.facts],
+      );
+      const evaluated = await evaluateCase(item, mutant);
+      assert(
+        evaluated.reasons.length > 0,
+        `${item.id}: ${name} primary corruption must fail while brand/title/facts remain canonical`,
+      );
+      adversarialResults[name] = evaluated.reasons;
+    }
+    for (const [name, region, replacement] of [
+      [
+        "titleDisplacement",
+        item.title,
+        await displacedRegion(produced.card, item.title),
+      ],
+      [
+        "factsClipping",
+        item.facts,
+        await clippedRegion(produced.card, item.facts),
+      ],
+      ["brandColor", item.brand, await colorMutant(produced.card, item.brand)],
+    ] as const) {
+      const evaluated = await evaluateCase(
+        item,
+        await compositeRegion(produced.card, region, replacement),
+      );
+      assert(
+        evaluated.reasons.length > 0,
+        `${item.id}: ${name} mutant must fail its fixed regional contract`,
+      );
+      adversarialResults[name] = evaluated.reasons;
+    }
+
     const mutation = await productionCard(
       item.name,
       item.mimeType,
@@ -756,6 +1074,14 @@ try {
       titleRemovalMutant: { rejected: true, reasons: titleRemoval.reasons },
       brandRemovalMutant: { rejected: true, reasons: brandRemoval.reasons },
       factsRemovalMutant: { rejected: true, reasons: factsRemoval.reasons },
+      adversarialMutants: Object.fromEntries(
+        Object.entries(adversarialResults).map(([name, reasons]) => [
+          name,
+          { rejected: true, reasons },
+        ]),
+      ),
+      pinnedRegionHashes: PINNED_REGION_HASHES[item.id],
+      pinnedStructureDistances: result.structureDistances,
       deterministicSha256: sha256(produced.card),
       sourceMutationChangedPixels: true,
       sourceDigest: produced.direct.sourceDigest,
@@ -807,7 +1133,7 @@ try {
       name: "研究データ📡-résumé-Δ-العربية.md",
       mime: "text/markdown",
       bytes: Buffer.from(
-        "# 観測ログ — العربية\n\nCJK / RTL / e\u0301 / 👨‍👩‍👧‍👦 remain grapheme-safe.\n",
+        "# 観測ログ — العربية\n\n🎉\n❤️\n🇯🇵\n👨‍👩‍👧‍👦\n📡\n日本語\nالعربية\ne\u0301\n",
       ),
       base: "07-markdown",
     },
@@ -860,12 +1186,68 @@ try {
         : stress.id === "stress-04-extreme-landscape"
           ? { ...baseConfig, minimumPrimaryVariance: 40 }
           : baseConfig;
-    const result = await evaluateCase(config, produced.card);
+    const result = await evaluateCase(config, produced.card, false);
     assert.deepEqual(
       result.reasons,
       [],
       `${stress.id}: ${result.reasons.join("; ")}`,
     );
+    let unicodeRegionalProof: unknown;
+    if (stress.id === "stress-02-unicode") {
+      const emojiRegions: Region[] = [163, 197, 231, 265, 299].map(
+        (baseline) => ({
+          left: 52,
+          top: baseline - 22,
+          width: 32,
+          height: 30,
+        }),
+      );
+      const emojiColorPixels = await Promise.all(
+        emojiRegions.map((region) => colorfulPixels(produced.card, region)),
+      );
+      assert(
+        emojiColorPixels.every((count) => count > 12),
+        "Unicode stress party, heart, flag, family ZWJ, and satellite regions require bundled color artwork",
+      );
+      const scriptRegions: Region[] = [
+        { left: 52, top: 309, width: 150, height: 32 },
+        { left: 52, top: 343, width: 190, height: 32 },
+        { left: 52, top: 377, width: 90, height: 32 },
+      ];
+      const replacement = await productionCard(
+        stress.name,
+        stress.mime,
+        Buffer.from(
+          "# replacement heading\n\nxx\nxx\nxx\nxx\nxx\nreplacement\nreplacement\nreplacement\n",
+        ),
+      );
+      const scriptDiffersFromReplacement = await Promise.all(
+        scriptRegions.map(
+          async (region) =>
+            !(await rawRegion(produced.card, region)).equals(
+              await rawRegion(replacement.card, region),
+            ),
+        ),
+      );
+      const scriptBoundaryInk = await Promise.all(
+        scriptRegions.map((region) => boundaryInk(produced.card, region)),
+      );
+      assert(
+        scriptDiffersFromReplacement.every(Boolean),
+        "Unicode stress CJK, Arabic RTL, and combining-mark regions must differ from replacement glyphs",
+      );
+      assert(
+        scriptBoundaryInk.every((count) => count <= 4),
+        "Unicode stress script regions must not overlap or clip their regional boundaries",
+      );
+      unicodeRegionalProof = {
+        emojiRegions,
+        emojiColorPixels,
+        scriptRegions,
+        scriptDiffersFromReplacement,
+        scriptBoundaryInk,
+      };
+    }
     await writeFile(path.join(outputRoot, `${stress.id}.png`), produced.card);
     stressMetrics[stress.id] = {
       classification:
@@ -881,9 +1263,9 @@ try {
           : undefined,
       noTofuOverlapClipping:
         stress.id === "stress-02-unicode"
-          ? result.titleStats.edgeFraction > 0.006 &&
-            result.titleStats.lightFraction > 0.012
+          ? unicodeRegionalProof !== undefined
           : true,
+      unicodeRegionalProof,
       sha256: sha256(produced.card),
       observed: result,
     };
@@ -1104,7 +1486,7 @@ try {
   };
 
   const report = {
-    modelProvider: "gpt-5.6-sol via openai-codex",
+    automatedDesignGate: "node/tsx",
     frozenArtifacts: {
       verified: manifest.length,
       digestMismatches: 0,

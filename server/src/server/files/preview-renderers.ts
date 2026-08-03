@@ -52,6 +52,7 @@ export type PreviewVisual =
   | { kind: "markdown" | "text" | "code"; lines: readonly string[] }
   | { kind: "waveform"; samples: readonly number[] }
   | { kind: "archive"; entries: readonly string[] }
+  | { kind: "svg-source"; digest: string; hex: string }
   | { kind: "binary"; hex?: string };
 
 export interface PreviewExtraction {
@@ -564,10 +565,6 @@ export class PreviewBusyError extends Error {
   }
 }
 
-export function isPreviewBusy(error: unknown): boolean {
-  return error instanceof PreviewBusyError;
-}
-
 export function getPreviewExtractionPoolState(): {
   active: number;
   queued: number;
@@ -760,9 +757,6 @@ async function probeMedia(
   input: RendererInput,
   sourcePath: string,
 ): Promise<{ duration: number; width?: number; height?: number }> {
-  if (!packagedFfprobe) {
-    throw new Error("packaged ffprobe unavailable");
-  }
   const output = await runMediaCommand(
     input,
     packagedFfprobe,
@@ -800,7 +794,6 @@ async function probeMedia(
 async function videoPoster(
   input: RendererInput,
 ): Promise<{ raster: Buffer; duration: string } | null> {
-  if (!packagedFfmpeg) return null;
   try {
     return await withVerifiedSnapshot(input, async (sourcePath) => {
       const metadata = await probeMedia(input, sourcePath);
@@ -849,7 +842,6 @@ async function videoPoster(
 async function audioArtwork(
   input: RendererInput,
 ): Promise<{ raster: Buffer; duration: string } | null> {
-  if (!packagedFfmpeg) return null;
   try {
     return await withVerifiedSnapshot(input, async (sourcePath) => {
       const metadata = await probeMedia(input, sourcePath);
@@ -920,7 +912,6 @@ function pcmWaveform(source: Buffer): number[] {
 async function compressedAudioWaveform(
   input: RendererInput,
 ): Promise<{ samples: number[]; duration: string } | null> {
-  if (!packagedFfmpeg) return null;
   try {
     return await withVerifiedSnapshot(input, async (sourcePath) => {
       const metadata = await probeMedia(input, sourcePath);
@@ -1028,6 +1019,25 @@ const VIDEO_LABELS = new Map([
 
 export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry {
   return new PreviewRendererRegistry()
+    .register(
+      renderer(
+        "svg-source-exact",
+        1100,
+        "image",
+        ({ trustedMime }) => trustedMime === "image/svg+xml",
+        async (probe) => {
+          const source = sourceFrom(probe);
+          const hex = [...source.subarray(0, 24)]
+            .map((byte) => byte.toString(16).padStart(2, "0").toUpperCase())
+            .join(" ");
+          return baseExtraction(probe, "image", "SVG", {
+            kind: "svg-source",
+            digest: probe.input.sha256,
+            hex,
+          });
+        },
+      ),
+    )
     .register(
       renderer(
         "markdown-exact",

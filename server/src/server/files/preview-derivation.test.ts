@@ -329,6 +329,27 @@ describe("actual-byte preview derivation", () => {
     }
   });
 
+  it("preserves ordinary YAML and code identifiers through production derivation", async () => {
+    const source = [
+      "name: file-hosting",
+      "file_path: safe-data",
+      "http_client: enabled",
+      "ftp_server.connect()",
+      "libfoo.so",
+      "artifact: release-v2.1.0.tar.gz",
+    ];
+    for (const [mime, name] of [
+      ["application/yaml", "compose.yaml"],
+      ["text/x-python", "client.py"],
+    ] as const) {
+      const preview = await derivePreview(
+        await fixture(Buffer.from(source.join("\n")), mime, name),
+      );
+      assert.ok("lines" in preview.visual);
+      assert.deepEqual(preview.visual.lines, source);
+    }
+  });
+
   it("derives PDF first-page text when safely parseable and never invents missing content", async () => {
     const one = Buffer.from(
       "%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\nBT (Synthetic Alpha) Tj ET\n%%EOF",

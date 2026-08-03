@@ -36,9 +36,15 @@ test("one canonical root release command covers every required local gate", asyn
     "node scripts/run-rich-link-probe.mjs",
     "scripts/compose-runtime-check.sh",
   ]) {
-    assert.ok(release.includes(command), `canonical release command omits: ${command}`);
+    assert.ok(
+      release.includes(command),
+      `canonical release command omits: ${command}`,
+    );
   }
-  assert.match(release, /OG_DESIGN_REFERENCE_DIR=.*server\/test-fixtures\/og-design-v2/u);
+  assert.match(
+    release,
+    /OG_DESIGN_REFERENCE_DIR=.*server\/test-fixtures\/og-design-v2/u,
+  );
 });
 
 test("release CI executes the canonical gate and requires Docker Compose runtime", async () => {
@@ -71,13 +77,21 @@ test("non-production rich-link runner has a production guard and generates visua
 });
 
 test("canonical freeze and manifest are source-pinned without a fixture update command", async () => {
-  await access(path.join(root, "server/test-fixtures/og-design-v2/DESIGN-FREEZE-2026-08-03.md"));
+  await access(
+    path.join(
+      root,
+      "server/test-fixtures/og-design-v2/DESIGN-FREEZE-2026-08-03.md",
+    ),
+  );
   const audit = await text("server/scripts/design-audit.ts");
   assert.match(audit, /PINNED_FREEZE_SHA256/u);
   assert.match(audit, /PINNED_MANIFEST_SHA256/u);
   assert.match(audit, /DESIGN-FREEZE-2026-08-03\.md/u);
   const packageJson = await text("server/package.json");
-  assert.doesNotMatch(packageJson, /(?:update|refresh|approve|baseline).*fixture/iu);
+  assert.doesNotMatch(
+    packageJson,
+    /(?:update|refresh|approve|baseline).*fixture/iu,
+  );
 });
 
 test("design audit covers all stress states, every content-zone mutant, and real host metadata", async () => {
@@ -96,11 +110,68 @@ test("design audit covers all stress states, every content-zone mutant, and real
   assert.doesNotMatch(audit, /stressCount: 7/u);
 });
 
+test("resource-sensitive preview surface contains no dead helpers, guards, protocols, or assets", async () => {
+  const combined = (
+    await Promise.all([
+      text("server/src/server/files/source-state.ts"),
+      text("server/src/server/files/preview.ts"),
+      text("server/src/server/files/raster-worker.ts"),
+      text("server/src/server/files/preview-renderers.ts"),
+    ])
+  ).join("\n");
+  assert.doesNotMatch(
+    combined,
+    /sourceMatchesFile|isMissingSourceError|extractFirstMarkdownHeading|isPreviewBusy|deriveRasterThumbnailInWorker|"thumbnail"|if \(!packagedFf(?:mpeg|probe)\)/u,
+  );
+  for (const asset of ["1f4e1.svg", "1f600.svg", "1f680.svg"]) {
+    await assert.rejects(
+      access(path.join(root, "server/runtime/assets/twemoji", asset)),
+      /ENOENT/u,
+    );
+  }
+});
+
+test("standalone traces exact Twemoji licensing and excludes TypeScript", async () => {
+  const [config, attribution, standalone] = await Promise.all([
+    text("server/next.config.js"),
+    text("server/runtime/assets/twemoji/ATTRIBUTION.md"),
+    text("server/scripts/standalone-og-e2e.mjs"),
+  ]);
+  assert.match(config, /@twemoji\/svg\/\{license\*,readme\.md\}/u);
+  assert.match(
+    config,
+    /outputFileTracingExcludes[\s\S]*next-server[\s\S]*\*\*\/node_modules\/typescript\/\*\*\/\*/u,
+  );
+  assert.match(attribution, /@twemoji\/svg 15\.0\.0/u);
+  assert.match(attribution, /v15\.0\.0/u);
+  for (const required of [
+    "@twemoji/svg/license",
+    "@twemoji/svg/readme.md",
+    "@napi-rs/canvas",
+    "sharp",
+  ]) {
+    assert.ok(
+      standalone.includes(required),
+      `${required} is not package-verified`,
+    );
+  }
+  assert.match(standalone, /node_modules["'],\s*["']typescript/u);
+});
+
+test("automated design evidence identifies the Node gate without model attestation", async () => {
+  const audit = await text("server/scripts/design-audit.ts");
+  assert.match(audit, /automatedDesignGate:\s*"node\/tsx"/u);
+  assert.doesNotMatch(audit, /modelProvider|gpt-5\.6-sol|openai-codex/iu);
+});
+
 test("operator docs route release through the canonical command and state exact media containment", async () => {
   const readme = await text("README.md");
   assert.match(readme, /\.\/scripts\/release-check\.sh/u);
   assert.match(readme, /private, mode-0600 snapshot/u);
   assert.match(readme, /file,pipe/u);
   assert.doesNotMatch(readme, /source bytes only on stdin/u);
-  assert.doesNotMatch(readme, /Node's permission model:[\s\S]{0,250}network .* denied/iu);
+  assert.doesNotMatch(
+    readme,
+    /Node's permission model:[\s\S]{0,250}network .* denied/iu,
+  );
 });

@@ -206,35 +206,6 @@ function createMarkdownRenderer() {
 
 const markdownRenderer = createMarkdownRenderer();
 
-export function extractFirstMarkdownHeading(source: string): string | null {
-  const tokens = markdownRenderer.parse(source, {});
-  for (let index = 0; index < tokens.length - 1; index += 1) {
-    const token = tokens[index];
-    if (token?.type !== "heading_open" || !/^h[1-6]$/u.test(token.tag)) {
-      continue;
-    }
-    const inline = tokens[index + 1];
-    if (inline?.type !== "inline") continue;
-    const text = (inline.children ?? [])
-      .map((child) => {
-        if (
-          child.type === "text" ||
-          child.type === "code_inline" ||
-          child.type === "image"
-        ) {
-          return child.content;
-        }
-        if (child.type === "softbreak" || child.type === "hardbreak") {
-          return " ";
-        }
-        return "";
-      })
-      .join("");
-    if (text.trim()) return text;
-  }
-  return null;
-}
-
 function renderTruncationNotice(truncated: boolean): string {
   return truncated
     ? '<p class="notice truncation-notice" role="status">Preview truncated at 256 KiB.</p>'
