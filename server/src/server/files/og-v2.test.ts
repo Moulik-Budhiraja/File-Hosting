@@ -113,6 +113,36 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
     assert.match(card.model.title, /Untitled|File/u);
   });
 
+  it("renders byte-derived hex for generic binary and never draws a fake PDF page", async () => {
+    const first = await subject(
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x01, 0x01]),
+      "application/octet-stream",
+      "firmware.bin",
+    );
+    const second = await subject(
+      Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01]),
+      "application/octet-stream",
+      "firmware.bin",
+    );
+    assert.notDeepEqual(first.png, second.png);
+
+    const fallback = await subject(
+      Buffer.from("%PDF-broken"),
+      "application/pdf",
+      "report.pdf",
+    );
+    assert.equal(fallback.model.preview?.visual.kind, "binary");
+    const pageRegion = await sharp(fallback.png)
+      .extract({ left: 700, top: 100, width: 1, height: 1 })
+      .removeAlpha()
+      .raw()
+      .toBuffer();
+    assert.ok(
+      [...pageRegion].every((channel) => channel < 80),
+      "type-led PDF fallback must not draw a fake white page",
+    );
+  });
+
   it("produces deterministic opaque 1200x630 PNGs for identical bytes", async () => {
     const bytes = Buffer.from("deterministic synthetic text");
     const first = await subject(bytes, "text/plain", "notes.txt");

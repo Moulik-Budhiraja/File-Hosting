@@ -11,6 +11,20 @@ const outputDirectory = process.env.FS_PROBE_SCREENSHOTS;
 assert(baseUrl, "FS_PROBE_URL is required");
 assert(token, "FS_PROBE_TOKEN is required");
 assert(outputDirectory, "FS_PROBE_SCREENSHOTS is required");
+const probeUrl = new URL(baseUrl);
+assert.notEqual(
+  probeUrl.hostname,
+  "files.moulik.dev",
+  "production probing is forbidden",
+);
+assert(
+  probeUrl.hostname === "localhost" ||
+    probeUrl.hostname === "127.0.0.1" ||
+    probeUrl.hostname === "::1" ||
+    probeUrl.hostname.endsWith(".test") ||
+    probeUrl.hostname.endsWith(".invalid"),
+  "FS_PROBE_URL must be an explicitly non-production localhost/.test/.invalid target",
+);
 
 const executableCandidates = [
   process.env.CHROME_PATH,
@@ -172,13 +186,10 @@ assert.deepEqual([...values.keys()].sort(), exactKeys);
 assert.equal(values.get("canonical"), `${baseUrl}/${markdown.id}`);
 assert.equal(values.get("og:url"), `${baseUrl}/${markdown.id}`);
 assert.equal(values.get("og:image"), `${baseUrl}/og/${markdown.id}.png`);
-assert.equal(
-  values.get("og:title"),
-  "Release &lt;safe&gt; &amp; “quoted” report",
-);
+assert.equal(values.get("og:title"), "fallback-secret-name.md");
 assert.match(values.get("og:description") ?? "", /^Markdown · \d+ B$/u);
 assert.equal(values.get("og:type"), "article");
-assert.equal(values.get("twitter:card"), "summary");
+assert.equal(values.get("twitter:card"), "summary_large_image");
 assert.equal(values.get("twitter:title"), values.get("og:title"));
 assert.equal(values.get("twitter:description"), values.get("og:description"));
 assert.equal(values.get("twitter:image"), values.get("og:image"));
@@ -193,7 +204,7 @@ const rasterValues = headValues(await rasterPage.text()).values;
 assert.equal(rasterValues.get("twitter:card"), "summary_large_image");
 assert.match(
   rasterValues.get("og:description") ?? "",
-  /^JPEG image · 640 × 360 · \d+(?:\.\d+)? (?:B|KB)$/u,
+  /^JPEG · \d+(?:\.\d+)? (?:B|KB) · 640×360$/u,
 );
 
 const imageResponse = await fetch(`${baseUrl}/og/${raster.id}.png`);

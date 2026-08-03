@@ -33,11 +33,25 @@ const ENCODED_OCTET = /%[0-9a-f]{2}/iu;
 const LOCATOR =
   /(?:[a-z][a-z0-9+.-]{0,31}\s*:|(?:https?:)?\/\/|www\.|(?:localhost|(?:\d{1,3}\.){3}\d{1,3})(?::\d+)?|[\p{L}\p{N}](?:[\p{L}\p{N}-]{0,62}\.)+(?:com|net|org|dev|io|app|co|me|ai|xyz|test|invalid|local|md|so|ts)(?:[\/:?#]|\b)|[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[\p{L}]{2,}|(?:^|[^\p{L}\p{N}])[/?#][^\s]*|\\\\|[\p{L}\p{N}._-]+[\\/][\p{L}\p{N}._/?#-]+)/iu;
 
-const SAFE_FILENAME =
-  /^[\p{L}\p{N}_ ()\[\]+,@'-]+\.(?:md|txt|png|jpe?g|gif|webp|avif|pdf|zip|tar|gz|tgz|mp3|wav|flac|m4a|mp4|mov|webm|csv|json|ya?ml|js|jsx|ts|tsx|py|html|css|docx?|xlsx?|pptx?)$/iu;
+const SAFE_FILENAME_EXTENSION =
+  /\.(?:md|txt|png|jpe?g|gif|webp|avif|pdf|zip|tar|gz|tgz|mp3|wav|flac|m4a|mp4|mov|webm|csv|json|ya?ml|js|jsx|ts|tsx|py|html|css|docx?|xlsx?|pptx?)$/iu;
+const UNSAFE_FILENAME_CHARACTER = /[\\/?#&=:]|[\p{Cc}\p{Cs}]/u;
+const QUERY_ASSIGNMENT = /\?[^\s]*[=&][^\s]*/u;
+const SANITIZED_SCHEME = /^(?:https?|ftp|file)[-_]/iu;
+
+function isSafeFilename(token: string): boolean {
+  return (
+    SAFE_FILENAME_EXTENSION.test(token) &&
+    !UNSAFE_FILENAME_CHARACTER.test(token)
+  );
+}
 
 function isLocatorToken(token: string): boolean {
-  return !SAFE_FILENAME.test(token) && LOCATOR.test(token);
+  return (
+    QUERY_ASSIGNMENT.test(token) ||
+    SANITIZED_SCHEME.test(token) ||
+    (!isSafeFilename(token) && LOCATOR.test(token))
+  );
 }
 
 function locatorProbe(value: string): {
@@ -60,6 +74,41 @@ function locatorProbe(value: string): {
       .replace(BIDI_CONTROLS, "");
   }
   return { decoded, unsafeEncoding: ENCODED_OCTET.test(decoded) };
+}
+
+export function sanitizeExcerptLine(value: string, maxBytes: number): string {
+  const leading = /^(?: {1,8}|\t{1,2})/u.exec(value)?.[0] ?? "";
+  const normalized = value
+    .normalize("NFC")
+    .replaceAll("\t", "    ")
+    .replace(CONTROL_PATTERN, "")
+    .replace(BIDI_CONTROLS, "")
+    .replace(INVALID_UNICODE, "");
+  const structuralPrefix =
+    /^( {0,3}(?:#{1,6}|[-*•]))\s+/u.exec(normalized)?.[0] ?? "";
+  const probe = locatorProbe(normalized.slice(structuralPrefix.length));
+  if (probe.unsafeEncoding) return "";
+  const scrubbed = probe.decoded
+    .split(/(\s+)/u)
+    .filter((token) => /^\s+$/u.test(token) || !isLocatorToken(token))
+    .join("")
+    .trimEnd();
+  const indentation = structuralPrefix
+    ? ""
+    : leading.replaceAll("\t", "    ").slice(0, 8);
+  const body = scrubbed.trimStart();
+  const cleaned = `${structuralPrefix || indentation}${body}`;
+  let bytes = 0;
+  let output = "";
+  for (const { segment } of new Intl.Segmenter(undefined, {
+    granularity: "grapheme",
+  }).segment(cleaned)) {
+    const next = Buffer.byteLength(segment, "utf8");
+    if (bytes + next > maxBytes) break;
+    output += segment;
+    bytes += next;
+  }
+  return output;
 }
 
 export function sanitizeLocatorFreeText(

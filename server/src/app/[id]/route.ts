@@ -1,14 +1,8 @@
-import { AppError } from "@/server/files/errors";
-import { errorResponse, notFound } from "@/server/files/http";
+import { notFound } from "@/server/files/http";
 import { renderPreview } from "@/server/files/preview";
-import {
-  isPreviewBusy,
-  isPreviewSourceUnavailable,
-} from "@/server/files/preview-renderers";
 import { getViewableFile } from "@/server/files/request";
 import {
   captureSourceIdentity,
-  isMissingSourceError,
   sourceIdentityMatches,
 } from "@/server/files/source-state";
 import {
@@ -16,6 +10,7 @@ import {
   publicUnfurlRevisionMatches,
   renderUnfurlHead,
 } from "@/server/files/unfurl";
+import { unavailablePageResponse } from "@/server/files/unavailable";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -59,21 +54,8 @@ async function responseFor(
         "x-content-type-options": "nosniff",
       },
     });
-  } catch (error) {
-    const response = errorResponse(
-      isPreviewBusy(error)
-        ? new AppError(503, "preview_busy", "Preview rendering is busy")
-        : isMissingSourceError(error) || isPreviewSourceUnavailable(error)
-          ? notFound()
-          : error,
-    );
-    return includeBody
-      ? response
-      : new Response(null, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
+  } catch {
+    return unavailablePageResponse(includeBody);
   }
 }
 

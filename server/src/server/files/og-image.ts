@@ -1,3 +1,4 @@
+import { readFileSync, realpathSync } from "node:fs";
 import path from "node:path";
 
 import { AppError } from "./errors";
@@ -47,29 +48,65 @@ export function layoutOgTitle(
 ): string[] {
   const graphemes = [
     ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
-      title,
+      title.trim(),
     ),
   ]
     .map(({ segment }) => displayGrapheme(segment))
     .filter(Boolean);
+  const units: string[][] = [];
+  let unit: string[] = [];
+  for (const grapheme of graphemes) {
+    unit.push(grapheme);
+    if (/\s|[-‐‑‒–—]/u.test(grapheme)) {
+      units.push(unit);
+      unit = [];
+    }
+  }
+  if (unit.length) units.push(unit);
+
   const lines: string[] = [];
-  let current = "";
+  let current: string[] = [];
   let columns = 0;
   let consumed = 0;
-  for (const grapheme of graphemes) {
-    const width = graphemeColumns(grapheme);
-    if (columns + width > maxColumns && current) {
-      lines.push(current.trimEnd());
-      if (lines.length === maxLines) break;
-      current = "";
+  let truncated = false;
+  outer: for (const candidate of units) {
+    const candidateWidth = candidate.reduce(
+      (total, grapheme) => total + graphemeColumns(grapheme),
+      0,
+    );
+    if (
+      current.length > 0 &&
+      candidateWidth <= maxColumns &&
+      columns + candidateWidth > maxColumns
+    ) {
+      lines.push(current.join("").trimEnd());
+      if (lines.length === maxLines) {
+        truncated = true;
+        break;
+      }
+      current = [];
       columns = 0;
     }
-    current += grapheme;
-    columns += width;
-    consumed += 1;
+    for (const grapheme of candidate) {
+      const width = graphemeColumns(grapheme);
+      if (columns + width > maxColumns && current.length > 0) {
+        lines.push(current.join("").trimEnd());
+        if (lines.length === maxLines) {
+          truncated = true;
+          break outer;
+        }
+        current = [];
+        columns = 0;
+      }
+      current.push(grapheme);
+      columns += width;
+      consumed += 1;
+    }
   }
-  if (lines.length < maxLines && current) lines.push(current.trimEnd());
-  if (consumed < graphemes.length && lines.length > 0) {
+  if (lines.length < maxLines && current.length)
+    lines.push(current.join("").trimEnd());
+  truncated ||= consumed < graphemes.length;
+  if (truncated && lines.length > 0) {
     const finalLine = [
       ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(
         lines.at(-1)?.replace(/[\s.…-]*$/u, "") ?? "",
@@ -90,6 +127,72 @@ export function layoutOgTitle(
 
 const SANS = "'Inter',sans-serif";
 const MONO = "'JetBrains Mono',monospace";
+const EMOJI_ASSETS: ReadonlyArray<readonly [string, string]> = [
+  ["📡", "1f4e1.svg"],
+  ["😀", "1f600.svg"],
+  ["🚀", "1f680.svg"],
+];
+const EMOJI_DATA = new Map<string, string>(
+  EMOJI_ASSETS.map(([grapheme, asset]) => [
+    grapheme,
+    `data:image/svg+xml;base64,${readFileSync(
+      path.join(process.cwd(), "runtime/assets/twemoji", asset),
+    ).toString("base64")}`,
+  ]),
+);
+
+function knownEmojiData(grapheme: string): string | undefined {
+  return EMOJI_DATA.get(grapheme.replaceAll("\uFE0F", ""));
+}
+
+function titleGraphemeAdvance(grapheme: string, size: number): number {
+  if (/^\s$/u.test(grapheme)) return size * 0.3;
+  if (knownEmojiData(grapheme)) return size * 1.05;
+  if (/[^\u0000-\u007F]/u.test(grapheme)) return size;
+  if (/[mwMW]/u.test(grapheme)) return size * 0.82;
+  if (/[A-Z0-9]/u.test(grapheme)) return size * 0.64;
+  if (/[-.,'()\[\]]/u.test(grapheme)) return size * 0.35;
+  return size * 0.54;
+}
+
+function titleLineMarkup(
+  line: string,
+  x: number,
+  y: number,
+  size: number,
+): string {
+  const graphemes = [
+    ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(line),
+  ].map(({ segment }) => segment);
+  if (!graphemes.some((grapheme) => knownEmojiData(grapheme))) {
+    return `<text x="${x}" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="${size}" font-weight="700" letter-spacing="-1.3" direction="auto" style="unicode-bidi:isolate">${escapeXml(line)}</text>`;
+  }
+  let cursor = x;
+  let run = "";
+  let runX = x;
+  let markup = "";
+  const flush = () => {
+    if (!run) return;
+    markup += `<text x="${runX}" y="${y}" fill="#f2f1ec" font-family="${SANS}" font-size="${size}" font-weight="700" letter-spacing="-1.3" direction="auto" style="unicode-bidi:isolate">${escapeXml(run)}</text>`;
+    run = "";
+  };
+  for (const grapheme of graphemes) {
+    const emojiData = knownEmojiData(grapheme);
+    if (emojiData) {
+      flush();
+      const emojiSize = size * 1.08;
+      markup += `<image href="${emojiData}" x="${cursor}" y="${y - size * 0.88}" width="${emojiSize}" height="${emojiSize}" preserveAspectRatio="xMidYMid meet"/>`;
+      cursor += titleGraphemeAdvance(grapheme, size);
+      runX = cursor;
+      continue;
+    }
+    if (!run) runX = cursor;
+    run += grapheme;
+    cursor += titleGraphemeAdvance(grapheme, size);
+  }
+  flush();
+  return markup;
+}
 
 function cardSvg(model: PublicUnfurlModel): Buffer {
   const safeTitle = sanitizePublicText(model.title, 300) || "File";
@@ -113,9 +216,8 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
     `<rect x="${anchor === "end" ? x - 196 : x}" y="${y - 12}" width="9" height="9" rx="2" fill="#e3a44f"/><text x="${anchor === "end" ? x - 176 : x + 20}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="20" font-weight="500" letter-spacing="2">files.moulik.dev</text>`;
   const titleText = (x: number, y: number, size = 52, width = 34) =>
     layoutOgTitle(safeTitle, width, 2)
-      .map(
-        (line, index) =>
-          `<text x="${x}" y="${y + index * (size + 5)}" fill="#f2f1ec" font-family="${SANS}" font-size="${size}" font-weight="700" letter-spacing="-1.3" direction="auto" style="unicode-bidi:isolate">${escapeXml(line)}</text>`,
+      .map((line, index) =>
+        titleLineMarkup(line, x, y + index * (size + 5), size),
       )
       .join("");
   const facts = (x = 56, y = 580) =>
@@ -134,7 +236,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
   } else if (model.kind === "video") {
     const timeline = `<line x1="56" y1="320" x2="1143" y2="320" stroke="#30343a" stroke-width="2"/><path d="M56 310v20M193 314v12M329 310v20M465 314v12M601 310v20M737 314v12M873 310v20M1009 314v12M1143 310v20" stroke="#44484f" stroke-width="2"/>`;
     body = `${brand()}${play(84, 224)}${timeline}${titleText(56, twoLineTitle ? 466 : 526, 60, 40)}${facts(56, 575)}`;
-  } else if (model.kind === "pdf") {
+  } else if (model.kind === "pdf" && visual?.kind === "page") {
     const page = raster
       ? `<image href="${raster}" x="660" y="55" width="470" height="575" preserveAspectRatio="xMidYMid meet"/>`
       : `<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${contentLines
@@ -146,7 +248,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
           .join("")}`;
     const pdfTitleLines = layoutOgTitle(safeTitle, 20, 2);
     body = `${brand()}${page}${titleText(56, pdfTitleLines.length > 1 ? 463 : 520, 52, 20)}${facts(56, 576)}`;
-  } else if (model.kind === "document") {
+  } else if (model.kind === "document" && visual?.kind !== "binary") {
     const documentHeading = layoutOgTitle(contentLines[0] ?? safeTitle, 26, 2)
       .map(
         (line, index) =>
@@ -164,7 +266,7 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
       ? `<text x="312" y="145" fill="#8b8983" font-family="${MONO}" font-size="17" letter-spacing="3">${escapeXml((model.preview?.label ?? "Document").toUpperCase())}</text>`
       : "";
     body = `<rect x="240" y="65" width="720" height="416" fill="#f4f2ed"/>${documentLabel}${documentHeading}${documentBody}<rect x="312" y="420" width="576" height="10" fill="#d0cec8"/><rect x="312" y="440" width="576" height="10" fill="#d0cec8"/><rect x="312" y="460" width="498" height="10" fill="#d0cec8"/><rect x="0" y="481" width="1200" height="149" fill="#0d0e10"/>${titleText(56, 553, 38, 42)}${facts(56, 591)}${brand(1144, 560, "end")}`;
-  } else if (model.kind === "text") {
+  } else if (model.kind === "text" && visual && "lines" in visual) {
     const pageLines = contentLines
       .slice(0, 8)
       .map(
@@ -225,6 +327,20 @@ function cardSvg(model: PublicUnfurlModel): Buffer {
     const stack = `<rect x="986" y="65" width="150" height="16" rx="3" fill="#33373c"/><rect x="1016" y="91" width="120" height="16" rx="3" fill="#3b3f45"/><rect x="1046" y="117" width="90" height="16" rx="3" fill="#44484f"/>`;
     const archiveTitleLines = layoutOgTitle(safeTitle, 42, 2);
     body = `${brand()}${stack}<text x="56" y="259" fill="#e3a44f" font-family="${MONO}" font-size="24" letter-spacing="4">${escapeXml(`${model.preview?.label ?? "Archive"} archive`.toUpperCase())}</text>${titleText(56, archiveTitleLines.length > 1 ? 458 : 522, 64, 42)}${facts(56, 576)}`;
+  } else if (visual?.kind === "binary" && visual.hex) {
+    const groups = visual.hex.split(" ");
+    const midpoint = Math.ceil(groups.length / 2);
+    const hexLines = [
+      groups.slice(0, midpoint).join(" "),
+      groups.slice(midpoint).join(" "),
+    ].filter(Boolean);
+    const hexMarkup = hexLines
+      .map(
+        (line, index) =>
+          `<text x="56" y="${242 + index * 48}" fill="#c7c9cd" font-family="${MONO}" font-size="23" letter-spacing="1.2">${escapeXml(line)}</text>`,
+      )
+      .join("");
+    body = `${brand()}<text x="56" y="168" fill="#e3a44f" font-family="${MONO}" font-size="22" letter-spacing="4">VERIFIED LEADING BYTES</text>${hexMarkup}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
   } else {
     const stack = `<rect x="1000" y="91" width="126" height="24" rx="3" fill="#33373c"/><rect x="1030" y="141" width="96" height="24" rx="3" fill="#2b2f34"/><rect x="1060" y="191" width="66" height="24" rx="3" fill="#3b3f45"/>`;
     body = `${brand()}${stack}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
@@ -239,6 +355,7 @@ interface RenderWorkerOptions {
   workerPath?: string;
   workerArguments?: readonly string[];
   timeoutMs?: number;
+  allowSubprocesses?: boolean;
 }
 
 function workerEnvironment(): NodeJS.ProcessEnv {
@@ -283,6 +400,16 @@ export async function renderSvgInWorker(
     const result = await runKillableProcess(
       process.execPath,
       [
+        ...(options.allowSubprocesses
+          ? []
+          : [
+              "--experimental-permission",
+              "--allow-addons",
+              `--allow-fs-read=${path.resolve(process.cwd(), "runtime")}`,
+              `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
+              `--allow-fs-read=${realpathSync(path.dirname(workerPath))}`,
+              `--allow-fs-write=${realpathSync("/tmp")}/file-hosting-font-cache`,
+            ]),
         `--max-old-space-size=${OG_RENDER_LIMITS.maxOldSpaceMiB}`,
         workerPath,
         ...(options.workerArguments ?? []),
@@ -293,6 +420,7 @@ export async function renderSvgInWorker(
         input: svg,
         maxOutputBytes: OG_RENDER_LIMITS.maxOutputBytes,
         timeoutMs: Math.max(1, deadline - Date.now()),
+        allowSubprocesses: options.allowSubprocesses,
       },
     );
     return result.stdout;

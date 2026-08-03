@@ -2,9 +2,11 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
+import { gzipSync } from "node:zlib";
 
 import ffmpegPath from "ffmpeg-static";
 import { PDFDocument, rgb } from "pdf-lib";
@@ -16,6 +18,9 @@ import {
   PreviewRendererRegistry,
   type RendererInput,
 } from "./preview-renderers";
+
+const require = createRequire(import.meta.url);
+const ffprobePath = (require("ffprobe-static") as { path: string }).path;
 
 const temporaryDirectories: string[] = [];
 
@@ -150,6 +155,11 @@ async function generatedMedia(
     timeout: 10_000,
   });
   assert.equal(result.status, 0, result.stderr);
+  const probeReady = spawnSync(ffprobePath, ["-version"], {
+    encoding: "utf8",
+    timeout: 10_000,
+  });
+  assert.equal(probeReady.status, 0, probeReady.stderr);
   return readFile(outputPath);
 }
 
@@ -192,7 +202,7 @@ describe("actual-byte preview derivation", () => {
         height: 630,
       },
     );
-    assert.deepEqual(first.facts.slice(0, 2), ["20×12", `${red.length} B`]);
+    assert.deepEqual(first.facts.slice(0, 2), [`${red.length} B`, "20×12"]);
   });
 
   it("renders a real PDF first page and changes when page bytes change", async () => {
@@ -596,6 +606,108 @@ describe("actual-byte preview derivation", () => {
       () => derivePreview(candidate, registry),
       /preview source unavailable/u,
     );
+  });
+
+  it("preserves safe Markdown structure and code punctuation through the real derivation pipeline", async () => {
+    const markdown = await derivePreview(
+      await fixture(
+        Buffer.from("# Rollout plan\n\n## Checks\n- Verify target\n"),
+        "text/markdown",
+        "Release runbook.md",
+      ),
+    );
+    assert.equal(markdown.visual.kind, "markdown");
+    if (markdown.visual.kind === "markdown") {
+      assert.deepEqual(markdown.visual.lines, [
+        "# Rollout plan",
+        "## Checks",
+        "- Verify target",
+      ]);
+    }
+
+    const code = await derivePreview(
+      await fixture(
+        Buffer.from(
+          "def upload_chunked(path):\n    total = os.path.getsize(path)\n",
+        ),
+        "text/x-python",
+        "upload.py",
+      ),
+    );
+    assert.equal(code.visual.kind, "code");
+    if (code.visual.kind === "code") {
+      assert.deepEqual(code.visual.lines, [
+        "def upload_chunked(path):",
+        "    total = os.path.getsize(path)",
+      ]);
+    }
+  });
+
+  it("always checksum-binds sources above 25 MiB and rejects same-size replacement", async () => {
+    const original = Buffer.alloc(26 * 1024 * 1024, 0x61);
+    const source = await fixture(original, "text/plain", "large.txt");
+    await writeFile(source.sourcePath, Buffer.alloc(original.length, 0x62));
+    await assert.rejects(derivePreview(source), /preview source unavailable/u);
+  });
+
+  it("derives bounded TAR.GZ metadata from compressed bytes", async () => {
+    const first = gzipSync(tarWithEntry("manifest.json", "one"), {
+      level: 9,
+    });
+    const second = gzipSync(tarWithEntry("database.sql", "two"), {
+      level: 9,
+    });
+    const one = await derivePreview(
+      await fixture(first, "application/gzip", "site-backup.tar.gz"),
+    );
+    const two = await derivePreview(
+      await fixture(second, "application/gzip", "site-backup.tar.gz"),
+    );
+    assert.equal(one.label, "TAR.GZ");
+    assert.equal(one.visual.kind, "archive");
+    if (one.visual.kind === "archive" && two.visual.kind === "archive") {
+      assert.deepEqual(one.visual.entries, ["manifest.json"]);
+      assert.deepEqual(two.visual.entries, ["database.sql"]);
+    }
+  });
+
+  it("uses subtype labels, approved fact ordering, and byte-derived binary hex", async () => {
+    const jpeg = await sharp({
+      create: { width: 20, height: 12, channels: 3, background: "red" },
+    })
+      .jpeg()
+      .toBuffer();
+    const image = await derivePreview(
+      await fixture(jpeg, "image/jpeg", "photo.jpg"),
+    );
+    assert.equal(image.label, "JPG");
+    assert.deepEqual(image.facts, [`${jpeg.length} B`, "20×12"]);
+
+    const binary = await derivePreview(
+      await fixture(
+        Buffer.from([0x7f, 0x45, 0x4c, 0x46, 0x02, 0x01]),
+        "application/octet-stream",
+        "firmware.bin",
+      ),
+    );
+    assert.equal(binary.label, "BIN");
+    assert.deepEqual(binary.visual, {
+      kind: "binary",
+      hex: "7F 45 4C 46 02 01",
+    });
+  });
+
+  it("checksum-binds a 26 MiB historical source and rejects a same-size replacement", async () => {
+    const original = Buffer.alloc(26 * 1024 * 1024, 0x61);
+    const source = await fixture(
+      original,
+      "application/octet-stream",
+      "historical.bin",
+    );
+    const preview = await derivePreview(source);
+    assert.equal(preview.sourceDigest, source.sha256);
+    await writeFile(source.sourcePath, Buffer.alloc(original.length, 0x62));
+    await assert.rejects(derivePreview(source), /preview source unavailable/u);
   });
 
   it("validates source checksum and generic facts without exposing raw bytes", async () => {

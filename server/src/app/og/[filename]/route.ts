@@ -1,10 +1,5 @@
-import { AppError } from "@/server/files/errors";
-import { errorResponse, notFound } from "@/server/files/http";
+import { notFound } from "@/server/files/http";
 import { renderOgImage } from "@/server/files/og-image";
-import {
-  isPreviewBusy,
-  isPreviewSourceUnavailable,
-} from "@/server/files/preview-renderers";
 import { getFileService } from "@/server/files/singleton";
 import {
   captureSourceIdentity,
@@ -14,6 +9,7 @@ import {
   buildUnfurlModel,
   publicUnfurlRevisionMatches,
 } from "@/server/files/unfurl";
+import { unavailableImageResponse } from "@/server/files/unavailable";
 import { BASE62_ID_PATTERN } from "@/server/files/types";
 
 export const runtime = "nodejs";
@@ -57,21 +53,8 @@ async function responseFor(
     return new Response(includeBody ? new Uint8Array(image) : null, {
       headers,
     });
-  } catch (error) {
-    const response = errorResponse(
-      isPreviewBusy(error)
-        ? new AppError(503, "preview_busy", "Preview rendering is busy")
-        : isPreviewSourceUnavailable(error)
-          ? notFound()
-          : error,
-    );
-    return includeBody
-      ? response
-      : new Response(null, {
-          status: response.status,
-          statusText: response.statusText,
-          headers: response.headers,
-        });
+  } catch {
+    return unavailableImageResponse(includeBody);
   }
 }
 

@@ -9,12 +9,11 @@ import sharp from "sharp";
 
 import { BoundedWorkerPool, RASTER_WORKER_LIMITS } from "./raster-worker";
 import type { FileService } from "./service";
-import { sanitizeLocatorFreeText } from "./text-safety";
+import { sanitizeExcerptLine, sanitizeLocatorFreeText } from "./text-safety";
 import type { StoredFile } from "./types";
 import {
   buildUnfurlModel,
   publicShareUrl,
-  rasterEnvelopeEligible,
   renderUnfurlHead,
   sanitizeUnfurlText,
 } from "./unfurl";
@@ -121,6 +120,22 @@ describe("unfurl text sanitizer", () => {
       sanitizeLocatorFreeText("quarterly report.pdf", 300, "File"),
       "quarterly report.pdf",
     );
+    assert.equal(
+      sanitizeLocatorFreeText("研究データ📡-résumé-Δ.md", 300, "File"),
+      "研究データ📡-résumé-Δ.md",
+    );
+    assert.equal(
+      sanitizeLocatorFreeText("👨🏽‍💻-research.md", 300, "File"),
+      "👨🏽‍💻-research.md",
+    );
+    assert.equal(
+      sanitizeLocatorFreeText("intranet?token=synthetic-secret", 300, "File"),
+      "File",
+    );
+    assert.equal(
+      sanitizeExcerptLine("# intranet?token=synthetic-secret", 300),
+      "# ",
+    );
     for (const hostile of [
       "https://secret.example/token",
       "https%253A%252F%252Fsecret.example%252Ftoken",
@@ -192,16 +207,6 @@ describe("raster safety envelope", () => {
     pool.release();
     pool.release();
   });
-
-  it("enforces the inclusive 20 MiB and 40 megapixel boundaries", () => {
-    assert.equal(rasterEnvelopeEligible(20 * 1024 * 1024, 8000, 5000), true);
-    assert.equal(
-      rasterEnvelopeEligible(20 * 1024 * 1024 + 1, 8000, 5000),
-      false,
-    );
-    assert.equal(rasterEnvelopeEligible(20 * 1024 * 1024, 8001, 5000), false);
-    assert.equal(rasterEnvelopeEligible(1, 0, 5000), false);
-  });
 });
 
 describe("public unfurl view-model", () => {
@@ -226,14 +231,14 @@ describe("public unfurl view-model", () => {
     const models = await Promise.all(
       Array.from({ length: 3 }, () => buildUnfurlModel(service, file)),
     );
-    assert.equal(models.filter((model) => model.eligibleRaster).length, 3);
+    assert.equal(models.length, 3);
     assert.equal(
       models.filter((model) => model.twitterCard === "summary").length,
       0,
     );
   });
 
-  it("reads only the capped Markdown prefix from a large sparse public file", async () => {
+  it("fails closed when a large source cannot be checksum-bound within the public deadline", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-unfurl-sparse-"),
     );
@@ -249,22 +254,28 @@ describe("public unfurl view-model", () => {
       storagePath: () => objectPath,
     } as unknown as FileService;
 
-    const model = await buildUnfurlModel(
-      service,
-      storedFile({ size: 128 * 1024 * 1024 }),
+    await assert.rejects(
+      buildUnfurlModel(service, storedFile({ size: 128 * 1024 * 1024 })),
+      /preview source unavailable/u,
     );
-    assert.equal(model.title, "Sparse heading");
   });
 
-  it("uses the sanitized first Markdown heading as title, article type, summary card", async () => {
-    const model = await modelFor("# Deploy Runbook\n\nSecret body text.\n");
-    assert.equal(model.title, "Deploy Runbook");
+  it("uses the approved filename title and keeps Markdown headings in the excerpt", async () => {
+    const model = await modelFor("# Deploy Runbook\n\nSecret body text.\n", {
+      name: "Release runbook.md",
+    });
+    assert.equal(model.title, "Release runbook.md");
     assert.equal(model.ogType, "article");
     assert.equal(model.twitterCard, "summary_large_image");
     assert.match(model.description ?? "", /^Markdown · \d+ B$/u);
     assert.equal(model.canonicalUrl, `${PUBLIC_URL}/Ab3dE5g`);
     assert.equal(model.imageUrl, `${PUBLIC_URL}/og/Ab3dE5g.png`);
-    // Never body excerpts or generated prose.
+    assert.deepEqual(
+      model.preview?.visual.kind === "markdown"
+        ? model.preview.visual.lines.slice(0, 1)
+        : [],
+      ["# Deploy Runbook"],
+    );
     assert.doesNotMatch(model.description ?? "", /Secret body/u);
   });
 
@@ -275,22 +286,21 @@ describe("public unfurl view-model", () => {
     });
     assert.equal(model.kind, "text");
     assert.equal(model.ogType, "article");
-    assert.match(model.description ?? "", /^Text · \d+ B$/u);
+    assert.match(model.description ?? "", /^TXT · \d+ B$/u);
     assert.doesNotMatch(model.description ?? "", /synthetic body/u);
   });
 
-  it("uses the inherited Markdown token text for formatted headings without markup or URLs", async () => {
+  it("keeps hostile Markdown heading locators out of the excerpt while retaining the filename title", async () => {
     const model = await modelFor(
       "# Deploy *world* [runbook](https://secret.example/path) `now`\n",
     );
-    assert.equal(model.title, "Deploy world runbook now");
-    assert.doesNotMatch(model.title, /secret\.example/u);
-    assert.equal(
-      ["*", "`", "[", "]", "(", ")"].some((character) =>
-        model.title.includes(character),
-      ),
-      false,
-    );
+    assert.equal(model.title, "notes.md");
+    const lines =
+      model.preview?.visual.kind === "markdown"
+        ? model.preview.visual.lines.join(" ")
+        : "";
+    assert.doesNotMatch(lines, /secret\.example/u);
+    assert.match(lines, /^# Deploy/u);
   });
 
   it("falls back to the sanitized filename when no heading exists", async () => {
@@ -303,7 +313,10 @@ describe("public unfurl view-model", () => {
       name: "safe-fallback.md",
     });
     assert.equal(model.title, "safe-fallback.md");
-    assert.equal(model.imageAlt, "File-Hosting preview Markdown document");
+    assert.equal(
+      model.imageAlt,
+      `File-Hosting preview card: safe-fallback.md, ${model.description}`,
+    );
   });
 
   it("rejects malformed UTF-8 headings and falls back without replacement characters", async () => {
@@ -343,8 +356,11 @@ describe("public unfurl view-model", () => {
     });
     assert.equal(model.ogType, "website");
     assert.equal(model.twitterCard, "summary_large_image");
-    assert.match(model.description ?? "", /^PNG · 16×9 · \d+ B$/u);
-    assert.equal(model.imageAlt, "File-Hosting preview survey.png, PNG");
+    assert.match(model.description ?? "", /^PNG · \d+ B · 16×9$/u);
+    assert.equal(
+      model.imageAlt,
+      `File-Hosting preview card: survey.png, ${model.description}`,
+    );
   });
 
   it("uses a summary card when declared raster bytes are malformed or MIME-mismatched", async () => {
@@ -353,7 +369,6 @@ describe("public unfurl view-model", () => {
       mimeType: "image/png",
     });
     assert.equal(malformed.twitterCard, "summary_large_image");
-    assert.equal(malformed.eligibleRaster, false);
 
     const jpeg = await sharp({
       create: {
@@ -370,7 +385,6 @@ describe("public unfurl view-model", () => {
       mimeType: "image/png",
     });
     assert.equal(mismatched.twitterCard, "summary_large_image");
-    assert.equal(mismatched.eligibleRaster, false);
   });
 
   it("fails closed on source identity mismatches and uses truthful family fallbacks", async () => {
@@ -439,10 +453,7 @@ describe("unfurl head rendering", () => {
     const head = renderUnfurlHead(model);
     const tags = metaTags(head);
     assert.equal(tags.get("og:site_name"), "File-Hosting");
-    assert.equal(
-      tags.get("og:title"),
-      "A &quot;quoted&quot; &amp; &lt;angled&gt; title",
-    );
+    assert.equal(tags.get("og:title"), "notes.md");
     assert.equal(tags.get("og:type"), "article");
     assert.equal(tags.get("og:url"), `${PUBLIC_URL}/Ab3dE5g`);
     assert.equal(tags.get("og:image"), `${PUBLIC_URL}/og/Ab3dE5g.png`);

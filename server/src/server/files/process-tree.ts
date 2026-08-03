@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
 
 export interface KillableProcessOptions {
   timeoutMs: number;
@@ -6,6 +7,8 @@ export interface KillableProcessOptions {
   cwd?: string;
   env?: NodeJS.ProcessEnv;
   input?: Buffer;
+  /** Darwin-only escape hatch for trusted test harnesses that exercise child trees. */
+  allowSubprocesses?: boolean;
 }
 
 export interface KillableProcessResult {
@@ -20,8 +23,18 @@ export class ProcessDeadlineError extends Error {
   }
 }
 
-function killProcessTree(child: ReturnType<typeof spawn>): void {
-  if (child.pid === undefined) return;
+export class ProcessExecutionError extends Error {
+  constructor(message = "process execution failed") {
+    super(message);
+    this.name = "ProcessExecutionError";
+  }
+}
+
+function killProcessTree(
+  child: ReturnType<typeof spawn>,
+  childExited: boolean,
+): void {
+  if (child.pid === undefined || childExited) return;
   if (process.platform !== "win32") {
     try {
       process.kill(-child.pid, "SIGKILL");
@@ -37,28 +50,6 @@ function killProcessTree(child: ReturnType<typeof spawn>): void {
   }
 }
 
-async function waitForProcessGroupExit(
-  pid: number,
-  timeoutMs = 1_000,
-): Promise<void> {
-  if (process.platform === "win32") return;
-  const deadline = Date.now() + timeoutMs;
-  while (Date.now() < deadline) {
-    try {
-      process.kill(-pid, 0);
-    } catch (error) {
-      const code = (error as NodeJS.ErrnoException).code;
-      if (code === "ESRCH") return;
-      // On Darwin an orphaned, killed descendant can briefly leave the process
-      // group unsignalable while launchd reaps it. EPERM is therefore not proof
-      // that the group is gone: keep the slot occupied and continue probing.
-      if (code !== "EPERM") throw error;
-    }
-    await new Promise((resolve) => setTimeout(resolve, 10));
-  }
-  throw new Error("process group did not exit after SIGKILL");
-}
-
 export async function runKillableProcess(
   command: string,
   arguments_: readonly string[],
@@ -67,8 +58,56 @@ export async function runKillableProcess(
   if (options.timeoutMs < 1 || options.maxOutputBytes < 1) {
     throw new Error("invalid process resource limits");
   }
+  const restrictSubprocess = options.allowSubprocesses !== true;
+  const restrictForks = process.platform === "darwin" && restrictSubprocess;
+  const restrictLinux =
+    process.platform === "linux" &&
+    process.env.NODE_ENV === "production" &&
+    restrictSubprocess;
+  if (restrictLinux && !existsSync("/usr/bin/bwrap")) {
+    throw new ProcessExecutionError("process sandbox unavailable");
+  }
   return new Promise<KillableProcessResult>((resolve, reject) => {
-    const child = spawn(command, arguments_, {
+    const sandboxRootArguments = [
+      "--die-with-parent",
+      "--unshare-all",
+      "--new-session",
+      "--ro-bind",
+      "/usr",
+      "/usr",
+      "--ro-bind",
+      process.cwd(),
+      process.cwd(),
+      "--bind",
+      "/tmp",
+      "/tmp",
+      "--dev",
+      "/dev",
+      "--proc",
+      "/proc",
+      "--chdir",
+      options.cwd ?? process.cwd(),
+    ];
+    if (existsSync("/lib"))
+      sandboxRootArguments.push("--ro-bind", "/lib", "/lib");
+    if (existsSync("/lib64"))
+      sandboxRootArguments.push("--ro-bind", "/lib64", "/lib64");
+    const spawnCommand = restrictForks
+      ? "/usr/bin/sandbox-exec"
+      : restrictLinux
+        ? "/usr/bin/bwrap"
+        : command;
+    const spawnArguments = restrictForks
+      ? [
+          "-p",
+          "(version 1)(allow default)(deny process-fork)(deny network*)",
+          command,
+          ...arguments_,
+        ]
+      : restrictLinux
+        ? [...sandboxRootArguments, command, ...arguments_]
+        : [...arguments_];
+    const child = spawn(spawnCommand, spawnArguments, {
       cwd: options.cwd,
       detached: process.platform !== "win32",
       env: options.env,
@@ -81,17 +120,44 @@ export async function runKillableProcess(
     let outputBytes = 0;
     let deadlineExceeded = false;
     let outputExceeded = false;
-    let spawnError: Error | null = null;
+    let spawnError = false;
+    let childExited = false;
     let treeKillAttempted = false;
+    let settled = false;
+    let hardSettleTimer: NodeJS.Timeout | undefined;
 
+    const finishReject = (error: Error): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (hardSettleTimer) clearTimeout(hardSettleTimer);
+      reject(error);
+    };
+    const finishResolve = (result: KillableProcessResult): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (hardSettleTimer) clearTimeout(hardSettleTimer);
+      resolve(result);
+    };
     const terminateTreeOnce = (): void => {
       if (treeKillAttempted) return;
       treeKillAttempted = true;
-      killProcessTree(child);
+      killProcessTree(child, childExited);
+      child.stdin?.destroy();
+      hardSettleTimer = setTimeout(() => {
+        child.stdout?.destroy();
+        child.stderr?.destroy();
+        finishReject(
+          deadlineExceeded
+            ? new ProcessDeadlineError()
+            : new ProcessExecutionError("process output limit exceeded"),
+        );
+      }, 250);
     };
 
     const timer = setTimeout(() => {
-      if (treeKillAttempted) return;
+      if (settled) return;
       deadlineExceeded = true;
       terminateTreeOnce();
     }, options.timeoutMs);
@@ -122,52 +188,22 @@ export async function runKillableProcess(
       }
       stderr.push(chunk);
     });
-    child.once("error", (error) => {
-      spawnError = error;
+    child.once("error", () => {
+      spawnError = true;
     });
-    const handleClose = async (
-      code: number | null,
-      signal: NodeJS.Signals | null,
-    ): Promise<void> => {
-      clearTimeout(timer);
-      if ((deadlineExceeded || outputExceeded) && child.pid) {
-        try {
-          await waitForProcessGroupExit(child.pid);
-        } catch (error) {
-          reject(
-            error instanceof Error
-              ? error
-              : new Error("process group reap failed"),
-          );
-          return;
-        }
-      }
-      if (deadlineExceeded) {
-        reject(new ProcessDeadlineError());
+    child.once("exit", () => {
+      childExited = true;
+    });
+    child.once("close", (code) => {
+      if (deadlineExceeded || outputExceeded) return;
+      if (spawnError || code !== 0) {
+        finishReject(new ProcessExecutionError());
         return;
       }
-      if (outputExceeded) {
-        reject(new Error("process output limit exceeded"));
-        return;
-      }
-      if (spawnError) {
-        reject(spawnError);
-        return;
-      }
-      const stderrBuffer = Buffer.concat(stderr);
-      if (code !== 0) {
-        reject(
-          new Error(
-            stderrBuffer.toString("utf8").trim() ||
-              `process failed (${code ?? signal ?? "unknown"})`,
-          ),
-        );
-        return;
-      }
-      resolve({ stdout: Buffer.concat(stdout), stderr: stderrBuffer });
-    };
-    child.once("close", (code, signal) => {
-      void handleClose(code, signal);
+      finishResolve({
+        stdout: Buffer.concat(stdout),
+        stderr: Buffer.concat(stderr),
+      });
     });
   });
 }

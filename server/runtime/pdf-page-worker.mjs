@@ -1,0 +1,68 @@
+import { writeSync } from "node:fs";
+
+import { createCanvas, DOMMatrix, ImageData, Path2D } from "@napi-rs/canvas";
+
+globalThis.DOMMatrix ??= DOMMatrix;
+globalThis.ImageData ??= ImageData;
+globalThis.Path2D ??= Path2D;
+
+// Parser diagnostics can include untrusted document strings; keep stdout binary-only
+// and do not emit anonymous-file details to logs.
+console.log = () => {};
+console.info = () => {};
+console.warn = () => {};
+console.error = () => {};
+
+const MAX_PDF_BYTES = 25 * 1024 * 1024;
+const chunks = [];
+let bytes = 0;
+
+try {
+  for await (const chunk of process.stdin) {
+    bytes += chunk.length;
+    if (bytes > MAX_PDF_BYTES) throw new Error("pdf input limit exceeded");
+    chunks.push(chunk);
+  }
+  const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
+  const loadingTask = getDocument({
+    data: new Uint8Array(Buffer.concat(chunks)),
+    disableFontFace: true,
+    disableRange: true,
+    disableStream: true,
+    isEvalSupported: false,
+    stopEvent: true,
+    useSystemFonts: false,
+  });
+  const document = await loadingTask.promise;
+  if (document.numPages < 1 || document.numPages > 10_000)
+    throw new Error("invalid page count");
+  const page = await document.getPage(1);
+  const base = page.getViewport({ scale: 1 });
+  if (
+    !Number.isFinite(base.width) ||
+    !Number.isFinite(base.height) ||
+    base.width <= 0 ||
+    base.height <= 0
+  ) {
+    throw new Error("invalid page geometry");
+  }
+  const scale = Math.min(1200 / base.width, 630 / base.height);
+  const viewport = page.getViewport({ scale });
+  if (viewport.width * viewport.height > 40_000_000)
+    throw new Error("page pixel limit exceeded");
+  const canvas = createCanvas(1200, 630);
+  const context = canvas.getContext("2d");
+  context.fillStyle = "white";
+  context.fillRect(0, 0, 1200, 630);
+  context.save();
+  context.translate((1200 - viewport.width) / 2, (630 - viewport.height) / 2);
+  await page.render({ canvasContext: context, viewport }).promise;
+  context.restore();
+  const output = canvas.toBuffer("image/png");
+  if (output.length > 8 * 1024 * 1024)
+    throw new Error("pdf output limit exceeded");
+  writeSync(1, output);
+  await document.destroy();
+} catch {
+  process.exitCode = 1;
+}

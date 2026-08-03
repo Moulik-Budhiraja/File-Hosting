@@ -478,9 +478,30 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       new Request("http://localhost/0000000"),
       routeContext("0000000"),
     );
-    assert.equal(hiddenPreview.status, 404);
-    assert.equal(missingPreview.status, 404);
-    assert.deepEqual(await hiddenPreview.json(), await missingPreview.json());
+    assert.equal(hiddenPreview.status, 200);
+    assert.equal(missingPreview.status, 200);
+    assert.deepEqual(
+      Object.fromEntries(hiddenPreview.headers),
+      Object.fromEntries(missingPreview.headers),
+    );
+    const hiddenPreviewBytes = Buffer.from(await hiddenPreview.arrayBuffer());
+    const missingPreviewBytes = Buffer.from(await missingPreview.arrayBuffer());
+    assert.deepEqual(hiddenPreviewBytes, missingPreviewBytes);
+    assert.equal(
+      hiddenPreview.headers.get("content-length"),
+      String(hiddenPreviewBytes.length),
+    );
+    assert.match(
+      hiddenPreview.headers.get("content-type") ?? "",
+      /^text\/html;/u,
+    );
+    const unavailableHtml = hiddenPreviewBytes.toString("utf8");
+    assert.match(unavailableHtml, /File unavailable/u);
+    assert.match(unavailableHtml, /Preview unavailable/u);
+    assert.doesNotMatch(
+      unavailableHtml,
+      new RegExp(`${uploadedId}|secret|text/plain`, "iu"),
+    );
 
     const authenticated = await rawFile(
       new Request(`http://localhost/raw/${uploadedId}`, {

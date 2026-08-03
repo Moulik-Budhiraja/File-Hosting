@@ -4,6 +4,7 @@ import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
+import { gunzipSync } from "node:zlib";
 
 import { runKillableProcess } from "./process-tree";
 import {
@@ -11,7 +12,11 @@ import {
   deriveRasterPreviewInWorker,
   inspectRasterInWorker,
 } from "./raster-worker";
-import { sanitizeLocatorFreeText, sanitizePublicText } from "./text-safety";
+import {
+  sanitizeExcerptLine,
+  sanitizeLocatorFreeText,
+  sanitizePublicText,
+} from "./text-safety";
 
 export type PreviewFamily =
   | "image"
@@ -47,7 +52,7 @@ export type PreviewVisual =
   | { kind: "markdown" | "text" | "code"; lines: readonly string[] }
   | { kind: "waveform"; samples: readonly number[] }
   | { kind: "archive"; entries: readonly string[] }
-  | { kind: "binary" };
+  | { kind: "binary"; hex?: string };
 
 export interface PreviewExtraction {
   family: PreviewFamily;
@@ -77,6 +82,7 @@ const MAX_READ_BYTES = 256 * 1024;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_ARCHIVE_ENTRIES = 12;
 const MAX_ARCHIVE_SCAN_BYTES = 1024 * 1024;
+const MAX_ARCHIVE_RATIO = 100;
 export const PREVIEW_EXTRACTION_LIMITS = Object.freeze({
   maxConcurrent: 2,
   maxQueued: 16,
@@ -155,12 +161,11 @@ async function readVerifiedSource(input: RendererInput): Promise<Buffer> {
     }
     const previewLength = Math.min(input.size, MAX_READ_BYTES);
     const bytes = Buffer.alloc(previewLength);
-    const verifyDigest = input.size <= MAX_SOURCE_BYTES;
     const hash = createHash("sha256");
     const chunk = Buffer.alloc(
       Math.min(MAX_READ_BYTES, Math.max(1, input.size)),
     );
-    const readLength = verifyDigest ? input.size : previewLength;
+    const readLength = input.size;
     const deadline = Math.min(
       Date.now() + 1_500,
       input.deadlineAt ?? Number.POSITIVE_INFINITY,
@@ -180,7 +185,7 @@ async function readVerifiedSource(input: RendererInput): Promise<Buffer> {
           Math.min(read.bytesRead, previewLength - offset),
         );
       }
-      if (verifyDigest) hash.update(chunk.subarray(0, read.bytesRead));
+      hash.update(chunk.subarray(0, read.bytesRead));
       offset += read.bytesRead;
     }
     const after = await handle.stat({ bigint: true });
@@ -193,7 +198,7 @@ async function readVerifiedSource(input: RendererInput): Promise<Buffer> {
     ) {
       throw new Error("source changed during read");
     }
-    if (verifyDigest && hash.digest("hex") !== input.sha256.toLowerCase()) {
+    if (hash.digest("hex") !== input.sha256.toLowerCase()) {
       throw new Error("source checksum mismatch");
     }
     return bytes;
@@ -283,6 +288,57 @@ function sourceFrom(probe: RendererProbe): Buffer {
   return source;
 }
 
+function codeLabel(input: RendererInput): string {
+  const extension = path.extname(input.name).slice(1).toUpperCase();
+  const allowed = new Set([
+    "TS",
+    "TSX",
+    "JS",
+    "JSX",
+    "JSON",
+    "PY",
+    "RB",
+    "GO",
+    "RS",
+    "JAVA",
+    "C",
+    "CPP",
+    "CSS",
+    "HTML",
+    "XML",
+    "YAML",
+    "YML",
+    "TOML",
+    "SH",
+  ]);
+  if (allowed.has(extension)) return extension;
+  if (input.trustedMime === "application/json") return "JSON";
+  return "SOURCE";
+}
+
+function archiveLabel(input: RendererInput): string {
+  if (input.trustedMime === "application/zip") return "ZIP";
+  if (input.trustedMime === "application/x-tar") return "TAR";
+  if (
+    input.trustedMime === "application/gzip" &&
+    /(?:\.tar\.gz|\.tgz)$/iu.test(input.name)
+  )
+    return "TAR.GZ";
+  if (input.trustedMime === "application/gzip") return "GZIP";
+  return "ARCHIVE";
+}
+
+function documentLabel(input: RendererInput): string {
+  if (
+    input.trustedMime ===
+    "application/vnd.openxmlformats-officedocument.wordprocessingml.document"
+  )
+    return "DOCX";
+  if (input.trustedMime === "application/msword") return "DOC";
+  if (input.trustedMime === "application/rtf") return "RTF";
+  return "DOCUMENT";
+}
+
 function baseExtraction(
   probe: RendererProbe,
   family: PreviewFamily,
@@ -308,7 +364,7 @@ function boundedUtf8Lines(source: Buffer): string[] {
     .replaceAll("\0", "")
     .split(/\r?\n/u)
     .slice(0, 12)
-    .map((line) => sanitizeLocatorFreeText(line, 320))
+    .map((line) => sanitizeExcerptLine(line, 320))
     .filter(Boolean);
 }
 
@@ -487,6 +543,32 @@ function tarEntries(source: Buffer): string[] {
   return entries;
 }
 
+function gzipTarEntries(source: Buffer, deadlineAt?: number): string[] {
+  if (
+    source.length < 18 ||
+    source.length > MAX_READ_BYTES ||
+    source[0] !== 0x1f ||
+    source[1] !== 0x8b ||
+    (deadlineAt !== undefined && Date.now() >= deadlineAt)
+  ) {
+    return [];
+  }
+  try {
+    const decompressed = gunzipSync(source, {
+      maxOutputLength: MAX_ARCHIVE_SCAN_BYTES,
+    });
+    if (
+      decompressed.length > source.length * MAX_ARCHIVE_RATIO ||
+      (deadlineAt !== undefined && Date.now() >= deadlineAt)
+    ) {
+      return [];
+    }
+    return tarEntries(decompressed);
+  } catch {
+    return [];
+  }
+}
+
 export class PreviewBusyError extends Error {
   constructor() {
     super("preview extraction is busy");
@@ -552,6 +634,10 @@ async function documentExcerpt(input: RendererInput): Promise<string[]> {
     const result = await runKillableProcess(
       process.execPath,
       [
+        "--experimental-permission",
+        "--allow-addons",
+        `--allow-fs-read=${path.resolve(process.cwd(), "runtime")}`,
+        `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
         "--max-old-space-size=256",
         path.resolve(process.cwd(), "runtime/docx-text-worker.mjs"),
       ],
@@ -598,6 +684,10 @@ async function pdfFirstPage(input: RendererInput): Promise<Buffer | null> {
     const result = await runKillableProcess(
       process.execPath,
       [
+        "--experimental-permission",
+        "--allow-addons",
+        `--allow-fs-read=${path.resolve(process.cwd(), "runtime")}`,
+        `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
         "--max-old-space-size=256",
         path.resolve(process.cwd(), "runtime/pdf-page-worker.mjs"),
       ],
@@ -638,6 +728,8 @@ async function probeMedia(
     [
       "-v",
       "error",
+      "-protocol_whitelist",
+      "file,pipe",
       "-show_entries",
       "format=duration:stream=codec_type,width,height",
       "-of",
@@ -687,6 +779,8 @@ async function videoPoster(
           "-v",
           "error",
           "-nostdin",
+          "-protocol_whitelist",
+          "file,pipe",
           "-i",
           sourcePath,
           "-frames:v",
@@ -737,6 +831,8 @@ async function audioArtwork(
           "-v",
           "error",
           "-nostdin",
+          "-protocol_whitelist",
+          "file,pipe",
           "-i",
           sourcePath,
           "-map",
@@ -803,6 +899,8 @@ async function compressedAudioWaveform(
           "-v",
           "error",
           "-nostdin",
+          "-protocol_whitelist",
+          "file,pipe",
           "-i",
           sourcePath,
           "-map",
@@ -881,7 +979,7 @@ const ARCHIVE_MIMES = new Set([
 ]);
 const MARKDOWN_MIMES = new Set(["text/markdown", "text/x-markdown"]);
 const RASTER_MIMES = new Map([
-  ["image/jpeg", "JPEG"],
+  ["image/jpeg", "JPG"],
   ["image/png", "PNG"],
   ["image/webp", "WebP"],
 ]);
@@ -904,7 +1002,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
           return baseExtraction(
             probe,
             "markdown",
-            "Markdown",
+            "MD",
             lines.length ? { kind: "markdown", lines } : { kind: "binary" },
           );
         },
@@ -949,7 +1047,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
           return baseExtraction(
             probe,
             "code",
-            "Code",
+            codeLabel(probe.input),
             lines.length ? { kind: "code", lines } : { kind: "binary" },
           );
         },
@@ -970,7 +1068,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
           return baseExtraction(
             probe,
             "document",
-            "Document",
+            documentLabel(probe.input),
             lines.length ? { kind: "text", lines } : { kind: "binary" },
           );
         },
@@ -989,16 +1087,17 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
               ? zipEntries(source)
               : probe.input.trustedMime === "application/x-tar"
                 ? tarEntries(source)
-                : [];
+                : probe.input.trustedMime === "application/gzip" &&
+                    /(?:\.tar\.gz|\.tgz)$/iu.test(probe.input.name)
+                  ? gzipTarEntries(source, probe.input.deadlineAt)
+                  : [];
+          const label = archiveLabel(probe.input);
           return baseExtraction(
             probe,
             "archive",
-            "Archive",
+            label,
             entries.length ? { kind: "archive", entries } : { kind: "binary" },
-            [
-              formatBytes(probe.input.size),
-              ...(entries.length ? [`${entries.length} entry`] : []),
-            ],
+            [formatBytes(probe.input.size)],
           );
         },
       ),
@@ -1012,7 +1111,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
         async (probe) => {
           const label = RASTER_MIMES.get(probe.input.trustedMime);
           if (!label)
-            return baseExtraction(probe, "image", "Image", { kind: "binary" });
+            return baseExtraction(probe, "image", "IMAGE", { kind: "binary" });
           try {
             const derived = await withVerifiedSnapshot(
               probe.input,
@@ -1031,7 +1130,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
               },
             );
             if (!derived)
-              return baseExtraction(probe, "image", "Image", {
+              return baseExtraction(probe, "image", label, {
                 kind: "binary",
               });
             return baseExtraction(
@@ -1040,13 +1139,13 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
               label,
               { kind: "image", raster: derived.raster },
               [
-                `${derived.dimensions.width}×${derived.dimensions.height}`,
                 formatBytes(probe.input.size),
+                `${derived.dimensions.width}×${derived.dimensions.height}`,
               ],
             );
           } catch {
             await readVerifiedSource(probe.input);
-            return baseExtraction(probe, "image", "Image", { kind: "binary" });
+            return baseExtraction(probe, "image", label, { kind: "binary" });
           }
         },
       ),
@@ -1130,7 +1229,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
           return baseExtraction(
             probe,
             "text",
-            "Text",
+            "TXT",
             lines.length ? { kind: "text", lines } : { kind: "binary" },
           );
         },
@@ -1142,8 +1241,18 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
         0,
         "binary",
         () => true,
-        async (probe) =>
-          baseExtraction(probe, "binary", "Binary", { kind: "binary" }),
+        async (probe) => {
+          const source = sourceFrom(probe);
+          const hex = [...source.subarray(0, 24)]
+            .map((byte) => byte.toString(16).padStart(2, "0").toUpperCase())
+            .join(" ");
+          return baseExtraction(
+            probe,
+            "binary",
+            "BIN",
+            hex ? { kind: "binary", hex } : { kind: "binary" },
+          );
+        },
       ),
     );
 }

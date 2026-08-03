@@ -356,10 +356,19 @@ test("built server and CLI work together end to end", { timeout: 180_000 }, asyn
     for (const route of [`/${publicFile.id}`, `/raw/${publicFile.id}`]) {
       assert.equal((await request(route, {}, false)).status, 200, `${route} should be public`);
     }
-    for (const route of [`/${privateFile.id}`, `/raw/${privateFile.id}`]) {
-      assert.equal((await request(route, {}, false)).status, 404, `${route} should hide private files`);
-      assert.equal((await request(route)).status, 200, `${route} should accept a token`);
-    }
+    const privatePage = await request(`/${privateFile.id}`, {}, false);
+    const missingPage = await request("/0000000", {}, false);
+    assert.equal(privatePage.status, 200);
+    assert.equal(missingPage.status, 200);
+    assert.deepEqual(Object.fromEntries(privatePage.headers), Object.fromEntries(missingPage.headers));
+    const privatePageBytes = Buffer.from(await privatePage.arrayBuffer());
+    const missingPageBytes = Buffer.from(await missingPage.arrayBuffer());
+    assert.deepEqual(privatePageBytes, missingPageBytes);
+    assert.match(privatePageBytes.toString("utf8"), /File unavailable/);
+    assert.doesNotMatch(privatePageBytes.toString("utf8"), new RegExp(`${privateFile.id}|private\\.txt`, "u"));
+    assert.equal((await request(`/${privateFile.id}`)).status, 200, "private preview should accept a token");
+    assert.equal((await request(`/raw/${privateFile.id}`, {}, false)).status, 404, "private raw bytes must remain hidden");
+    assert.equal((await request(`/raw/${privateFile.id}`)).status, 200, "private raw bytes should accept a token");
 
     let changed = parseJson(await cli(["visibility", publicFile.id, "private", "--json"]), "make public file private");
     assert.equal(changed.visibility, "private");

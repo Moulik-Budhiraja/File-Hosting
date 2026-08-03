@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { crc32 } from "node:zlib";
@@ -13,6 +13,7 @@ import {
   HEAD as headOgImage,
 } from "../../app/og/[filename]/route";
 import { layoutOgTitle, OG_RENDER_LIMITS, renderOgImage } from "./og-image";
+import { PreviewBusyError } from "./preview-renderers";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
 import type { PublicUnfurlModel } from "./unfurl";
@@ -92,12 +93,52 @@ describe("OG image title layout", () => {
       ).length;
       assert.ok([...line].length + wideGlyphs <= 35);
     }
+    assert.deepEqual(layoutOgTitle("annual-report-2025.pdf", 16, 3), [
+      "annual-report-",
+      "2025.pdf",
+    ]);
+    assert.deepEqual(layoutOgTitle("release notes final.pdf", 14, 3), [
+      "release notes",
+      "final.pdf",
+    ]);
     const wideLatin = layoutOgTitle("W".repeat(60), 18, 3);
     assert.equal(wideLatin.length, 3);
     assert.match(wideLatin.at(-1) ?? "", /…$/u);
     assert.ok(
       wideLatin.every((line) => [...line.replace(/…$/u, "")].length <= 9),
     );
+  });
+
+  it("renders the approved satellite emoji as deterministic color artwork", async () => {
+    const output = await renderOgImage(
+      {} as FileService,
+      { size: 1 } as StoredFile,
+      {
+        title: "研究データ📡-résumé-Δ.md",
+        description: "MD · 59 B",
+        ogType: "article",
+        twitterCard: "summary",
+        canonicalUrl: "https://example.test/Ab3dE5g",
+        imageUrl: "https://example.test/og/Ab3dE5g.png",
+        imageAlt: "safe",
+        kind: "markdown",
+      },
+    );
+    const { data } = await sharp(output)
+      .extract({ left: 220, top: 490, width: 100, height: 70 })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    let orangePixels = 0;
+    for (let offset = 0; offset < data.length; offset += 3) {
+      const red = data[offset] ?? 0;
+      const green = data[offset + 1] ?? 0;
+      const blue = data[offset + 2] ?? 0;
+      if (red > 220 && green > 120 && green < 210 && blue < 100) {
+        orangePixels += 1;
+      }
+    }
+    assert.ok(orangePixels > 10, "expected Twemoji orange signal pixels");
   });
 
   it("fails safe when a legacy model contains XML-illegal scalars", async () => {
@@ -113,7 +154,6 @@ describe("OG image title layout", () => {
         imageUrl: "https://example.test/og/Ab3dE5g.png",
         imageAlt: "safe",
         kind: "binary",
-        eligibleRaster: false,
       },
     );
     const metadata = await sharp(output).metadata();
@@ -139,7 +179,6 @@ describe("OG image title layout", () => {
       imageUrl: "https://example.test/og/Ab3dE5g.png",
       imageAlt: "safe",
       kind: "document",
-      eligibleRaster: false,
     };
     const results = await Promise.allSettled(
       Array.from({ length: 40 }, () =>
@@ -209,7 +248,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     const tags = parsedHead(html);
     assert.deepEqual(Object.fromEntries(tags), {
       "og:site_name": "File-Hosting",
-      "og:title": "Canonical title",
+      "og:title": "fallback.md",
       "og:description": `Markdown · ${file.size} B`,
       "og:type": "article",
       "og:url": `https://canonical.example.test/${file.id}`,
@@ -217,13 +256,12 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       "og:image:width": "1200",
       "og:image:height": "630",
       "og:image:type": "image/png",
-      "og:image:alt": "File-Hosting preview Canonical title, Markdown document",
+      "og:image:alt": `File-Hosting preview card: fallback.md, Markdown · ${file.size} B`,
       "twitter:card": "summary_large_image",
-      "twitter:title": "Canonical title",
+      "twitter:title": "fallback.md",
       "twitter:description": `Markdown · ${file.size} B`,
       "twitter:image": `https://canonical.example.test/og/${file.id}.png`,
-      "twitter:image:alt":
-        "File-Hosting preview Canonical title, Markdown document",
+      "twitter:image:alt": `File-Hosting preview card: fallback.md, Markdown · ${file.size} B`,
       canonical: `https://canonical.example.test/${file.id}`,
     });
     const head = /<head>([\s\S]*?)<\/head>/u.exec(html)?.[1] ?? "";
@@ -234,11 +272,11 @@ describe("rich unfurl routes", { concurrency: false }, () => {
 
   it("emits the exact allowlisted tag set for every public file class", async () => {
     const cases = [
-      ["notes.txt", "text/plain", "Text", "article"],
+      ["notes.txt", "text/plain", "TXT", "article"],
       ["audit.pdf", "application/pdf", "PDF", "article"],
       ["recording.mp3", "audio/mpeg", "MP3", "website"],
       ["clip.mp4", "video/mp4", "MP4", "website"],
-      ["archive.zip", "application/zip", "Archive", "website"],
+      ["archive.zip", "application/zip", "ZIP", "website"],
     ] as const;
     const expectedKeys = [
       "canonical",
@@ -314,7 +352,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         new Request(`https://canonical.example.test/${file.id}`),
         routeContext(file.id),
       );
-      assert.equal(response.status, 404);
+      assert.equal(response.status, 200);
       assert.equal(targetReads, 2);
     } finally {
       service.get = originalGet;
@@ -409,7 +447,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
                 new Request(`https://canonical.example.test/og/${file.id}.png`),
                 ogRouteContext(file.id),
               );
-        assert.equal(response.status, 404);
+        assert.equal(response.status, 200);
         assert.doesNotMatch(await response.text(), /original|replaced/u);
       } finally {
         service.get = originalGet;
@@ -464,8 +502,25 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       mimeType: "text/plain",
     });
     await service.delete(deletedFile.id);
+    const unreadableFile = await service.upload(
+      bytes("unreadable secret bytes"),
+      {
+        name: "unreadable-secret.txt",
+        tags: [],
+        visibility: "public",
+        archive: null,
+        mimeType: "text/plain",
+      },
+    );
+    await chmod(service.storagePath(unreadableFile), 0);
 
-    const ids = [privateFile.id, protectedFile.id, "0000000", deletedFile.id];
+    const ids = [
+      privateFile.id,
+      protectedFile.id,
+      "0000000",
+      deletedFile.id,
+      unreadableFile.id,
+    ];
     const pageSnapshots = [];
     const imageSnapshots = [];
     for (const id of ids) {
@@ -484,12 +539,42 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         privacySnapshot(image, Buffer.from(await image.arrayBuffer())),
       );
     }
+    const originalGet = service.get.bind(service);
+    service.get = async (id: string) => {
+      if (id === "BUSY000") throw new PreviewBusyError();
+      return originalGet(id);
+    };
+    try {
+      const busyPage = await getPreview(
+        new Request("https://canonical.example.test/BUSY000"),
+        routeContext("BUSY000"),
+      );
+      const busyImage = await getOgImage(
+        new Request("https://canonical.example.test/og/BUSY000.png"),
+        ogRouteContext("BUSY000"),
+      );
+      pageSnapshots.push(
+        privacySnapshot(busyPage, Buffer.from(await busyPage.arrayBuffer())),
+      );
+      imageSnapshots.push(
+        privacySnapshot(busyImage, Buffer.from(await busyImage.arrayBuffer())),
+      );
+    } finally {
+      service.get = originalGet;
+    }
     for (const snapshot of pageSnapshots.slice(1))
       assert.deepEqual(snapshot, pageSnapshots[0]);
     for (const snapshot of imageSnapshots.slice(1))
       assert.deepEqual(snapshot, imageSnapshots[0]);
-    assert.equal(pageSnapshots[0]?.status, 404);
-    assert.equal(imageSnapshots[0]?.status, 404);
+    assert.equal(pageSnapshots[0]?.status, 200);
+    assert.equal(imageSnapshots[0]?.status, 200);
+    const pageBody = Buffer.from(pageSnapshots[0].body, "base64").toString(
+      "utf8",
+    );
+    assert.match(pageBody, /File unavailable/u);
+    assert.match(pageBody, /Preview unavailable/u);
+    const imageBody = Buffer.from(imageSnapshots[0].body, "base64");
+    assert.equal(imageBody.subarray(1, 4).toString("ascii"), "PNG");
     for (const snapshot of [...pageSnapshots, ...imageSnapshots]) {
       const headers = new Headers(snapshot.headers);
       assert.equal(headers.get("x-content-type-options"), "nosniff");
@@ -516,8 +601,8 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         }),
         ogRouteContext(id),
       );
-      assert.equal(pageHead.status, 404);
-      assert.equal(imageHead.status, 404);
+      assert.equal(pageHead.status, 200);
+      assert.equal(imageHead.status, 200);
       assert.equal(await pageHead.text(), "");
       assert.equal(await imageHead.text(), "");
       assert.deepEqual(
@@ -560,7 +645,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         }),
         ogRouteContext(file.id),
       );
-      assert.equal(image.status, 404);
+      assert.equal(image.status, 200);
       assert.doesNotMatch(
         await image.text(),
         /authorized secret|authorized-secret/u,
@@ -590,7 +675,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
           ogRouteContext(file.id),
         )
       ).status,
-      404,
+      200,
     );
     await service.update(file.id, { visibility: "public" });
     assert.equal(
@@ -610,7 +695,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
           ogRouteContext(file.id),
         )
       ).status,
-      404,
+      200,
     );
   });
 
@@ -636,7 +721,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         new Request(`https://canonical.example.test/og/${file.id}.png`),
         ogRouteContext(file.id),
       );
-      assert.equal(response.status, 404);
+      assert.equal(response.status, 200);
       assert.equal(targetReads, 2);
     } finally {
       service.get = originalGet;
@@ -814,7 +899,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     );
     assert.equal(
       parsedHead(await response.text()).get("og:description"),
-      `JPEG · 60×120 · ${file.size} B`,
+      `JPEG · ${file.size} B · 60×120`,
     );
   });
 

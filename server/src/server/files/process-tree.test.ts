@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -68,6 +68,7 @@ describe(
           workerPath: launcherScript,
           workerArguments: [pidFile, childScript],
           timeoutMs: 150,
+          allowSubprocesses: true,
         });
         const pids = await waitForPids(pidFile);
         await assert.rejects(run, ProcessDeadlineError);
@@ -96,6 +97,64 @@ describe(
       assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
     });
 
+    it(
+      "fails closed by denying a setsid descendant before the hard bound",
+      { skip: process.platform !== "darwin" },
+      async () => {
+        await access("/usr/bin/sandbox-exec");
+        const directory = await mkdtemp(
+          path.join(os.tmpdir(), "fs-og-setsid-"),
+        );
+        temporaryDirectories.push(directory);
+        const pidFile = path.join(directory, "escaped-pid.txt");
+        const launcher = path.join(directory, "launcher.mjs");
+        await writeFile(
+          launcher,
+          `import { writeFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nconst child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { detached: true, stdio: ["ignore", "inherit", "inherit"] });\nwriteFileSync(process.argv[2], String(child.pid));\nprocess.exit(0);\n`,
+        );
+        let escapedPid = 0;
+        const started = Date.now();
+        try {
+          const run = runKillableProcess(
+            process.execPath,
+            [launcher, pidFile],
+            {
+              timeoutMs: 150,
+              maxOutputBytes: 1024,
+            },
+          );
+          await assert.rejects(
+            Promise.race([
+              run,
+              new Promise((_, reject) =>
+                setTimeout(
+                  () => reject(new Error("hard rejection bound exceeded")),
+                  750,
+                ),
+              ),
+            ]),
+            /process execution failed|process deadline exceeded/u,
+          );
+          assert.ok(Date.now() - started < 750);
+          try {
+            const candidate = Number(await readFile(pidFile, "utf8"));
+            if (Number.isSafeInteger(candidate)) escapedPid = candidate;
+          } catch {
+            // Fork denial can prevent the pid file from being created.
+          }
+          assert.equal(
+            escapedPid,
+            0,
+            "Darwin process-fork sandbox must deny descendant creation",
+          );
+        } finally {
+          if (escapedPid && processExists(escapedPid)) {
+            process.kill(escapedPid, "SIGKILL");
+          }
+        }
+      },
+    );
+
     it("bounds the deadline from enqueue through process completion", async () => {
       const directory = await mkdtemp(
         path.join(os.tmpdir(), "fs-og-deadline-"),
@@ -111,6 +170,7 @@ describe(
         workerPath: worker,
         workerArguments: ["300"],
         timeoutMs: 1_000,
+        allowSubprocesses: true,
       });
       await new Promise((resolve) => setTimeout(resolve, 25));
       const started = Date.now();

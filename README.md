@@ -104,14 +104,26 @@ propagate it to subprocesses. If a strategy misses that deadline, the request fa
 closed but its slot remains occupied until the strategy settles, so timed-out work
 cannot escape pool accounting.
 
-Generated social-card rendering runs in a bounded child process. On POSIX,
-the server launches that worker in a dedicated process group; a deadline or
-output-limit breach sends `SIGKILL` to the group, waits for the launcher to be
-reaped and the group to disappear, and only then releases the render slot. The
-process-tree regression covers launcher, child, and grandchild termination,
-repeated-timeout RSS, queue recovery, and a subsequent successful render.
-Windows currently terminates only the immediate child and does not claim the
-same descendant-tree guarantee; the POSIX tree regression is skipped there.
+Generated social-card rendering runs in a bounded child process. Node workers use
+Node's permission model: reads are limited to their worker/module/input paths,
+writes are denied except for the isolated font cache, network and child-process
+access are denied, and the environment excludes application credentials. On Darwin,
+the system sandbox additionally denies process creation and network access; sandbox
+startup failure is fail-closed. In Linux production, `/usr/bin/bwrap` is mandatory
+and launches workers without network or `/data`, with the application mounted
+read-only and only `/tmp` writable; the production image installs that sandbox and
+missing availability fails closed. Native media tools receive source bytes only on
+stdin with FFmpeg's protocol whitelist restricted to `pipe`.
+
+Explicitly trusted test harnesses may opt out to exercise ordinary
+launcher/child/grandchild process-group cleanup. On other non-production POSIX
+hosts, deadline and output-limit handling kills the live launcher's process group,
+but the server does not claim containment for a descendant that deliberately
+creates a new session. The server never signals a stored process-group number after
+the launcher exit event, avoiding stale-PGID reuse signalling. Every platform has a
+hard promise-settlement bound and destroys inherited pipes before releasing pool
+accounting. Windows terminates only the immediate child. Extracted standalone tests
+exercise the production renderer path.
 
 ## API overview
 

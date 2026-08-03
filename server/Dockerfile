@@ -8,6 +8,7 @@ WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
+RUN npm run assert:runtime
 RUN npm run build
 
 FROM node:22-alpine AS runner
@@ -16,7 +17,7 @@ ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=0.0.0.0 \
     PORT=3000
-RUN apk add --no-cache font-noto font-noto-cjk
+RUN apk add --no-cache bubblewrap font-noto font-noto-cjk
 RUN addgroup --system --gid 1001 nodejs \
     && adduser --system --uid 1001 --ingroup nodejs nextjs \
     && mkdir -p /data/objects \
@@ -28,4 +29,4 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=dependencies --chown=nextjs:nodejs /app/node_modules/@libsql ./node_modules/@libsql
 USER nextjs
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["npm", "run", "start:verified"]

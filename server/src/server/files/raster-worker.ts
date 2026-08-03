@@ -1,4 +1,6 @@
-import { execFile } from "node:child_process";
+import path from "node:path";
+
+import { runKillableProcess } from "./process-tree";
 
 export const RASTER_WORKER_LIMITS = Object.freeze({
   maxConcurrent: 2,
@@ -176,42 +178,30 @@ async function runRasterWorker(
   const deadline = Date.now() + Math.max(1, timeoutMs);
   await workerPool.acquire(Math.max(1, deadline - Date.now()));
   try {
-    return await new Promise<Buffer>((resolve, reject) => {
-      execFile(
-        process.execPath,
-        [
-          `--max-old-space-size=${RASTER_WORKER_LIMITS.maxOldSpaceMiB}`,
-          "--input-type=module",
-          "--eval",
-          WORKER_PROGRAM,
-          "--",
-          mode,
-          filePath,
-          mimeType,
-        ],
-        {
-          cwd: process.cwd(),
-          encoding: null,
-          env: rasterWorkerEnvironment(),
-          killSignal: "SIGKILL",
-          maxBuffer: RASTER_WORKER_LIMITS.maxOutputBytes,
-          timeout: Math.max(1, deadline - Date.now()),
-          windowsHide: true,
-        },
-        (error, stdout, stderr) => {
-          if (error) {
-            const detail = Buffer.isBuffer(stderr)
-              ? stderr.toString("utf8").trim()
-              : String(stderr).trim();
-            reject(
-              new Error(detail || error.message || "raster worker failed"),
-            );
-            return;
-          }
-          resolve(Buffer.isBuffer(stdout) ? stdout : Buffer.from(stdout));
-        },
-      );
-    });
+    const result = await runKillableProcess(
+      process.execPath,
+      [
+        "--experimental-permission",
+        "--allow-addons",
+        `--allow-fs-read=${filePath}`,
+        `--allow-fs-read=${path.resolve(process.cwd(), "node_modules")}`,
+        `--max-old-space-size=${RASTER_WORKER_LIMITS.maxOldSpaceMiB}`,
+        "--input-type=module",
+        "--eval",
+        WORKER_PROGRAM,
+        "--",
+        mode,
+        filePath,
+        mimeType,
+      ],
+      {
+        cwd: process.cwd(),
+        env: rasterWorkerEnvironment(),
+        maxOutputBytes: RASTER_WORKER_LIMITS.maxOutputBytes,
+        timeoutMs: Math.max(1, deadline - Date.now()),
+      },
+    );
+    return result.stdout;
   } finally {
     workerPool.release();
   }
