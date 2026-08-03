@@ -7,10 +7,16 @@ import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 import { gzipSync } from "node:zlib";
 
+import { PDFDocument, rgb } from "pdf-lib";
 import sharp from "sharp";
 
 import { nativeAdmissionState } from "./native-admission";
-import { composeOgCardSvg, renderOgImage, renderSvgInWorker } from "./og-image";
+import {
+  composeOgCardSvg,
+  renderOgImage,
+  renderSvgInWorker,
+  truncateDisplayText,
+} from "./og-image";
 import { runKillableProcess } from "./process-tree";
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
@@ -48,6 +54,63 @@ async function subject(bytes: Buffer, mimeType: string, name: string) {
     model,
     png: await renderOgImage(service, file, model),
   };
+}
+
+async function structuredPdf(
+  width: number,
+  height: number,
+  color: { red: number; green: number; blue: number },
+  title: string,
+): Promise<Buffer> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([width, height]);
+  page.drawRectangle({
+    x: 0,
+    y: 0,
+    width,
+    height,
+    color: rgb(0.97, 0.96, 0.92),
+  });
+  page.drawRectangle({
+    x: 0,
+    y: height - Math.max(72, height * 0.16),
+    width,
+    height: Math.max(72, height * 0.16),
+    color: rgb(color.red, color.green, color.blue),
+  });
+  page.drawText(title, { x: 42, y: height - 58, size: 26 });
+  for (let index = 0; index < 10; index += 1) {
+    page.drawRectangle({
+      x: 42,
+      y: height - 130 - index * 42,
+      width: Math.max(80, width - 84 - (index % 3) * 70),
+      height: 12,
+      color: rgb(0.2, 0.22, 0.24),
+    });
+  }
+  return Buffer.from(await document.save({ useObjectStreams: false }));
+}
+
+async function nonDarkRatio(
+  png: Buffer,
+  region: { left: number; top: number; width: number; height: number },
+): Promise<number> {
+  const { data, info } = await sharp(png)
+    .extract(region)
+    .removeAlpha()
+    .raw()
+    .toBuffer({ resolveWithObject: true });
+  let nonDark = 0;
+  for (let offset = 0; offset < data.length; offset += info.channels) {
+    if (
+      (data[offset] ?? 0) > 90 ||
+      (data[offset + 1] ?? 0) > 90 ||
+      (data[offset + 2] ?? 0) > 90
+    ) {
+      nonDark += 1;
+    }
+  }
+  return nonDark / (region.width * region.height);
 }
 
 afterEach(async () => {
@@ -94,6 +157,203 @@ function transitiveRssKiB(): number {
 }
 
 describe("OG Social Cards V2 byte-derived rendering", () => {
+  it("uses useful portrait and landscape PDF hero occupancy through the production renderer", async () => {
+    const portrait = await subject(
+      await structuredPdf(
+        612,
+        792,
+        { red: 0.05, green: 0.35, blue: 0.7 },
+        "PORTRAIT REPORT",
+      ),
+      "application/pdf",
+      "Field report.pdf",
+    );
+    const landscape = await subject(
+      await structuredPdf(
+        792,
+        500,
+        { red: 0.7, green: 0.24, blue: 0.08 },
+        "LANDSCAPE REPORT",
+      ),
+      "application/pdf",
+      "Landscape report.pdf",
+    );
+    assert.equal(portrait.model.preview?.visual.kind, "page");
+    assert.equal(landscape.model.preview?.visual.kind, "page");
+    assert.ok(
+      (await nonDarkRatio(portrait.png, {
+        left: 560,
+        top: 32,
+        width: 600,
+        height: 566,
+      })) > 0.72,
+      "portrait first page must occupy most of its hero instead of shrinking inside black space",
+    );
+    assert.ok(
+      (await nonDarkRatio(landscape.png, {
+        left: 40,
+        top: 20,
+        width: 1120,
+        height: 350,
+      })) > 0.72,
+      "landscape first page must occupy a substantial wide hero region",
+    );
+    assert.notDeepEqual(portrait.png, landscape.png);
+  });
+
+  it("adds intentional whole-grapheme ellipses at display boundaries", () => {
+    const family = "👨‍👩‍👧‍👦";
+    const clipped = truncateDisplayText(`${"W".repeat(40)}${family}`, 18);
+    assert.match(clipped, /…$/u);
+    assert.doesNotMatch(clipped, /[\u200d\ud800-\udfff]…$/u);
+    assert.equal(truncateDisplayText("Mountain photo", 40), "Mountain photo");
+    assert.equal(truncateDisplayText("Field report", 40), "Field report");
+    assert.equal(truncateDisplayText("check", 40), "check");
+  });
+
+  it("keeps measured title, metadata, and excerpt glyphs inside the production safe edge", async () => {
+    const cases = [
+      {
+        title: "Mountain photo",
+        description: `${"TypeScript source · ".repeat(30)}99 MB`,
+        kind: "binary" as const,
+        visual: { kind: "binary" as const },
+      },
+      {
+        title: "Field report",
+        description: "TypeScript source · 99 MB",
+        kind: "code" as const,
+        visual: {
+          kind: "code" as const,
+          lines: [`    ${"W".repeat(180)}👨‍👩‍👧‍👦`],
+        },
+      },
+      {
+        title: "check",
+        description: "Markdown · 1 KB",
+        kind: "markdown" as const,
+        visual: {
+          kind: "markdown" as const,
+          lines: [`# ${"界".repeat(120)}👨‍👩‍👧‍👦`],
+        },
+      },
+    ];
+    for (const [index, item] of cases.entries()) {
+      const png = await renderOgImage(
+        null as unknown as FileService,
+        null as unknown as StoredFile,
+        {
+          title: item.title,
+          description: item.description,
+          ogType: "website",
+          twitterCard: "summary_large_image",
+          canonicalUrl: "https://example.test/safe",
+          imageUrl: "https://example.test/og/safe.png",
+          imageAlt: "safe",
+          kind: item.kind,
+          preview: {
+            family: item.kind,
+            label: item.kind.toUpperCase(),
+            title: item.title,
+            facts: ["99 MB"],
+            sourceDigest: "d".repeat(64),
+            visual: item.visual,
+          },
+        },
+      );
+      const edge = await sharp(png)
+        .extract({ left: 1160, top: 72, width: 40, height: 520 })
+        .removeAlpha()
+        .raw()
+        .toBuffer();
+      let changed = 0;
+      for (let offset = 0; offset < edge.length; offset += 3) {
+        if (
+          Math.abs((edge[offset] ?? 13) - 13) +
+            Math.abs((edge[offset + 1] ?? 14) - 14) +
+            Math.abs((edge[offset + 2] ?? 16) - 16) >
+          30
+        ) {
+          changed += 1;
+        }
+      }
+      assert.equal(
+        changed,
+        0,
+        `case ${index} drew text into the 40px right safe edge`,
+      );
+    }
+  });
+
+  it("renders every final title grapheme instead of cropping it from the text raster", async () => {
+    const card = async (title: string) =>
+      renderOgImage(null as never, null as never, {
+        title,
+        description: "Markdown · 153 B",
+        ogType: "article",
+        twitterCard: "summary_large_image",
+        canonicalUrl: "https://example.test/final-glyph",
+        imageUrl: "https://example.test/og/final-glyph.png",
+        imageAlt: "Safe preview",
+        kind: "markdown",
+        preview: {
+          family: "markdown",
+          label: "Markdown",
+          title,
+          facts: ["153 B"],
+          sourceDigest: "f".repeat(64),
+          visual: { kind: "markdown", lines: ["# Field notes"] },
+        },
+      });
+    for (const [withoutFinal, complete] of [
+      ["Field repor", "Field report"],
+      ["Mountain phot", "Mountain photo"],
+      ["Release runbook.m", "Release runbook.md"],
+      ["chunked_upload.p", "chunked_upload.py"],
+    ] as const) {
+      const [shortPixels, completePixels] = await Promise.all([
+        sharp(await card(withoutFinal))
+          .removeAlpha()
+          .raw()
+          .toBuffer(),
+        sharp(await card(complete))
+          .removeAlpha()
+          .raw()
+          .toBuffer(),
+      ]);
+      let changed = 0;
+      let rightmostChanged = 0;
+      for (let offset = 0; offset < shortPixels.length; offset += 3) {
+        if (
+          Math.max(
+            Math.abs(
+              (shortPixels[offset] ?? 0) - (completePixels[offset] ?? 0),
+            ),
+            Math.abs(
+              (shortPixels[offset + 1] ?? 0) -
+                (completePixels[offset + 1] ?? 0),
+            ),
+            Math.abs(
+              (shortPixels[offset + 2] ?? 0) -
+                (completePixels[offset + 2] ?? 0),
+            ),
+          ) > 12
+        ) {
+          changed += 1;
+          rightmostChanged = Math.max(rightmostChanged, (offset / 3) % 1200);
+        }
+      }
+      assert(
+        changed > 20,
+        `${complete} must visibly render its final grapheme`,
+      );
+      assert(
+        rightmostChanged > 180,
+        `${complete} final grapheme must occupy its expected title tail`,
+      );
+    }
+  });
+
   it("changes SVG preview and final pixels for same-size valid source mutations without active rasterization", async () => {
     const svg = (fill: string) =>
       Buffer.from(

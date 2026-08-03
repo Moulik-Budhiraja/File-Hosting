@@ -261,6 +261,7 @@ export async function renderPreview(
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta name="robots" content="${file.visibility === "public" ? "index,follow,max-image-preview:large" : "noindex,nofollow,noarchive"}">
     ${unfurlHead}
     <title>${escapedName}</title>
     <style>

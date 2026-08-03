@@ -309,6 +309,11 @@ interface AuditCase {
   primary: Region;
   minimumPrimaryVariance: number;
   minimumPrimaryInk: number;
+  minimumPrimaryLight?: number;
+  minimumPrimaryBoundaryInk?: number;
+  /** Direct user visual review can supersede only this case's frozen Paper geometry. */
+  directReviewRefinement?: boolean;
+  directReviewRegions?: readonly DesignRegionName[];
 }
 const landscape = await independentRaster(1600, 900, "#d9a14c");
 const landscapeMutation = await independentRaster(1600, 900, "#5f9de8");
@@ -390,12 +395,16 @@ const cases: AuditCase[] = [
     mutation: await pdfFixture("Annual report 2026"),
     expectedKind: "pdf",
     expectedVisual: "page",
+    directReviewRefinement: true,
+    directReviewRegions: ["brand", "title", "facts", "primary"],
     brand: topBrand,
-    title: { left: 45, top: 445, width: 550, height: 120 },
-    facts: { left: 45, top: 552, width: 560, height: 42 },
-    primary: { left: 660, top: 55, width: 470, height: 575 },
+    title: { left: 45, top: 430, width: 455, height: 135 },
+    facts: { left: 45, top: 562, width: 455, height: 42 },
+    primary: { left: 540, top: 0, width: 660, height: 630 },
     minimumPrimaryVariance: 250,
-    minimumPrimaryInk: 0.4,
+    minimumPrimaryInk: 0.72,
+    minimumPrimaryLight: 0.55,
+    minimumPrimaryBoundaryInk: 2_200,
   },
   {
     id: "06-document",
@@ -407,6 +416,7 @@ const cases: AuditCase[] = [
     mutation: await docxFixture("Q4 Field Study — Warm-Storage Latency"),
     expectedKind: "document",
     expectedVisual: "text",
+    directReviewRegions: ["brand", "primary"],
     brand: bottomBrand,
     title: { left: 45, top: 505, width: 760, height: 65 },
     facts: { left: 45, top: 570, width: 700, height: 35 },
@@ -427,6 +437,7 @@ const cases: AuditCase[] = [
     ),
     expectedKind: "markdown",
     expectedVisual: "markdown",
+    directReviewRegions: ["brand", "primary"],
     brand: bottomBrand,
     title: { left: 45, top: 495, width: 850, height: 80 },
     facts: { left: 45, top: 565, width: 720, height: 45 },
@@ -447,6 +458,7 @@ const cases: AuditCase[] = [
     ),
     expectedKind: "code",
     expectedVisual: "code",
+    directReviewRegions: ["brand", "primary"],
     brand: bottomBrand,
     title: { left: 45, top: 495, width: 850, height: 80 },
     facts: { left: 45, top: 565, width: 720, height: 45 },
@@ -519,6 +531,15 @@ const cases: AuditCase[] = [
     minimumPrimaryInk: 0.03,
   },
 ];
+
+// The direct review specifically supersedes title-glyph edge treatment across
+// every card. Keep Paper geometry, but admit the corrected production-font
+// raster gutter through the same occupancy/safe-edge checks and mutation oracle.
+for (const item of cases) {
+  item.directReviewRegions = [
+    ...new Set([...(item.directReviewRegions ?? []), "title" as const]),
+  ];
+}
 
 type DesignRegionName = "brand" | "title" | "facts" | "primary";
 
@@ -601,6 +622,14 @@ const PINNED_REGION_HASHES: Readonly<
   },
 });
 
+// Direct-review regions are admitted by explicit occupancy/placement contracts.
+// Their first passing render becomes only this process's mutation oracle; it does
+// not replace or rewrite the independently frozen Paper references.
+const directReviewMutationBaselines = new Map<
+  string,
+  Partial<Record<DesignRegionName, string>>
+>();
+
 async function rawRegion(image: Buffer, region: Region): Promise<Buffer> {
   assertBounds(region);
   return sharp(image).extract(region).removeAlpha().raw().toBuffer();
@@ -642,6 +671,27 @@ async function boundaryInk(image: Buffer, region: Region): Promise<number> {
     if (ink(region.width - 1, y)) total += 1;
   }
   return total;
+}
+
+async function inkCentroidY(image: Buffer, region: Region): Promise<number> {
+  const data = await rawRegion(image, region);
+  let weightedY = 0;
+  let count = 0;
+  for (let y = 0; y < region.height; y += 1) {
+    for (let x = 0; x < region.width; x += 1) {
+      const offset = (y * region.width + x) * 3;
+      const distance = Math.sqrt(
+        ((data[offset] ?? 13) - 13) ** 2 +
+          ((data[offset + 1] ?? 14) - 14) ** 2 +
+          ((data[offset + 2] ?? 16) - 16) ** 2,
+      );
+      if (distance >= 24) {
+        weightedY += y;
+        count += 1;
+      }
+    }
+  }
+  return count === 0 ? Number.POSITIVE_INFINITY : weightedY / count;
 }
 
 async function stats(image: Buffer, region: Region): Promise<PixelStats> {
@@ -686,6 +736,7 @@ async function evaluateCase(
   ) as Record<DesignRegionName, string>;
   const expectedHashes = PINNED_REGION_HASHES[item.id];
   assert(expectedHashes, `${item.id}: pinned regional references missing`);
+  const directBaseline = directReviewMutationBaselines.get(item.id);
   const structureDistances = Object.fromEntries(
     (["brand", "title", "facts", "primary"] as const).map((name) => [
       name,
@@ -694,7 +745,11 @@ async function evaluateCase(
   ) as Record<DesignRegionName, number>;
   if (enforcePinnedStructure) {
     for (const name of ["brand", "title", "facts", "primary"] as const) {
-      if (structureDistances[name] !== 0)
+      const directlyRefined = item.directReviewRegions?.includes(name) ?? false;
+      const expected = directlyRefined
+        ? directBaseline?.[name]
+        : expectedHashes[name];
+      if (expected !== undefined && regionHashes[name] !== expected)
         reasons.push(`${name} fixed perceptual structure mismatch`);
     }
   }
@@ -715,6 +770,17 @@ async function evaluateCase(
     reasons.push("primary color/structure corrupted");
   if (primaryStats.inkFraction < item.minimumPrimaryInk)
     reasons.push("primary content occupancy missing");
+  if (
+    item.minimumPrimaryLight !== undefined &&
+    primaryStats.lightFraction < item.minimumPrimaryLight
+  )
+    reasons.push("primary readable page area missing");
+  const primaryBoundaryInk = await boundaryInk(image, item.primary);
+  if (
+    item.minimumPrimaryBoundaryInk !== undefined &&
+    primaryBoundaryInk < item.minimumPrimaryBoundaryInk
+  )
+    reasons.push("primary page placement shifted or clipped");
   const titleRightEdge: Region = {
     left: item.title.left + item.title.width - 3,
     top: item.title.top,
@@ -733,12 +799,40 @@ async function evaluateCase(
   ]);
   if (titleEdgeStats.lightFraction > 0.2 || factsEdgeStats.lightFraction > 0.2)
     reasons.push("safe-area clipping at text-zone edge");
+  const [titleInkCentroidY, factsInkCentroidY, titleLeftStats, factsLeftStats] =
+    await Promise.all([
+      inkCentroidY(image, item.title),
+      inkCentroidY(image, item.facts),
+      stats(image, {
+        left: item.title.left,
+        top: item.title.top,
+        width: 30,
+        height: item.title.height,
+      }),
+      stats(image, {
+        left: item.facts.left,
+        top: item.facts.top,
+        width: 30,
+        height: item.facts.height,
+      }),
+    ]);
+  if (
+    item.directReviewRefinement &&
+    (titleInkCentroidY > 90 ||
+      factsInkCentroidY > 24 ||
+      titleLeftStats.inkFraction < 0.003 ||
+      factsLeftStats.inkFraction < 0.003)
+  )
+    reasons.push("direct-review text placement shifted");
   return {
     reasons,
     brandStats,
     titleStats,
     factStats,
     primaryStats,
+    primaryBoundaryInk,
+    titleInkCentroidY,
+    factsInkCentroidY,
     regionHashes,
     structureDistances,
   };
@@ -938,6 +1032,17 @@ try {
       [],
       `${item.id}: ${result.reasons.join("; ")}`,
     );
+    if (item.directReviewRegions) {
+      directReviewMutationBaselines.set(
+        item.id,
+        Object.fromEntries(
+          item.directReviewRegions.map((name) => [
+            name,
+            result.regionHashes[name],
+          ]),
+        ),
+      );
+    }
 
     const blankResult = await evaluateCase(item, blank);
     assert(

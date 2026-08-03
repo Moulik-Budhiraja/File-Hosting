@@ -4,6 +4,11 @@ import { fileURLToPath } from "node:url";
 const { GlobalFonts, createCanvas } = await import("@napi-rs/canvas");
 const { default: sharp } = await import("sharp");
 
+// Anonymous renders are short-lived, serialized work. Disable libvips' process-local
+// caches and parallel workers so transitive RSS remains below the admission budget.
+sharp.cache(false);
+sharp.concurrency(1);
+
 const bundledFonts = [
   ["Inter.ttf", "Inter"],
   ["JetBrainsMono.ttf", "JetBrains Mono"],
@@ -54,6 +59,8 @@ function rasterizeBundledText(svg) {
         throw new Error("invalid text geometry");
       }
       const text = decodeXml(raw);
+      const maxWidth = Number(attribute(attrs, "data-max-width") ?? 0);
+      const ellipsis = attribute(attrs, "data-ellipsis") === "true";
       const configure = (context) => {
         context.fillStyle = fill;
         context.font = `${weight} ${size}px ${family}`;
@@ -66,13 +73,45 @@ function rasterizeBundledText(svg) {
       };
       const measuring = createCanvas(1, 1).getContext("2d");
       configure(measuring);
-      const metrics = measuring.measureText(text);
-      const textWidth = Math.max(
-        1,
-        Math.ceil(
-          metrics.width + Math.max(0, [...text].length - 1) * letterSpacing,
-        ),
-      );
+      const segmenter = new Intl.Segmenter(undefined, {
+        granularity: "grapheme",
+      });
+      const widthOf = (value) => {
+        const metrics = measuring.measureText(value);
+        const count = [...segmenter.segment(value)].length;
+        const positiveTracking =
+          Math.max(0, letterSpacing) * Math.max(0, count - 1);
+        // Negative tracking must never shrink the backing raster below the font's
+        // measured glyph extent. @napi-rs/canvas does not include tracking in
+        // measureText(), so subtracting it cropped the final grapheme.
+        return (
+          Math.max(
+            metrics.width,
+            metrics.actualBoundingBoxRight +
+              Math.max(0, metrics.actualBoundingBoxLeft),
+          ) + positiveTracking
+        );
+      };
+      let fittedText = text;
+      if (
+        Number.isFinite(maxWidth) &&
+        maxWidth > 0 &&
+        widthOf(text) > maxWidth
+      ) {
+        const graphemes = [...segmenter.segment(text)].map(
+          ({ segment }) => segment,
+        );
+        const suffix = ellipsis ? "…" : "";
+        while (
+          graphemes.length > 0 &&
+          widthOf(`${graphemes.join("")}${suffix}`) > maxWidth
+        ) {
+          graphemes.pop();
+        }
+        fittedText = `${graphemes.join("").replace(/[\s.…-]+$/u, "")}${suffix}`;
+      }
+      const metrics = measuring.measureText(fittedText);
+      const textWidth = Math.max(1, Math.ceil(widthOf(fittedText)));
       const ascent = Math.max(
         1,
         Math.ceil(metrics.actualBoundingBoxAscent || size),
@@ -81,6 +120,8 @@ function rasterizeBundledText(svg) {
         1,
         Math.ceil(metrics.actualBoundingBoxDescent || size * 0.25),
       );
+      // Width now reserves the full measured glyph extent, so a 4px anti-aliasing
+      // gutter is sufficient without expanding the transitive RSS envelope.
       const padding = 4;
       const rasterWidth = textWidth + padding * 2;
       const rasterHeight = ascent + descent + padding * 2;
@@ -93,7 +134,7 @@ function rasterizeBundledText(svg) {
           : anchor === "middle"
             ? textWidth / 2 + padding
             : padding;
-      context.fillText(text, drawX, ascent + padding);
+      context.fillText(fittedText, drawX, ascent + padding);
       const imageX =
         anchor === "end"
           ? x - textWidth - padding

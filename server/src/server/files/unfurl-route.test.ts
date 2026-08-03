@@ -265,6 +265,11 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       canonical: `https://canonical.example.test/${file.id}`,
     });
     const head = /<head>([\s\S]*?)<\/head>/u.exec(html)?.[1] ?? "";
+    assert.match(
+      head,
+      /<meta name="robots" content="index,follow,max-image-preview:large">/u,
+    );
+    assert.equal(response.headers.get("x-robots-tag"), null);
     assert.doesNotMatch(html, /evil\.example|attacker\.invalid/u);
     assert.doesNotMatch(head, /forbidden-tag|Never quote this hostile body/u);
     assert.doesNotMatch(head, /<script(?:\s|>)/iu);

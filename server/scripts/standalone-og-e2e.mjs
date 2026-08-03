@@ -223,8 +223,32 @@ async function cardFor(name, mime, bytes) {
   assert.match(metadata.id, /^[0-9A-Za-z]{7,16}$/u);
   const pageResponse = await fetch(`${origin}/${metadata.id}`);
   assert.equal(pageResponse.status, 200);
+  assert.match(
+    pageResponse.headers.get("content-type") ?? "",
+    /^text\/html\b/u,
+  );
+  assert.equal(pageResponse.headers.get("cache-control"), "no-store");
   const page = await pageResponse.text();
-  const cardResponse = await fetch(`${origin}/og/${metadata.id}.png`);
+  const head = /<head>([\s\S]*?)<\/head>/u.exec(page)?.[1] ?? "";
+  const value = (key) =>
+    new RegExp(`<meta (?:property|name)="${key}" content="([^"]*)">`, "u").exec(
+      head,
+    )?.[1];
+  const canonical = /<link rel="canonical" href="([^"]+)">/u.exec(head)?.[1];
+  assert.equal(value("og:title"), name);
+  assert.equal(value("og:url"), `${origin}/${metadata.id}`);
+  assert.equal(canonical, `${origin}/${metadata.id}`);
+  assert.equal(value("og:image:type"), "image/png");
+  assert.equal(value("og:image:width"), "1200");
+  assert.equal(value("og:image:height"), "630");
+  assert.equal(value("twitter:card"), "summary_large_image");
+  assert.match(
+    head,
+    /<meta name="robots" content="index,follow,max-image-preview:large">/u,
+  );
+  const imageUrl = value("og:image");
+  assert.equal(imageUrl, `${origin}/og/${metadata.id}.png`);
+  const cardResponse = await fetch(imageUrl);
   assert.equal(cardResponse.status, 200, logs);
   assert.equal(cardResponse.headers.get("content-type"), "image/png");
   const card = Buffer.from(await cardResponse.arrayBuffer());

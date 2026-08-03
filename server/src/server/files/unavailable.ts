@@ -15,6 +15,7 @@ function unavailablePage(publicUrl?: string): Buffer {
   const page = Buffer.from(`<!doctype html>
 <html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
+<meta name="robots" content="noindex,nofollow,noarchive">
 <meta property="og:site_name" content="File-Hosting">
 <meta property="og:title" content="File unavailable">
 <meta property="og:description" content="Preview unavailable">
@@ -55,6 +56,7 @@ function commonHeaders(contentType: string, length: number): Headers {
     "content-type": contentType,
     date: "Thu, 01 Jan 1970 00:00:00 GMT",
     "referrer-policy": "no-referrer",
+    "x-robots-tag": "noindex, nofollow, noarchive",
     "x-content-type-options": "nosniff",
   });
 }

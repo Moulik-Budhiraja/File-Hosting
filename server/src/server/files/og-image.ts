@@ -25,7 +25,7 @@ const ogRenderPool = new BoundedWorkerPool(
   OG_RENDER_LIMITS.maxQueued,
   OG_RENDER_LIMITS.queueTimeoutMs,
 );
-const OG_RENDER_CACHE_MAX_BYTES = 8 * 1024 * 1024;
+const OG_RENDER_CACHE_MAX_BYTES = 6 * 1024 * 1024;
 const ogRenderCache = new Map<string, Buffer>();
 let ogRenderCacheBytes = 0;
 
@@ -185,6 +185,7 @@ interface TextLineStyle {
   weight?: number;
   letterSpacing?: number;
   preserveWhitespace?: boolean;
+  maxWidth?: number;
 }
 
 function graphemeAdvance(grapheme: string, size: number): number {
@@ -207,7 +208,8 @@ function textLineMarkup(
   const graphemes = [
     ...new Intl.Segmenter(undefined, { granularity: "grapheme" }).segment(line),
   ].map(({ segment }) => segment);
-  const attributes = `${style.preserveWhitespace ? ' xml:space="preserve"' : ""} fill="${style.fill}" font-family="${style.family}" font-size="${size}"${style.weight ? ` font-weight="${style.weight}"` : ""}${style.letterSpacing !== undefined ? ` letter-spacing="${style.letterSpacing}"` : ""} direction="auto" style="unicode-bidi:isolate"`;
+  const maxWidth = Math.max(1, style.maxWidth ?? 1144 - x);
+  const attributes = `${style.preserveWhitespace ? ' xml:space="preserve"' : ""} fill="${style.fill}" font-family="${style.family}" font-size="${size}"${style.weight ? ` font-weight="${style.weight}"` : ""}${style.letterSpacing !== undefined ? ` letter-spacing="${style.letterSpacing}"` : ""} data-max-width="${maxWidth}" data-ellipsis="true" direction="auto" style="unicode-bidi:isolate"`;
   if (!graphemes.some((grapheme) => knownEmojiData(grapheme))) {
     return `<text x="${x}" y="${y}"${attributes}>${escapeXml(line)}</text>`;
   }
@@ -254,16 +256,45 @@ function titleLineMarkup(
 
 export function truncateDisplayText(value: string, maxColumns: number): string {
   let columns = 0;
-  let output = "";
-  for (const { segment } of new Intl.Segmenter(undefined, {
-    granularity: "grapheme",
-  }).segment(value)) {
+  const graphemes = [
+    ...new Intl.Segmenter(undefined, {
+      granularity: "grapheme",
+    }).segment(value),
+  ].map(({ segment }) => segment);
+  const output: string[] = [];
+  let truncated = false;
+  for (const segment of graphemes) {
     const width = graphemeColumns(segment);
-    if (columns + width > maxColumns) break;
-    output += segment;
+    if (columns + width > maxColumns) {
+      truncated = true;
+      break;
+    }
+    output.push(segment);
     columns += width;
   }
-  return output;
+  if (!truncated) return output.join("");
+  while (
+    output.length > 0 &&
+    output.reduce((total, segment) => total + graphemeColumns(segment), 2) >
+      maxColumns
+  ) {
+    output.pop();
+  }
+  return `${output.join("").replace(/[\s.…-]+$/u, "")}…`;
+}
+
+function pngDimensions(
+  raster: Buffer,
+): { width: number; height: number } | null {
+  if (
+    raster.length < 24 ||
+    !raster.subarray(0, 8).equals(Buffer.from("89504e470d0a1a0a", "hex"))
+  ) {
+    return null;
+  }
+  const width = raster.readUInt32BE(16);
+  const height = raster.readUInt32BE(20);
+  return width > 0 && height > 0 ? { width, height } : null;
 }
 
 export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
@@ -292,7 +323,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
     ? Number(dimensions[2]) > Number(dimensions[1])
     : false;
   const brand = (x = 56, y = 64, anchor = "start") =>
-    `<rect x="${anchor === "end" ? x - 196 : x}" y="${y - 12}" width="9" height="9" rx="2" fill="#e3a44f"/><text x="${anchor === "end" ? x - 176 : x + 20}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="20" font-weight="500" letter-spacing="2">files.moulik.dev</text>`;
+    `<rect x="${anchor === "end" ? x - 196 : x}" y="${y - 12}" width="9" height="9" rx="2" fill="#e3a44f"/><text x="${anchor === "end" ? x : x + 20}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="20" font-weight="500" letter-spacing="2"${anchor === "end" ? ' text-anchor="end"' : ""}>files.moulik.dev</text>`;
   const titleText = (x: number, y: number, size = 52, width = 34) =>
     layoutOgTitle(safeTitle, width, 2)
       .map((line, index) =>
@@ -300,7 +331,12 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       )
       .join("");
   const facts = (x = 56, y = 580) =>
-    `<text x="${x}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="21" letter-spacing="1.5">${escapeXml(safeDescription)}</text>`;
+    textLineMarkup(safeDescription, x, y, 21, {
+      fill: "#9fa3a9",
+      family: MONO,
+      letterSpacing: 1.5,
+      maxWidth: 1144 - x,
+    });
   const play = (x: number, y: number) =>
     `<circle cx="${x}" cy="${y}" r="31" fill="#0d0e10" fill-opacity="0.58" stroke="#9fa3a9" stroke-width="2"/><path d="M${x - 9} ${y - 13}l22 13-22 13z" fill="#f2f1ec"/>`;
   let body = "";
@@ -316,26 +352,36 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
     const timeline = `<line x1="56" y1="320" x2="1143" y2="320" stroke="#30343a" stroke-width="2"/><path d="M56 310v20M193 314v12M329 310v20M465 314v12M601 310v20M737 314v12M873 310v20M1009 314v12M1143 310v20" stroke="#44484f" stroke-width="2"/>`;
     body = `${brand()}${play(84, 224)}${timeline}${titleText(56, twoLineTitle ? 466 : 526, 60, 40)}${facts(56, 575)}`;
   } else if (model.kind === "pdf" && visual?.kind === "page") {
+    const pageDimensions =
+      raster && visual.raster ? pngDimensions(visual.raster) : null;
+    const landscapePage =
+      pageDimensions !== null &&
+      pageDimensions.width / pageDimensions.height >= 1.2;
     const page = raster
-      ? `<image href="${raster}" x="660" y="55" width="470" height="575" preserveAspectRatio="xMidYMid meet"/>`
-      : `<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${contentLines
+      ? landscapePage
+        ? `<image href="${raster}" x="0" y="0" width="1200" height="390" preserveAspectRatio="xMidYMid slice"/>`
+        : `<image href="${raster}" x="540" y="0" width="660" height="630" preserveAspectRatio="xMidYMin slice"/>`
+      : `<rect x="540" y="0" width="660" height="630" fill="#f6f5f1"/>${contentLines
           .slice(0, 6)
           .map((line, index) =>
             textLineMarkup(
-              truncateDisplayText(line, 36),
-              708,
-              130 + index * 54,
-              index === 0 ? 28 : 20,
+              truncateDisplayText(line, 42),
+              580,
+              90 + index * 58,
+              index === 0 ? 30 : 21,
               {
                 fill: "#2a2e34",
                 family: SANS,
                 weight: index === 0 ? 700 : 400,
+                maxWidth: 560,
               },
             ),
           )
           .join("")}`;
-    const pdfTitleLines = layoutOgTitle(safeTitle, 20, 2);
-    body = `${brand()}${page}${titleText(56, pdfTitleLines.length > 1 ? 463 : 520, 52, 20)}${facts(56, 576)}`;
+    const pdfTitleLines = layoutOgTitle(safeTitle, landscapePage ? 34 : 19, 2);
+    body = landscapePage
+      ? `${page}<rect x="0" y="360" width="1200" height="270" fill="url(#pdfShade)"/>${brand()}${titleText(56, pdfTitleLines.length > 1 ? 486 : 535, 52, 34)}${facts(56, 584)}`
+      : `${brand()}${page}<rect x="500" y="0" width="90" height="630" fill="url(#pageFade)"/>${titleText(56, pdfTitleLines.length > 1 ? 455 : 518, 52, 19)}${facts(56, 578)}`;
   } else if (model.kind === "document" && visual?.kind !== "binary") {
     const documentHeading = layoutOgTitle(contentLines[0] ?? safeTitle, 26, 2)
       .map((line, index) =>
@@ -490,7 +536,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   }
 
   return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#090c0f" stop-opacity="0.04"/><stop offset="0.54" stop-color="#090c0f" stop-opacity="0.02"/><stop offset="1" stop-color="#090c0f" stop-opacity="0.96"/></linearGradient></defs><rect width="1200" height="630" fill="#0d0e10"/>${body}</svg>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#090c0f" stop-opacity="0.04"/><stop offset="0.54" stop-color="#090c0f" stop-opacity="0.02"/><stop offset="1" stop-color="#090c0f" stop-opacity="0.96"/></linearGradient><linearGradient id="pdfShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d0e10" stop-opacity="0"/><stop offset="0.28" stop-color="#0d0e10" stop-opacity="0.82"/><stop offset="1" stop-color="#0d0e10" stop-opacity="1"/></linearGradient><linearGradient id="pageFade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0d0e10" stop-opacity="1"/><stop offset="1" stop-color="#0d0e10" stop-opacity="0"/></linearGradient></defs><rect width="1200" height="630" fill="#0d0e10"/>${body}</svg>`,
   );
 }
 

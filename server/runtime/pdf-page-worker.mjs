@@ -46,18 +46,18 @@ try {
   ) {
     throw new Error("invalid page geometry");
   }
-  const scale = Math.min(1200 / base.width, 630 / base.height);
+  const scale = Math.min(1200 / base.width, 1200 / base.height);
   const viewport = page.getViewport({ scale });
   if (viewport.width * viewport.height > 40_000_000)
     throw new Error("page pixel limit exceeded");
-  const canvas = createCanvas(1200, 630);
+  const canvas = createCanvas(
+    Math.ceil(viewport.width),
+    Math.ceil(viewport.height),
+  );
   const context = canvas.getContext("2d");
   context.fillStyle = "white";
-  context.fillRect(0, 0, 1200, 630);
-  context.save();
-  context.translate((1200 - viewport.width) / 2, (630 - viewport.height) / 2);
+  context.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({ canvasContext: context, viewport }).promise;
-  context.restore();
   const output = canvas.toBuffer("image/png");
   if (output.length > 8 * 1024 * 1024)
     throw new Error("pdf output limit exceeded");
