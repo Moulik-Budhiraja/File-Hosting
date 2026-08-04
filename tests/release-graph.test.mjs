@@ -63,17 +63,46 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
     /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/u,
     "Ubuntu 24.04 CI must allow Bubblewrap to create its isolated user namespace",
   );
-  assert.match(
-    workflow,
-    /bwrap[^\n]*--unshare-all[^\n]*\/usr\/bin\/true/u,
-    "CI must smoke-test the real Bubblewrap namespace before the canonical gate",
-  );
-  const sandboxPreparation = workflow.indexOf(
+  const releaseJob = workflow.match(/jobs:\n\s+release:\n([\s\S]*)/u)?.[1];
+  assert.ok(releaseJob, "release workflow must contain jobs.release");
+  const sandboxProbe = releaseJob.match(
+    /- name: Enable and verify the Linux process sandbox\n\s+run: \|\n([\s\S]*?)(?=\n\s+- name:)/u,
+  )?.[1];
+  assert.ok(sandboxProbe, "release job must contain the Linux sandbox probe step");
+  for (const requiredFlag of [
+    "--die-with-parent",
+    "--unshare-all",
+    "--new-session",
+    "--ro-bind /usr /usr",
+    "--ro-bind /lib /lib",
+    "--ro-bind /lib64 /lib64",
+    '--ro-bind "$PWD" "$PWD"',
+    "--bind /tmp /tmp",
+    "--dev /dev",
+    "--proc /proc",
+    '--chdir "$PWD"',
+    "-- /usr/bin/true",
+  ]) {
+    assert.ok(
+      sandboxProbe.includes(requiredFlag),
+      `Linux sandbox probe must mirror production flag: ${requiredFlag}`,
+    );
+  }
+  const sandboxPreparation = releaseJob.indexOf(
     "kernel.apparmor_restrict_unprivileged_userns=0",
   );
-  const sandboxSmoke = workflow.indexOf("bwrap --die-with-parent");
-  const canonicalGate = workflow.indexOf("./scripts/release-check.sh");
-  assert.ok(sandboxPreparation < sandboxSmoke && sandboxSmoke < canonicalGate);
+  const sandboxSmoke = releaseJob.indexOf(
+    "- name: Enable and verify the Linux process sandbox",
+  );
+  const canonicalGate = releaseJob.indexOf(
+    "- name: Run canonical release gate",
+  );
+  assert.ok(
+    sandboxPreparation >= 0 &&
+      sandboxPreparation > sandboxSmoke &&
+      sandboxSmoke < canonicalGate,
+    "sandbox preparation and smoke must run in jobs.release before the canonical gate",
+  );
 });
 
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
