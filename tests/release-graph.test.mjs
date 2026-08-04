@@ -249,9 +249,10 @@ test("standalone traces exact Twemoji licensing and excludes TypeScript", async 
     /const PRIMARY_RENDER_SECONDS = ([\d.]+);/u,
   );
   assert.ok(primaryTimeout, "worker must publish its sharp stage timeout");
-  assert.ok(
-    Number(primaryTimeout[1]) <= 1,
-    "Linux sharp work must leave at least 1.5 seconds for startup and bounded encoding",
+  assert.equal(
+    Number(primaryTimeout[1]),
+    2,
+    "Linux sharp work must retain the proven cold-start budget below the outer 2.5 second wall",
   );
   assert.match(
     rgbPng,
