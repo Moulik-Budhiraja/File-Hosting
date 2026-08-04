@@ -1220,6 +1220,32 @@ try {
       `${item.id} must be deterministic`,
     );
     const result = await evaluateCase(item, produced.card);
+    if (result.reasons.length > 0) {
+      await Promise.all([
+        writeFile(
+          path.join(outputRoot, `diagnostic-${item.id}.png`),
+          produced.card,
+        ),
+        writeFile(
+          path.join(outputRoot, `diagnostic-${item.id}.json`),
+          JSON.stringify(
+            {
+              caseId: item.id,
+              reference: item.reference,
+              reasons: result.reasons,
+              regionHashes: result.regionHashes,
+              structureDistances: result.structureDistances,
+              description: produced.model.description,
+              previewFacts: produced.model.preview?.facts,
+              sourceDigest: produced.direct.sourceDigest,
+              cardSha256: sha256(produced.card),
+            },
+            null,
+            2,
+          ),
+        ),
+      ]);
+    }
     assert.deepEqual(
       result.reasons,
       [],

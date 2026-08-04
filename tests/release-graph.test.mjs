@@ -50,9 +50,10 @@ test("one canonical root release command covers every required local gate", asyn
 });
 
 test("release CI executes the canonical gate and requires Docker Compose runtime", async () => {
-  const [workflow, processTree, sandboxModule, sandboxVerifier] =
+  const [workflow, releaseCheck, processTree, sandboxModule, sandboxVerifier] =
     await Promise.all([
       text(".github/workflows/release.yml"),
+      text("scripts/release-check.sh"),
       text("server/src/server/files/process-tree.ts"),
       text("server/runtime/linux-sandbox.js"),
       text("server/runtime/verify-linux-sandbox.js"),
@@ -65,6 +66,48 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
   );
   assert.match(workflow, /REQUIRE_DOCKER: "1"/u);
   assert.match(workflow, /\.\/scripts\/release-check\.sh/u);
+  const canonicalRelease = workflow.match(
+    /- name: Run canonical release gate\n([\s\S]*?)(?=\n\s+- name:)/u,
+  )?.[1];
+  const uploadDiagnostics = workflow.match(
+    /- name: Upload design failure diagnostics\n([\s\S]*?)(?=\n\s+- name:)/u,
+  )?.[1];
+  const failRejectedRelease = workflow.match(
+    /- name: Fail a rejected canonical release\n([\s\S]*)$/u,
+  )?.[1];
+  assert.ok(canonicalRelease);
+  assert.ok(uploadDiagnostics);
+  assert.ok(failRejectedRelease);
+  assert.match(canonicalRelease, /id: canonical_release/u);
+  assert.match(canonicalRelease, /continue-on-error: true/u);
+  assert.ok(
+    workflow.indexOf("- name: Run canonical release gate") <
+      workflow.indexOf("- name: Upload design failure diagnostics") &&
+      workflow.indexOf("- name: Upload design failure diagnostics") <
+        workflow.indexOf("- name: Fail a rejected canonical release"),
+    "diagnostic upload and explicit rejection must follow the canonical gate",
+  );
+  assert.match(
+    uploadDiagnostics,
+    /uses: actions\/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02/u,
+  );
+  assert.match(
+    uploadDiagnostics,
+    /if: \$\{\{ always\(\) && steps\.canonical_release\.outcome == 'failure' \}\}/u,
+  );
+  const designAuditDirectory = releaseCheck.match(
+    /file-hosting-design-audit-release/u,
+  )?.[0];
+  assert.ok(designAuditDirectory);
+  assert.match(
+    uploadDiagnostics,
+    new RegExp(`/tmp/${designAuditDirectory}/diagnostic-`, "u"),
+  );
+  assert.match(
+    failRejectedRelease,
+    /if: \$\{\{ always\(\) && steps\.canonical_release\.outcome == 'failure' \}\}/u,
+  );
+  assert.match(failRejectedRelease, /run: exit 1/u);
   assert.match(workflow, /docker compose version/u);
   assert.match(
     workflow,
@@ -292,6 +335,15 @@ test("design audit covers all stress states, every content-zone mutant, and real
   assert.match(audit, /files\.moulik\.dev/u);
   assert.match(audit, /titleDomainInk/u);
   assert.match(audit, /actualMessagesProof: false/u);
+  const diagnosticsGuard = audit.match(
+    /if \(result\.reasons\.length > 0\) \{([\s\S]*?)\n    \}\n    assert\.deepEqual\(\n      result\.reasons,\n      \[\],/u,
+  )?.[1];
+  assert.ok(
+    diagnosticsGuard,
+    "failure diagnostics must remain reason-guarded before the unchanged rejection assertion",
+  );
+  assert.match(diagnosticsGuard, /`diagnostic-\$\{item\.id\}\.png`/u);
+  assert.match(diagnosticsGuard, /`diagnostic-\$\{item\.id\}\.json`/u);
   assert.doesNotMatch(audit, /stressCount: 7/u);
 });
 
