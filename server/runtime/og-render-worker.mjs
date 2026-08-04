@@ -1,5 +1,5 @@
 import { writeSync } from "node:fs";
-import { createHash } from "node:crypto";
+
 import { fileURLToPath } from "node:url";
 import { encodeRgbPng, validateOpaquePng } from "./rgb-png.js";
 
@@ -189,9 +189,10 @@ try {
     throw new Error("prepared render exceeds limit");
   const diagnosticPrefix =
     process.env.OG_RENDER_DIAGNOSTIC === "1"
-      ? Buffer.from(
-          `OGDI${createHash("sha256").update(prepared).digest("hex")}\n`,
-        )
+      ? Buffer.concat([
+          Buffer.from(`OGDI${prepared.length.toString(16).padStart(8, "0")}`),
+          prepared,
+        ])
       : Buffer.alloc(0);
   if (process.platform === "linux") {
     const { data: rgb, info } = await sharp(prepared, {

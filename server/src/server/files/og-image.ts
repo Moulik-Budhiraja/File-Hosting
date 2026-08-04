@@ -26,6 +26,9 @@ const ogRenderPool = new BoundedWorkerPool(
   OG_RENDER_LIMITS.queueTimeoutMs,
 );
 const OG_RENDER_CACHE_MAX_BYTES = 6 * 1024 * 1024;
+const OG_RENDER_DIAGNOSTIC_PREPARED_MAX_BYTES = 10 * 1024 * 1024;
+const OG_RENDER_DIAGNOSTIC_OVERHEAD_BYTES =
+  OG_RENDER_DIAGNOSTIC_PREPARED_MAX_BYTES + 12;
 const ogRenderCache = new Map<string, Buffer>();
 let ogRenderCacheBytes = 0;
 
@@ -603,15 +606,30 @@ function extractWorkerDiagnostic(output: Buffer): Buffer {
   ) {
     return output;
   }
-  const prefix = output.subarray(0, 69).toString("ascii");
-  if (!/^OGDI[a-f0-9]{64}\n$/u.test(prefix))
+  const prefix = output.subarray(0, 12).toString("ascii");
+  if (!/^OGDI[a-f0-9]{8}$/u.test(prefix))
     throw new Error("render diagnostic prefix missing");
+  const preparedLength = Number.parseInt(prefix.slice(4), 16);
+  const preparedEnd = 12 + preparedLength;
+  if (
+    !Number.isSafeInteger(preparedLength) ||
+    preparedLength > OG_RENDER_DIAGNOSTIC_PREPARED_MAX_BYTES ||
+    preparedEnd >= output.length ||
+    output.length - preparedEnd > OG_RENDER_LIMITS.maxOutputBytes
+  )
+    throw new Error("render diagnostic length invalid");
+  const prepared = output.subarray(12, preparedEnd);
   writeFileSync(
     "/tmp/file-hosting-design-audit-release/diagnostic-worker.json",
-    `${JSON.stringify({ preparedSha256: prefix.slice(4, 68) }, null, 2)}\n`,
+    `${JSON.stringify({ preparedBytes: prepared.length, preparedSha256: createHash("sha256").update(prepared).digest("hex") }, null, 2)}\n`,
     { mode: 0o600 },
   );
-  return output.subarray(69);
+  writeFileSync(
+    "/tmp/file-hosting-design-audit-release/diagnostic-prepared.svg",
+    prepared,
+    { mode: 0o600 },
+  );
+  return output.subarray(preparedEnd);
 }
 
 export function getOgRenderPoolState(): { active: number; queued: number } {
@@ -672,7 +690,13 @@ export async function renderSvgInWorker(
                 cwd: process.cwd(),
                 env: workerEnvironment(),
                 input: svg,
-                maxOutputBytes: OG_RENDER_LIMITS.maxOutputBytes,
+                maxOutputBytes:
+                  process.env.CI === "true" &&
+                  process.env.NODE_ENV !== "production" &&
+                  process.env.OG_RENDER_DIAGNOSTIC === "1"
+                    ? OG_RENDER_LIMITS.maxOutputBytes +
+                      OG_RENDER_DIAGNOSTIC_OVERHEAD_BYTES
+                    : OG_RENDER_LIMITS.maxOutputBytes,
                 timeoutMs: Math.max(1, deadline - Date.now()),
                 allowSubprocesses: options.allowSubprocesses,
               },
