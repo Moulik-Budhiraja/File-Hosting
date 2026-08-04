@@ -3,6 +3,7 @@ import { spawnSync } from "node:child_process";
 
 const required = [
   "runtime/og-render-worker.mjs",
+  "runtime/rgb-png.js",
   "runtime/font-probe-worker.mjs",
   "runtime/pdf-page-worker.mjs",
   "runtime/docx-text-worker.mjs",

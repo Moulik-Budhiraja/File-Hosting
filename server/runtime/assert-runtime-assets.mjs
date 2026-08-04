@@ -4,6 +4,7 @@ import path from "node:path";
 
 const required = [
   "og-render-worker.mjs",
+  "rgb-png.js",
   "font-probe-worker.mjs",
   "pdf-page-worker.mjs",
   "docx-text-worker.mjs",

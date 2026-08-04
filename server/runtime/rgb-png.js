@@ -57,8 +57,13 @@ export function encodeRgbPng(rgb, width, height) {
   const scanlines = Buffer.allocUnsafe((rowBytes + 1) * height);
   for (let row = 0; row < height; row += 1) {
     const outputOffset = row * (rowBytes + 1);
-    scanlines[outputOffset] = 0;
-    rgb.copy(scanlines, outputOffset + 1, row * rowBytes, (row + 1) * rowBytes);
+    const inputOffset = row * rowBytes;
+    scanlines[outputOffset] = 1;
+    for (let column = 0; column < rowBytes; column += 1) {
+      const current = rgb[inputOffset + column] ?? 0;
+      const left = column >= 3 ? (rgb[inputOffset + column - 3] ?? 0) : 0;
+      scanlines[outputOffset + column + 1] = (current - left) & 0xff;
+    }
   }
   const header = Buffer.alloc(13);
   header.writeUInt32BE(width, 0);

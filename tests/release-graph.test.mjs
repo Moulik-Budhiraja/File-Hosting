@@ -296,7 +296,29 @@ test("RGB PNG encoder is executable, lossless, opaque, and corruption-detecting"
     }
     offset += length + 12;
   }
-  assert.deepEqual(inflateSync(Buffer.concat(idat)), Buffer.from([0, ...pixels]));
+  const filtered = inflateSync(Buffer.concat(idat));
+  assert.equal(filtered[0], 1);
+  const decoded = Buffer.alloc(pixels.length);
+  for (let index = 0; index < decoded.length; index += 1) {
+    decoded[index] =
+      (filtered[index + 1] + (index >= 3 ? decoded[index - 3] : 0)) & 0xff;
+  }
+  assert.deepEqual(decoded, pixels);
+
+  const representative = Buffer.alloc(1200 * 630 * 3);
+  for (let y = 0; y < 630; y += 1) {
+    for (let x = 0; x < 1200; x += 1) {
+      const offset = (y * 1200 + x) * 3;
+      representative[offset] = (x + Math.floor(y / 8)) & 0xff;
+      representative[offset + 1] = (Math.floor(x / 3) + y) & 0xff;
+      representative[offset + 2] = (Math.floor(x / 8) + Math.floor(y / 3)) & 0xff;
+    }
+  }
+  assert.ok(
+    encodeRgbPng(representative, 1200, 630).length < 500_000,
+    "bounded Sub filtering must keep image-backed OG cards cacheable",
+  );
+
   const corrupted = Buffer.from(png);
   corrupted[firstIdatDataOffset] ^= 1;
   assert.equal(validateOpaquePng(corrupted, 2, 1), false);
