@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
@@ -57,6 +58,11 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
       text("server/runtime/verify-linux-sandbox.js"),
     ]);
   assert.match(workflow, /runs-on: ubuntu-latest/u);
+  assert.match(
+    workflow,
+    /- uses: actions\/checkout@[a-f0-9]+(?: # v\d+)?\n\s+with:\n\s+ref: \$\{\{ github\.event\.pull_request\.head\.sha \|\| github\.sha \}\}/u,
+    "release CI must execute the immutable PR head rather than GitHub's synthetic merge ref",
+  );
   assert.match(workflow, /REQUIRE_DOCKER: "1"/u);
   assert.match(workflow, /\.\/scripts\/release-check\.sh/u);
   assert.match(workflow, /docker compose version/u);
@@ -168,6 +174,34 @@ test("canonical freeze and manifest are source-pinned without a fixture update c
   assert.doesNotMatch(
     packageJson,
     /(?:update|refresh|approve|baseline).*fixture/iu,
+  );
+});
+
+test("portrait design inputs are immutable tracked bytes rather than platform encodes", async () => {
+  const fixtures = [
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-02-image-portrait.png",
+      51_357,
+      "404b086471792815896989ea70fe422f2bab76714af5b5bbcd65c311548cd90b",
+    ],
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-02-image-portrait-mutation.png",
+      51_328,
+      "1300e303fb18c6625690f96ac1c117599dcc607a0a9e48b1e008468a1d7e5955",
+    ],
+  ];
+  for (const [relative, size, digest] of fixtures) {
+    const bytes = await readFile(path.join(root, relative));
+    assert.equal(bytes.length, size);
+    assert.equal(createHash("sha256").update(bytes).digest("hex"), digest);
+  }
+  const audit = await text("server/scripts/design-audit.ts");
+  assert.match(audit, /source-02-image-portrait\.png/u);
+  assert.match(audit, /source-02-image-portrait-mutation\.png/u);
+  assert.doesNotMatch(
+    audit,
+    /const portrait = await independentRaster\(/u,
+    "the source byte size rendered in approved facts must not depend on host libvips",
   );
 });
 

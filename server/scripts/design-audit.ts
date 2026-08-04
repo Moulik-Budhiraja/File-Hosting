@@ -317,8 +317,24 @@ interface AuditCase {
 }
 const landscape = await independentRaster(1600, 900, "#d9a14c");
 const landscapeMutation = await independentRaster(1600, 900, "#5f9de8");
-const portrait = await independentRaster(900, 1600, "#d9a14c", true);
-const portraitMutation = await independentRaster(900, 1600, "#78c68a", true);
+// File size is rendered into the facts line. Keep the approved portrait source
+// bytes immutable so host libvips encoders cannot change those pixels in CI.
+const portrait = await readFile(
+  path.join(
+    repositoryFixtureRoot,
+    "..",
+    "og-design-inputs-v2",
+    "source-02-image-portrait.png",
+  ),
+);
+const portraitMutation = await readFile(
+  path.join(
+    repositoryFixtureRoot,
+    "..",
+    "og-design-inputs-v2",
+    "source-02-image-portrait-mutation.png",
+  ),
+);
 const topBrand = { left: 48, top: 42, width: 230, height: 38 };
 const bottomBrand = { left: 900, top: 548, width: 258, height: 42 };
 const cases: AuditCase[] = [
