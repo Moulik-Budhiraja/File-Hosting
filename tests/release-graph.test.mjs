@@ -182,10 +182,11 @@ test("resource-sensitive preview surface contains no dead helpers, guards, proto
 });
 
 test("standalone traces exact Twemoji licensing and excludes TypeScript", async () => {
-  const [config, attribution, standalone] = await Promise.all([
+  const [config, attribution, standalone, renderWorker] = await Promise.all([
     text("server/next.config.js"),
     text("server/runtime/assets/twemoji/ATTRIBUTION.md"),
     text("server/scripts/standalone-og-e2e.mjs"),
+    text("server/runtime/og-render-worker.mjs"),
   ]);
   assert.match(config, /@twemoji\/svg\/\{license\*,readme\.md\}/u);
   assert.match(
@@ -206,6 +207,26 @@ test("standalone traces exact Twemoji licensing and excludes TypeScript", async 
     );
   }
   assert.match(standalone, /node_modules["'],\s*["']typescript/u);
+  assert.match(
+    renderWorker,
+    /metadata\(\)[\s\S]*hasAlpha/u,
+    "worker must inspect the encoded PNG before applying the compatibility path",
+  );
+  assert.match(
+    renderWorker,
+    /if \(!metadata\.hasAlpha\)[\s\S]*writeSync\(1, encoded\)/u,
+    "already-opaque approved bytes must pass through unchanged",
+  );
+  assert.match(
+    renderWorker,
+    /\.raw\(\)[\s\S]*toBuffer\(\{ resolveWithObject: true \}\)/u,
+    "alpha-bearing platform output must materialize a three-channel raster",
+  );
+  assert.match(
+    renderWorker,
+    /raw:\s*\{[\s\S]*channels:\s*3[\s\S]*\}/u,
+    "compatibility PNG must be encoded from an explicit RGB input",
+  );
 });
 
 test("automated design evidence identifies the Node gate without model attestation", async () => {

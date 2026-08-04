@@ -170,7 +170,7 @@ try {
   const prepared = Buffer.from(rasterizeBundledText(source));
   if (prepared.length > MAX_SVG_BYTES)
     throw new Error("prepared render exceeds limit");
-  const png = await sharp(prepared, {
+  const encoded = await sharp(prepared, {
     failOn: "error",
     limitInputPixels: MAX_INPUT_PIXELS,
   })
@@ -179,7 +179,37 @@ try {
     .removeAlpha()
     .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
     .toBuffer();
-  writeSync(1, png);
+  const metadata = await sharp(encoded).metadata();
+  if (
+    metadata.width !== width ||
+    metadata.height !== height ||
+    metadata.format !== "png"
+  ) {
+    throw new Error("render worker produced invalid PNG metadata");
+  }
+  if (!metadata.hasAlpha) {
+    writeSync(1, encoded);
+  } else {
+    // Some Linux libvips builds preserve a redundant alpha channel after
+    // flatten/removeAlpha. Re-wrap explicit RGB pixels only on that platform path,
+    // preserving the already-approved opaque encoding everywhere else.
+    const { data: rgb, info } = await sharp(encoded)
+      .flatten({ background: "#0b0d0f" })
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    if (info.width !== width || info.height !== height || info.channels !== 3) {
+      throw new Error("render worker did not produce an RGB raster");
+    }
+    const png = await sharp(rgb, {
+      raw: { width, height, channels: 3 },
+      limitInputPixels: MAX_INPUT_PIXELS,
+    })
+      .timeout({ seconds: 1 })
+      .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
+      .toBuffer();
+    writeSync(1, png);
+  }
 } catch (error) {
   writeSync(
     2,
