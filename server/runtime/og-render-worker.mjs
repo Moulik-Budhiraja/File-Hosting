@@ -6,9 +6,11 @@ const { GlobalFonts, createCanvas } = await import("@napi-rs/canvas");
 const { default: sharp } = await import("sharp");
 
 // Anonymous renders are short-lived, serialized work. Disable libvips' process-local
-// caches and parallel workers so transitive RSS remains below the admission budget.
+// SIMD alpha-compositing rounds edge channels differently across arm64 and x64.
+// Keep the byte-derived card raster architecture-independent before PNG encoding.
 sharp.cache(false);
 sharp.concurrency(1);
+sharp.simd(false);
 
 const bundledFonts = [
   ["Inter.ttf", "Inter"],
