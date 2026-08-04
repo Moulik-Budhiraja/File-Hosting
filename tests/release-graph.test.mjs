@@ -53,6 +53,11 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
   assert.match(workflow, /REQUIRE_DOCKER: "1"/u);
   assert.match(workflow, /\.\/scripts\/release-check\.sh/u);
   assert.match(workflow, /docker compose version/u);
+  assert.match(
+    workflow,
+    /apt-get install -y[^\n]*bubblewrap/u,
+    "production standalone CI must install the required Linux process sandbox",
+  );
 });
 
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
