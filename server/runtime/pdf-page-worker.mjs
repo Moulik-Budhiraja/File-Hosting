@@ -55,9 +55,19 @@ try {
     Math.ceil(viewport.height),
   );
   const context = canvas.getContext("2d");
-  context.fillStyle = "white";
-  context.fillRect(0, 0, canvas.width, canvas.height);
   await page.render({ canvasContext: context, viewport }).promise;
+  const image = context.getImageData(0, 0, canvas.width, canvas.height);
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const alpha = image.data[offset + 3];
+    for (let channel = 0; channel < 3; channel += 1) {
+      const premultiplied = Math.round(
+        (image.data[offset + channel] * alpha) / 255,
+      );
+      image.data[offset + channel] = Math.min(255, premultiplied + 255 - alpha);
+    }
+    image.data[offset + 3] = 255;
+  }
+  context.putImageData(image, 0, 0);
   const output = canvas.toBuffer("image/png");
   if (output.length > 8 * 1024 * 1024)
     throw new Error("pdf output limit exceeded");

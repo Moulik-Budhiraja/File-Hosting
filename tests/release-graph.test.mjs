@@ -233,6 +233,14 @@ test("text rasterization expands for measured ink overhang without moving global
   }
 });
 
+test("PDF raster worker canonicalizes transparent edge colors before white compositing", async () => {
+  const worker = await text("server/runtime/pdf-page-worker.mjs");
+  assert.match(worker, /context\.getImageData/u);
+  assert.match(worker, /const premultiplied = Math\.round/u);
+  assert.match(worker, /premultiplied \+ 255 - alpha/u);
+  assert.match(worker, /image\.data\[offset \+ 3\] = 255/u);
+});
+
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
   const runtime = await text("scripts/compose-runtime-check.sh");
   assert.match(runtime, /docker compose build/u);
