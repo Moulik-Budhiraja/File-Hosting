@@ -220,7 +220,8 @@ test("Linux sandbox keeps nested app roots read-only and pins worker temp paths"
 test("text rasterization expands for measured ink overhang without moving global glyphs", async () => {
   const worker = await text("server/runtime/og-render-worker.mjs");
   for (const contract of [
-    /sharp\.simd\(false\)/u,
+    /canonicalizeTextColor/u,
+    /const premultiplied = Math\.round/u,
     /inkLeft/u,
     /inkRight/u,
     /extraLeft/u,

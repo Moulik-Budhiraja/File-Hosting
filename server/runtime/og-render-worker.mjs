@@ -7,11 +7,9 @@ const { GlobalFonts, createCanvas } = await import("@napi-rs/canvas");
 const { default: sharp } = await import("sharp");
 
 // Anonymous renders are short-lived, serialized work. Disable libvips' process-local
-// SIMD alpha-compositing rounds edge channels differently across arm64 and x64.
-// Keep the byte-derived card raster architecture-independent before PNG encoding.
+// caches and parallel workers so transitive RSS remains below the admission budget.
 sharp.cache(false);
 sharp.concurrency(1);
-sharp.simd(false);
 
 const bundledFonts = [
   ["Inter.ttf", "Inter"],
@@ -49,6 +47,28 @@ function decodeXml(value) {
     .replaceAll("&quot;", '"')
     .replaceAll("&apos;", "'")
     .replaceAll("&amp;", "&");
+}
+
+function canonicalizeTextColor(context, width, height, fill) {
+  if (process.platform !== "linux") return;
+  const match = /^#([a-f0-9]{6})$/iu.exec(fill);
+  if (!match) throw new Error("unsupported text color");
+  const fillChannels = [0, 2, 4].map((offset) =>
+    Number.parseInt(match[1].slice(offset, offset + 2), 16),
+  );
+  const image = context.getImageData(0, 0, width, height);
+  for (let offset = 0; offset < image.data.length; offset += 4) {
+    const alpha = image.data[offset + 3];
+    for (let channel = 0; channel < 3; channel += 1) {
+      const fillChannel = fillChannels[channel];
+      const premultiplied = Math.round((fillChannel * alpha) / 255);
+      image.data[offset + channel] =
+        alpha === 0
+          ? 0
+          : Math.min(255, Math.round((premultiplied * 255) / alpha));
+    }
+  }
+  context.putImageData(image, 0, 0);
 }
 
 function rasterizeBundledText(svg) {
@@ -150,6 +170,7 @@ function rasterizeBundledText(svg) {
       configure(context);
       const drawX = baseDrawX + extraLeft;
       context.fillText(fittedText, drawX, ascent + padding);
+      canonicalizeTextColor(context, rasterWidth, rasterHeight, fill);
       const baseImageX =
         anchor === "end"
           ? x - textWidth - padding
