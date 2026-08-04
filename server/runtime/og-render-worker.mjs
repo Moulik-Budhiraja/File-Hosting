@@ -1,5 +1,6 @@
 import { writeSync } from "node:fs";
 import { fileURLToPath } from "node:url";
+import { deflateSync } from "node:zlib";
 
 const { GlobalFonts, createCanvas } = await import("@napi-rs/canvas");
 const { default: sharp } = await import("sharp");
@@ -27,6 +28,18 @@ for (const [filename, family] of bundledFonts) {
 
 const MAX_SVG_BYTES = 10 * 1024 * 1024;
 const MAX_INPUT_PIXELS = 40_000_000;
+const OUTPUT_WIDTH = 1200;
+const OUTPUT_HEIGHT = 630;
+const MAX_OUTPUT_PIXELS = OUTPUT_WIDTH * OUTPUT_HEIGHT;
+const PRIMARY_RENDER_SECONDS = 2;
+const PNG_SIGNATURE = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]);
+const CRC_TABLE = Uint32Array.from({ length: 256 }, (_, index) => {
+  let value = index;
+  for (let bit = 0; bit < 8; bit += 1) {
+    value = value & 1 ? 0xedb88320 ^ (value >>> 1) : value >>> 1;
+  }
+  return value >>> 0;
+});
 const chunks = [];
 let bytes = 0;
 
@@ -41,6 +54,76 @@ function decodeXml(value) {
     .replaceAll("&quot;", '"')
     .replaceAll("&apos;", "'")
     .replaceAll("&amp;", "&");
+}
+
+function readPngHeader(png) {
+  if (
+    png.length < 33 ||
+    !png.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE) ||
+    png.readUInt32BE(8) !== 13 ||
+    png.toString("ascii", 12, 16) !== "IHDR"
+  ) {
+    return undefined;
+  }
+  return {
+    width: png.readUInt32BE(16),
+    height: png.readUInt32BE(20),
+    bitDepth: png.readUInt8(24),
+    colorType: png.readUInt8(25),
+    compression: png.readUInt8(26),
+    filter: png.readUInt8(27),
+  };
+}
+
+function validateOpaquePng(png, width, height) {
+  const header = readPngHeader(png);
+  // PNG color type 2 is truecolor RGB with no alpha channel.
+  return (
+    header?.width === width &&
+    header.height === height &&
+    header.bitDepth === 8 &&
+    header.colorType === 2 &&
+    header.compression === 0 &&
+    header.filter === 0
+  );
+}
+
+function pngChunk(type, data = Buffer.alloc(0)) {
+  const typeBytes = Buffer.from(type, "ascii");
+  const chunk = Buffer.allocUnsafe(data.length + 12);
+  chunk.writeUInt32BE(data.length, 0);
+  typeBytes.copy(chunk, 4);
+  data.copy(chunk, 8);
+  let crc = 0xffffffff;
+  for (let index = 4; index < data.length + 8; index += 1) {
+    crc = CRC_TABLE[(crc ^ chunk[index]) & 0xff] ^ (crc >>> 8);
+  }
+  chunk.writeUInt32BE((crc ^ 0xffffffff) >>> 0, data.length + 8);
+  return chunk;
+}
+
+function encodeRgbPng(rgb, width, height) {
+  const rowBytes = width * 3;
+  if (rgb.length !== rowBytes * height) {
+    throw new Error("render worker received invalid RGB raster length");
+  }
+  const scanlines = Buffer.allocUnsafe((rowBytes + 1) * height);
+  for (let row = 0; row < height; row += 1) {
+    const outputOffset = row * (rowBytes + 1);
+    scanlines[outputOffset] = 0;
+    rgb.copy(scanlines, outputOffset + 1, row * rowBytes, (row + 1) * rowBytes);
+  }
+  const header = Buffer.alloc(13);
+  header.writeUInt32BE(width, 0);
+  header.writeUInt32BE(height, 4);
+  header[8] = 8;
+  header[9] = 2;
+  return Buffer.concat([
+    PNG_SIGNATURE,
+    pngChunk("IHDR", header),
+    pngChunk("IDAT", deflateSync(scanlines, { level: 9 })),
+    pngChunk("IEND"),
+  ]);
 }
 
 function rasterizeBundledText(svg) {
@@ -163,37 +246,19 @@ try {
     !Number.isSafeInteger(height) ||
     width < 1 ||
     height < 1 ||
-    width * height > MAX_INPUT_PIXELS
+    width * height > MAX_OUTPUT_PIXELS
   ) {
     throw new Error("render dimensions exceed limit");
   }
   const prepared = Buffer.from(rasterizeBundledText(source));
   if (prepared.length > MAX_SVG_BYTES)
     throw new Error("prepared render exceeds limit");
-  const encoded = await sharp(prepared, {
-    failOn: "error",
-    limitInputPixels: MAX_INPUT_PIXELS,
-  })
-    .timeout({ seconds: 2 })
-    .flatten({ background: "#0b0d0f" })
-    .removeAlpha()
-    .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
-    .toBuffer();
-  const metadata = await sharp(encoded).metadata();
-  if (
-    metadata.width !== width ||
-    metadata.height !== height ||
-    metadata.format !== "png"
-  ) {
-    throw new Error("render worker produced invalid PNG metadata");
-  }
-  if (!metadata.hasAlpha) {
-    writeSync(1, encoded);
-  } else {
-    // Some Linux libvips builds preserve a redundant alpha channel after
-    // flatten/removeAlpha. Re-wrap explicit RGB pixels only on that platform path,
-    // preserving the already-approved opaque encoding everywhere else.
-    const { data: rgb, info } = await sharp(encoded)
+  if (process.platform === "linux") {
+    const { data: rgb, info } = await sharp(prepared, {
+      failOn: "error",
+      limitInputPixels: MAX_INPUT_PIXELS,
+    })
+      .timeout({ seconds: PRIMARY_RENDER_SECONDS })
       .flatten({ background: "#0b0d0f" })
       .removeAlpha()
       .raw()
@@ -201,14 +266,25 @@ try {
     if (info.width !== width || info.height !== height || info.channels !== 3) {
       throw new Error("render worker did not produce an RGB raster");
     }
-    const png = await sharp(rgb, {
-      raw: { width, height, channels: 3 },
+    const png = encodeRgbPng(rgb, width, height);
+    if (!validateOpaquePng(png, width, height)) {
+      throw new Error("render worker produced non-opaque PNG output");
+    }
+    writeSync(1, png);
+  } else {
+    const encoded = await sharp(prepared, {
+      failOn: "error",
       limitInputPixels: MAX_INPUT_PIXELS,
     })
-      .timeout({ seconds: 1 })
+      .timeout({ seconds: PRIMARY_RENDER_SECONDS })
+      .flatten({ background: "#0b0d0f" })
+      .removeAlpha()
       .png({ adaptiveFiltering: false, compressionLevel: 9, palette: false })
       .toBuffer();
-    writeSync(1, png);
+    if (!validateOpaquePng(encoded, width, height)) {
+      throw new Error("render worker produced invalid PNG metadata");
+    }
+    writeSync(1, encoded);
   }
 } catch (error) {
   writeSync(

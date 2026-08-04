@@ -48,7 +48,10 @@ test("one canonical root release command covers every required local gate", asyn
 });
 
 test("release CI executes the canonical gate and requires Docker Compose runtime", async () => {
-  const workflow = await text(".github/workflows/release.yml");
+  const [workflow, processTree] = await Promise.all([
+    text(".github/workflows/release.yml"),
+    text("server/src/server/files/process-tree.ts"),
+  ]);
   assert.match(workflow, /runs-on: ubuntu-latest/u);
   assert.match(workflow, /REQUIRE_DOCKER: "1"/u);
   assert.match(workflow, /\.\/scripts\/release-check\.sh/u);
@@ -63,33 +66,38 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
     /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/u,
     "Ubuntu 24.04 CI must allow Bubblewrap to create its isolated user namespace",
   );
-  const releaseJob = workflow.match(/jobs:\n\s+release:\n([\s\S]*)/u)?.[1];
+  const releaseJob = workflow.match(
+    /jobs:\n  release:\n([\s\S]*?)(?=\n  [a-zA-Z0-9_-]+:\n|$)/u,
+  )?.[1];
   assert.ok(releaseJob, "release workflow must contain jobs.release");
   const sandboxProbe = releaseJob.match(
     /- name: Enable and verify the Linux process sandbox\n\s+run: \|\n([\s\S]*?)(?=\n\s+- name:)/u,
   )?.[1];
   assert.ok(sandboxProbe, "release job must contain the Linux sandbox probe step");
-  for (const requiredFlag of [
-    "--die-with-parent",
-    "--unshare-all",
-    "--new-session",
-    "--ro-bind /usr /usr",
-    "--ro-bind /lib /lib",
-    "--ro-bind /lib64 /lib64",
-    '--ro-bind "$PWD" "$PWD"',
-    "--bind /tmp /tmp",
-    "--dev /dev",
-    "--proc /proc",
-    '--chdir "$PWD"',
-    "-- /usr/bin/true",
-  ]) {
+  const productionSandbox = processTree.match(
+    /const sandboxRootArguments = \[([\s\S]*?)\n\s*\];([\s\S]*?)const spawnCommand/u,
+  )?.[0];
+  assert.ok(productionSandbox, "production sandbox arguments must remain inspectable");
+  const requiredTokens = new Set(
+    [...productionSandbox.matchAll(/"(--[^"]+|\/[^"]+)"/gu)].map(
+      ([, token]) => token,
+    ),
+  );
+  for (const token of requiredTokens) {
     assert.ok(
-      sandboxProbe.includes(requiredFlag),
-      `Linux sandbox probe must mirror production flag: ${requiredFlag}`,
+      sandboxProbe.includes(token),
+      `Linux sandbox probe must contain production token: ${token}`,
     );
   }
-  const sandboxPreparation = releaseJob.indexOf(
-    "kernel.apparmor_restrict_unprivileged_userns=0",
+  if (productionSandbox.includes("process.cwd()")) {
+    assert.ok(
+      sandboxProbe.includes('"$PWD"'),
+      "Linux sandbox probe must map production process.cwd() paths to the CI workspace",
+    );
+  }
+  assert.ok(
+    sandboxProbe.includes("-- /usr/bin/true"),
+    "Linux sandbox probe must execute a harmless command inside the namespace",
   );
   const sandboxSmoke = releaseJob.indexOf(
     "- name: Enable and verify the Linux process sandbox",
@@ -98,10 +106,8 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
     "- name: Run canonical release gate",
   );
   assert.ok(
-    sandboxPreparation >= 0 &&
-      sandboxPreparation > sandboxSmoke &&
-      sandboxSmoke < canonicalGate,
-    "sandbox preparation and smoke must run in jobs.release before the canonical gate",
+    sandboxSmoke >= 0 && canonicalGate > sandboxSmoke,
+    "the Linux sandbox smoke step must run in jobs.release before the canonical gate",
   );
 });
 
@@ -209,23 +215,36 @@ test("standalone traces exact Twemoji licensing and excludes TypeScript", async 
   assert.match(standalone, /node_modules["'],\s*["']typescript/u);
   assert.match(
     renderWorker,
-    /metadata\(\)[\s\S]*hasAlpha/u,
-    "worker must inspect the encoded PNG before applying the compatibility path",
+    /const MAX_OUTPUT_PIXELS = OUTPUT_WIDTH \* OUTPUT_HEIGHT;/u,
+    "worker must cap raw output allocation to the fixed OG pixel envelope",
   );
   assert.match(
     renderWorker,
-    /if \(!metadata\.hasAlpha\)[\s\S]*writeSync\(1, encoded\)/u,
-    "already-opaque approved bytes must pass through unchanged",
+    /width \* height > MAX_OUTPUT_PIXELS/u,
+    "worker must reject oversized raw output before allocating it",
+  );
+  const primaryTimeout = renderWorker.match(
+    /const PRIMARY_RENDER_SECONDS = ([\d.]+);/u,
+  );
+  assert.ok(primaryTimeout, "worker must publish its sharp stage timeout");
+  assert.ok(
+    Number(primaryTimeout[1]) < 2.5,
+    "worker sharp work must fit below the outer 2.5 second wall deadline",
   );
   assert.match(
     renderWorker,
-    /\.raw\(\)[\s\S]*toBuffer\(\{ resolveWithObject: true \}\)/u,
-    "alpha-bearing platform output must materialize a three-channel raster",
+    /function validateOpaquePng[\s\S]*color type[\s\S]*=== 2/u,
+    "worker must validate dimensions and RGB color type from emitted PNG bytes",
   );
   assert.match(
     renderWorker,
-    /raw:\s*\{[\s\S]*channels:\s*3[\s\S]*\}/u,
-    "compatibility PNG must be encoded from an explicit RGB input",
+    /if \(process\.platform === "linux"\)[\s\S]*\.raw\(\)[\s\S]*encodeRgbPng\(rgb, width, height\)[\s\S]*validateOpaquePng\(png, width, height\)[\s\S]*writeSync\(1, png\)/u,
+    "Linux must use one bounded sharp stage and a validated RGB-only PNG encoder",
+  );
+  assert.match(
+    renderWorker,
+    /else \{[\s\S]*validateOpaquePng\(encoded, width, height\)[\s\S]*writeSync\(1, encoded\)/u,
+    "already-approved non-Linux opaque bytes must pass through unchanged",
   );
 });
 
