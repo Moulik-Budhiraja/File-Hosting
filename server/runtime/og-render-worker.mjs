@@ -1,4 +1,5 @@
 import { writeSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { encodeRgbPng, validateOpaquePng } from "./rgb-png.js";
 
@@ -186,6 +187,12 @@ try {
   const prepared = Buffer.from(rasterizeBundledText(source));
   if (prepared.length > MAX_SVG_BYTES)
     throw new Error("prepared render exceeds limit");
+  const diagnosticPrefix =
+    process.env.OG_RENDER_DIAGNOSTIC === "1"
+      ? Buffer.from(
+          `OGDI${createHash("sha256").update(prepared).digest("hex")}\n`,
+        )
+      : Buffer.alloc(0);
   if (process.platform === "linux") {
     const { data: rgb, info } = await sharp(prepared, {
       failOn: "error",
@@ -200,6 +207,7 @@ try {
       throw new Error("render worker did not produce an RGB raster");
     }
     const png = encodeRgbPng(rgb, width, height);
+    writeSync(1, diagnosticPrefix);
     writeSync(1, png);
   } else {
     const encoded = await sharp(prepared, {
@@ -214,6 +222,7 @@ try {
     if (!validateOpaquePng(encoded, width, height)) {
       throw new Error("render worker produced invalid PNG metadata");
     }
+    writeSync(1, diagnosticPrefix);
     writeSync(1, encoded);
   }
 } catch (error) {

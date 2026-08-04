@@ -89,6 +89,7 @@ for (const entry of manifest) {
 
 await rm(outputRoot, { recursive: true, force: true });
 await mkdir(outputRoot, { recursive: true });
+if (process.env.CI === "true") process.env.OG_RENDER_DIAGNOSTIC = "1";
 const temporaryRoot = await mkdtemp(
   path.join(os.tmpdir(), "fs-og-design-audit-"),
 );

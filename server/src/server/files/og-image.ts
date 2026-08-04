@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, writeFileSync } from "node:fs";
 import path from "node:path";
 
 import { AppError } from "./errors";
@@ -585,7 +585,33 @@ function workerEnvironment(): NodeJS.ProcessEnv {
   ] as const) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
+  if (
+    process.env.CI === "true" &&
+    process.env.NODE_ENV !== "production" &&
+    process.env.OG_RENDER_DIAGNOSTIC === "1"
+  ) {
+    environment.OG_RENDER_DIAGNOSTIC = "1";
+  }
   return environment;
+}
+
+function extractWorkerDiagnostic(output: Buffer): Buffer {
+  if (
+    process.env.CI !== "true" ||
+    process.env.NODE_ENV === "production" ||
+    process.env.OG_RENDER_DIAGNOSTIC !== "1"
+  ) {
+    return output;
+  }
+  const prefix = output.subarray(0, 69).toString("ascii");
+  if (!/^OGDI[a-f0-9]{64}\n$/u.test(prefix))
+    throw new Error("render diagnostic prefix missing");
+  writeFileSync(
+    "/tmp/file-hosting-design-audit-release/diagnostic-worker.json",
+    `${JSON.stringify({ preparedSha256: prefix.slice(4, 68) }, null, 2)}\n`,
+    { mode: 0o600 },
+  );
+  return output.subarray(69);
 }
 
 export function getOgRenderPoolState(): { active: number; queued: number } {
@@ -651,7 +677,7 @@ export async function renderSvgInWorker(
                 allowSubprocesses: options.allowSubprocesses,
               },
             );
-            return result.stdout;
+            return extractWorkerDiagnostic(result.stdout);
           } catch (error) {
             if (
               !(error instanceof ProcessExecutionError) ||
