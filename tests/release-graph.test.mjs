@@ -58,6 +58,22 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
     /apt-get install -y[^\n]*bubblewrap/u,
     "production standalone CI must install the required Linux process sandbox",
   );
+  assert.match(
+    workflow,
+    /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/u,
+    "Ubuntu 24.04 CI must allow Bubblewrap to create its isolated user namespace",
+  );
+  assert.match(
+    workflow,
+    /bwrap[^\n]*--unshare-all[^\n]*\/usr\/bin\/true/u,
+    "CI must smoke-test the real Bubblewrap namespace before the canonical gate",
+  );
+  const sandboxPreparation = workflow.indexOf(
+    "kernel.apparmor_restrict_unprivileged_userns=0",
+  );
+  const sandboxSmoke = workflow.indexOf("bwrap --die-with-parent");
+  const canonicalGate = workflow.indexOf("./scripts/release-check.sh");
+  assert.ok(sandboxPreparation < sandboxSmoke && sandboxSmoke < canonicalGate);
 });
 
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {

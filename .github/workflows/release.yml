@@ -31,5 +31,9 @@ jobs:
         run: docker compose version
       - name: Install Chromium and the Linux process sandbox
         run: sudo apt-get update && sudo apt-get install -y chromium bubblewrap
+      - name: Enable and verify the Linux process sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          bwrap --die-with-parent --unshare-all --new-session --ro-bind /usr /usr --dev /dev --proc /proc -- /usr/bin/true
       - name: Run canonical release gate
         run: ./scripts/release-check.sh
