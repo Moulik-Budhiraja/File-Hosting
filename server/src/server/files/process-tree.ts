@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
+import { linuxSandboxArguments } from "../../../runtime/linux-sandbox.js";
 
 export interface KillableProcessOptions {
   timeoutMs: number;
@@ -93,30 +94,10 @@ export async function runKillableProcess(
     throw new ProcessExecutionError("process sandbox unavailable");
   }
   return new Promise<KillableProcessResult>((resolve, reject) => {
-    const sandboxRootArguments = [
-      "--die-with-parent",
-      "--unshare-all",
-      "--new-session",
-      "--ro-bind",
-      "/usr",
-      "/usr",
-      "--ro-bind",
+    const sandboxRootArguments = linuxSandboxArguments(
       process.cwd(),
-      process.cwd(),
-      "--bind",
-      "/tmp",
-      "/tmp",
-      "--dev",
-      "/dev",
-      "--proc",
-      "/proc",
-      "--chdir",
       options.cwd ?? process.cwd(),
-    ];
-    if (existsSync("/lib"))
-      sandboxRootArguments.push("--ro-bind", "/lib", "/lib");
-    if (existsSync("/lib64"))
-      sandboxRootArguments.push("--ro-bind", "/lib64", "/lib64");
+    );
     const spawnCommand = restrictForks
       ? "/usr/bin/sandbox-exec"
       : restrictLinux

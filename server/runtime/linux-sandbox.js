@@ -1,0 +1,38 @@
+import { existsSync } from "node:fs";
+
+/**
+ * @param {string} rootCwd
+ * @param {string} [childCwd]
+ */
+export function linuxSandboxArguments(rootCwd, childCwd = rootCwd) {
+  if (!rootCwd || !childCwd) {
+    throw new TypeError("sandbox working directories are required");
+  }
+  const args = [
+    "--die-with-parent",
+    "--unshare-all",
+    "--new-session",
+    ...["--ro-bind", "/usr", "/usr"],
+  ];
+  /** @type {Array<[string, string, string]>} */
+  const optionalMounts = [
+    ["--ro-bind", "/lib", "/lib"],
+    ["--ro-bind", "/lib64", "/lib64"],
+  ];
+  for (const mount of optionalMounts) {
+    if (existsSync(mount[1])) args.push(...mount);
+  }
+  args.push(
+    "--dev",
+    "/dev",
+    "--proc",
+    "/proc",
+    "--ro-bind",
+    rootCwd,
+    rootCwd,
+    ...["--bind", "/tmp", "/tmp"],
+    "--chdir",
+    childCwd,
+  );
+  return args;
+}

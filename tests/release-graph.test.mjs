@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
 import test from "node:test";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import { inflateSync } from "node:zlib";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -48,10 +49,13 @@ test("one canonical root release command covers every required local gate", asyn
 });
 
 test("release CI executes the canonical gate and requires Docker Compose runtime", async () => {
-  const [workflow, processTree] = await Promise.all([
-    text(".github/workflows/release.yml"),
-    text("server/src/server/files/process-tree.ts"),
-  ]);
+  const [workflow, processTree, sandboxModule, sandboxVerifier] =
+    await Promise.all([
+      text(".github/workflows/release.yml"),
+      text("server/src/server/files/process-tree.ts"),
+      text("server/runtime/linux-sandbox.js"),
+      text("server/runtime/verify-linux-sandbox.js"),
+    ]);
   assert.match(workflow, /runs-on: ubuntu-latest/u);
   assert.match(workflow, /REQUIRE_DOCKER: "1"/u);
   assert.match(workflow, /\.\/scripts\/release-check\.sh/u);
@@ -74,30 +78,46 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
     /- name: Enable and verify the Linux process sandbox\n\s+run: \|\n([\s\S]*?)(?=\n\s+- name:)/u,
   )?.[1];
   assert.ok(sandboxProbe, "release job must contain the Linux sandbox probe step");
-  const productionSandbox = processTree.match(
-    /const sandboxRootArguments = \[([\s\S]*?)\n\s*\];([\s\S]*?)const spawnCommand/u,
-  )?.[0];
-  assert.ok(productionSandbox, "production sandbox arguments must remain inspectable");
-  const requiredTokens = new Set(
-    [...productionSandbox.matchAll(/"(--[^"]+|\/[^"]+)"/gu)].map(
-      ([, token]) => token,
-    ),
+  assert.match(
+    processTree,
+    /import \{ linuxSandboxArguments \} from "\.\.\/\.\.\/\.\.\/runtime\/linux-sandbox\.js";/u,
+    "production must consume the shared Linux sandbox argument builder",
   );
-  for (const token of requiredTokens) {
+  assert.match(
+    processTree,
+    /linuxSandboxArguments\(\s*process\.cwd\(\),\s*options\.cwd \?\? process\.cwd\(\),\s*\)/u,
+    "production must pass its actual child working directory to the shared builder",
+  );
+  assert.match(
+    sandboxProbe,
+    /node server\/runtime\/verify-linux-sandbox\.js/u,
+    "CI must execute the shared production sandbox verifier",
+  );
+  assert.match(
+    sandboxVerifier,
+    /import \{ linuxSandboxArguments \} from "\.\/linux-sandbox\.js";/u,
+    "CI verifier must import the same sandbox argument builder as production",
+  );
+  assert.match(
+    sandboxVerifier,
+    /spawnSync\(\s*"\/usr\/bin\/bwrap",\s*\[\s*\.\.\.linuxSandboxArguments\(process\.cwd\(\)\),\s*"--",\s*"\/usr\/bin\/true"\s*\]/u,
+    "CI must execute the shared production arguments without reconstructing them",
+  );
+  for (const exactMount of [
+    '["--ro-bind", "/usr", "/usr"]',
+    '["--ro-bind", "/lib", "/lib"]',
+    '["--ro-bind", "/lib64", "/lib64"]',
+    '["--bind", "/tmp", "/tmp"]',
+  ]) {
     assert.ok(
-      sandboxProbe.includes(token),
-      `Linux sandbox probe must contain production token: ${token}`,
+      sandboxModule.includes(exactMount),
+      `shared sandbox builder must retain ${exactMount}`,
     );
   }
-  if (productionSandbox.includes("process.cwd()")) {
-    assert.ok(
-      sandboxProbe.includes('"$PWD"'),
-      "Linux sandbox probe must map production process.cwd() paths to the CI workspace",
-    );
-  }
-  assert.ok(
-    sandboxProbe.includes("-- /usr/bin/true"),
-    "Linux sandbox probe must execute a harmless command inside the namespace",
+  assert.doesNotMatch(
+    sandboxProbe,
+    /--(?:ro-bind|bind|dev|proc|chdir|unshare-all|new-session|die-with-parent)/u,
+    "CI must not duplicate production sandbox flags",
   );
   const sandboxSmoke = releaseJob.indexOf(
     "- name: Enable and verify the Linux process sandbox",
@@ -188,12 +208,14 @@ test("resource-sensitive preview surface contains no dead helpers, guards, proto
 });
 
 test("standalone traces exact Twemoji licensing and excludes TypeScript", async () => {
-  const [config, attribution, standalone, renderWorker] = await Promise.all([
-    text("server/next.config.js"),
-    text("server/runtime/assets/twemoji/ATTRIBUTION.md"),
-    text("server/scripts/standalone-og-e2e.mjs"),
-    text("server/runtime/og-render-worker.mjs"),
-  ]);
+  const [config, attribution, standalone, renderWorker, rgbPng] =
+    await Promise.all([
+      text("server/next.config.js"),
+      text("server/runtime/assets/twemoji/ATTRIBUTION.md"),
+      text("server/scripts/standalone-og-e2e.mjs"),
+      text("server/runtime/og-render-worker.mjs"),
+      text("server/runtime/rgb-png.js"),
+    ]);
   assert.match(config, /@twemoji\/svg\/\{license\*,readme\.md\}/u);
   assert.match(
     config,
@@ -228,24 +250,56 @@ test("standalone traces exact Twemoji licensing and excludes TypeScript", async 
   );
   assert.ok(primaryTimeout, "worker must publish its sharp stage timeout");
   assert.ok(
-    Number(primaryTimeout[1]) < 2.5,
-    "worker sharp work must fit below the outer 2.5 second wall deadline",
+    Number(primaryTimeout[1]) <= 1,
+    "Linux sharp work must leave at least 1.5 seconds for startup and bounded encoding",
+  );
+  assert.match(
+    rgbPng,
+    /deflateSync\(scanlines, \{ level: 1 \}\)/u,
+    "bounded Linux scanlines must use fast deterministic compression",
   );
   assert.match(
     renderWorker,
-    /function validateOpaquePng[\s\S]*color type[\s\S]*=== 2/u,
-    "worker must validate dimensions and RGB color type from emitted PNG bytes",
+    /if \(process\.platform === "linux"\)[\s\S]*\.raw\(\)[\s\S]*encodeRgbPng\(rgb, width, height\)[\s\S]*writeSync\(1, png\)/u,
+    "Linux must use one bounded sharp stage and the RGB-only PNG encoder",
   );
-  assert.match(
-    renderWorker,
-    /if \(process\.platform === "linux"\)[\s\S]*\.raw\(\)[\s\S]*encodeRgbPng\(rgb, width, height\)[\s\S]*validateOpaquePng\(png, width, height\)[\s\S]*writeSync\(1, png\)/u,
-    "Linux must use one bounded sharp stage and a validated RGB-only PNG encoder",
+  assert.doesNotMatch(
+    renderWorker.match(/if \(process\.platform === "linux"\)([\s\S]*?)\n\s*\} else \{/u)?.[1] ?? "",
+    /validateOpaquePng/u,
+    "Linux must not claim a tautological postcondition check",
   );
   assert.match(
     renderWorker,
     /else \{[\s\S]*validateOpaquePng\(encoded, width, height\)[\s\S]*writeSync\(1, encoded\)/u,
-    "already-approved non-Linux opaque bytes must pass through unchanged",
+    "already-approved non-Linux opaque bytes must be independently validated",
   );
+});
+
+test("RGB PNG encoder is executable, lossless, opaque, and corruption-detecting", async () => {
+  const moduleUrl = pathToFileURL(
+    path.join(root, "server/runtime/rgb-png.js"),
+  ).href;
+  const { encodeRgbPng, validateOpaquePng } = await import(moduleUrl);
+  const pixels = Buffer.from([255, 0, 0, 0, 255, 0]);
+  const png = encodeRgbPng(pixels, 2, 1);
+  assert.equal(validateOpaquePng(png, 2, 1), true);
+
+  const idat = [];
+  let offset = 8;
+  let firstIdatDataOffset = -1;
+  while (offset < png.length) {
+    const length = png.readUInt32BE(offset);
+    const type = png.toString("ascii", offset + 4, offset + 8);
+    if (type === "IDAT") {
+      firstIdatDataOffset = offset + 8;
+      idat.push(png.subarray(offset + 8, offset + 8 + length));
+    }
+    offset += length + 12;
+  }
+  assert.deepEqual(inflateSync(Buffer.concat(idat)), Buffer.from([0, ...pixels]));
+  const corrupted = Buffer.from(png);
+  corrupted[firstIdatDataOffset] ^= 1;
+  assert.equal(validateOpaquePng(corrupted, 2, 1), false);
 });
 
 test("automated design evidence identifies the Node gate without model attestation", async () => {

@@ -34,18 +34,6 @@ jobs:
       - name: Enable and verify the Linux process sandbox
         run: |
           sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
-          bwrap \
-            --die-with-parent \
-            --unshare-all \
-            --new-session \
-            --ro-bind /usr /usr \
-            --ro-bind /lib /lib \
-            --ro-bind /lib64 /lib64 \
-            --ro-bind "$PWD" "$PWD" \
-            --bind /tmp /tmp \
-            --dev /dev \
-            --proc /proc \
-            --chdir "$PWD" \
-            -- /usr/bin/true
+          node server/runtime/verify-linux-sandbox.js
       - name: Run canonical release gate
         run: ./scripts/release-check.sh
