@@ -125,27 +125,36 @@ function rasterizeBundledText(svg) {
         1,
         Math.ceil(metrics.actualBoundingBoxDescent || size * 0.25),
       );
-      // Width now reserves the full measured glyph extent, so a 4px anti-aliasing
-      // gutter is sufficient without expanding the transitive RSS envelope.
       const padding = 4;
-      const rasterWidth = textWidth + padding * 2;
-      const rasterHeight = ascent + descent + padding * 2;
-      const canvas = createCanvas(rasterWidth, rasterHeight);
-      const context = canvas.getContext("2d");
-      configure(context);
-      const drawX =
+      const baseRasterWidth = textWidth + padding * 2;
+      const baseDrawX =
         anchor === "end"
           ? textWidth + padding
           : anchor === "middle"
             ? textWidth / 2 + padding
             : padding;
+      const inkLeft = baseDrawX - (metrics.actualBoundingBoxLeft || 0);
+      const inkRight = baseDrawX + (metrics.actualBoundingBoxRight || 0);
+      const extraLeft = Math.max(0, Math.ceil(padding - inkLeft));
+      const extraRight = Math.max(
+        0,
+        Math.ceil(inkRight - (baseRasterWidth - padding)),
+      );
+      const rasterWidth = baseRasterWidth + extraLeft + extraRight;
+      const rasterHeight = ascent + descent + padding * 2;
+      const canvas = createCanvas(rasterWidth, rasterHeight);
+      const context = canvas.getContext("2d");
+      configure(context);
+      const drawX = baseDrawX + extraLeft;
       context.fillText(fittedText, drawX, ascent + padding);
-      const imageX =
+      const baseImageX =
         anchor === "end"
           ? x - textWidth - padding
           : anchor === "middle"
             ? x - textWidth / 2 - padding
             : x - padding;
+      // Expanding the temporary raster must not move the SVG alignment point.
+      const imageX = baseImageX - extraLeft;
       const imageY = y - ascent - padding;
       const data = canvas.toBuffer("image/png").toString("base64");
       return `<image href="data:image/png;base64,${data}" x="${imageX}" y="${imageY}" width="${rasterWidth}" height="${rasterHeight}"/>`;

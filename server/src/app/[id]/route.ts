@@ -3,7 +3,7 @@ import {
   PREVIEW_CONTENT_SECURITY_POLICY,
   renderPreview,
 } from "@/server/files/preview";
-import { PreviewBusyError } from "@/server/files/preview-renderers";
+
 import { getViewableFile } from "@/server/files/request";
 import {
   captureSourceIdentity,
@@ -43,14 +43,10 @@ async function responseFor(
     );
     const sourceIdentity = await captureSourceIdentity(service, file);
     if (!sourceIdentity) throw notFound();
-    let unfurlHead = "";
-    if (file.visibility === "public") {
-      try {
-        unfurlHead = renderUnfurlHead(await buildUnfurlModel(service, file));
-      } catch (error) {
-        if (!(error instanceof PreviewBusyError)) throw error;
-      }
-    }
+    const unfurlHead =
+      file.visibility === "public"
+        ? renderUnfurlHead(await buildUnfurlModel(service, file))
+        : "";
     const html = await renderPreview(service, file, unfurlHead);
     if (
       file.visibility === "public" &&

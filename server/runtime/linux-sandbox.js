@@ -35,10 +35,10 @@ export function linuxSandboxArguments(
     "/dev",
     "--proc",
     "/proc",
+    ...["--bind", "/tmp", "/tmp"],
     "--ro-bind",
     rootCwd,
     rootCwd,
-    ...["--bind", "/tmp", "/tmp"],
     "--chdir",
     childCwd,
   );

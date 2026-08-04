@@ -275,6 +275,58 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     assert.doesNotMatch(head, /<script(?:\s|>)/iu);
   });
 
+  it("returns the generic unavailable contract when unfurl extraction is busy", async () => {
+    const file = await service.upload(bytes("busy source bytes"), {
+      name: "busy-public.txt",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "text/plain",
+    });
+    const originalStoragePath = service.storagePath.bind(service);
+    const request = async (head: boolean): Promise<Response> => {
+      let targetCalls = 0;
+      service.storagePath = (candidate: StoredFile) => {
+        if (candidate.id === file.id && ++targetCalls === 2) {
+          throw new PreviewBusyError();
+        }
+        return originalStoragePath(candidate);
+      };
+      try {
+        return head
+          ? await headPreview(
+              new Request(`https://canonical.example.test/${file.id}`, {
+                method: "HEAD",
+              }),
+              routeContext(file.id),
+            )
+          : await getPreview(
+              new Request(`https://canonical.example.test/${file.id}`),
+              routeContext(file.id),
+            );
+      } finally {
+        service.storagePath = originalStoragePath;
+      }
+    };
+
+    const get = await request(false);
+    assert.equal(get.status, 200);
+    const html = await get.text();
+    assert.match(html, /File unavailable/u);
+    assert.match(
+      html,
+      /property="og:image" content="https:\/\/files\.moulik\.dev\/og\/0000000\.png"/u,
+    );
+    assert.doesNotMatch(
+      html,
+      new RegExp(`${file.id}|busy-public|${file.sha256}`, "u"),
+    );
+    const head = await request(true);
+    assert.equal(head.status, 200);
+    assert.equal(await head.text(), "");
+    assert.deepEqual([...head.headers.entries()], [...get.headers.entries()]);
+  });
+
   it("emits the exact allowlisted tag set for every public file class", async () => {
     const cases = [
       ["notes.txt", "text/plain", "TXT", "article"],

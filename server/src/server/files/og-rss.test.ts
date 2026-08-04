@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { test } from "node:test";
@@ -16,6 +16,8 @@ import { runKillableProcess } from "./process-tree";
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
 import { buildUnfurlModel } from "./unfurl";
+
+const RSS_FILL_CHUNK_BYTES = 64 * 1024;
 
 function transitiveRssKiB(): number {
   if (process.platform === "win32") return process.memoryUsage().rss / 1024;
@@ -88,18 +90,30 @@ test(
       },
     );
     const targetBytes = 20 * 1024 * 1024;
-    let source = Buffer.concat([
-      generated.stdout,
-      Buffer.alloc(Math.max(0, targetBytes - generated.stdout.length), 0x5a),
-    ]);
-    assert.equal(source.length, targetBytes);
-    const sourceSha256 = createHash("sha256").update(source).digest("hex");
+    assert.ok(generated.stdout.length <= targetBytes);
     const directory = await mkdtemp(path.join(os.tmpdir(), "fs-og-rss-"));
     const sourcePath = path.join(directory, "large.jpg");
     try {
-      await writeFile(sourcePath, source);
-      source = Buffer.alloc(0);
-      collectGarbage();
+      const handle = await open(sourcePath, "wx");
+      const sourceHash = createHash("sha256");
+      try {
+        await handle.writeFile(generated.stdout);
+        sourceHash.update(generated.stdout);
+        const fillChunk = Buffer.alloc(RSS_FILL_CHUNK_BYTES, 0x5a);
+        let remaining = targetBytes - generated.stdout.length;
+        while (remaining > 0) {
+          const chunk = fillChunk.subarray(
+            0,
+            Math.min(remaining, fillChunk.length),
+          );
+          await handle.writeFile(chunk);
+          sourceHash.update(chunk);
+          remaining -= chunk.length;
+        }
+      } finally {
+        await handle.close();
+      }
+      const sourceSha256 = sourceHash.digest("hex");
       const file: StoredFile = {
         id: "RsS6324",
         name: "large.jpg",

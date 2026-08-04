@@ -315,25 +315,24 @@ interface AuditCase {
   directReviewRefinement?: boolean;
   directReviewRegions?: readonly DesignRegionName[];
 }
-const landscape = await independentRaster(1600, 900, "#d9a14c");
-const landscapeMutation = await independentRaster(1600, 900, "#5f9de8");
-// File size is rendered into the facts line. Keep the approved portrait source
-// bytes immutable so host libvips encoders cannot change those pixels in CI.
+const designInputRoot = path.join(
+  repositoryFixtureRoot,
+  "..",
+  "og-design-inputs-v2",
+);
+// File size is rendered into the facts line. Keep approved facts-bearing image
+// inputs immutable so host native encoders cannot change those pixels in CI.
+const landscape = await readFile(
+  path.join(designInputRoot, "source-01-image-landscape.jpg"),
+);
+const landscapeMutation = await readFile(
+  path.join(designInputRoot, "source-01-image-landscape-mutation.jpg"),
+);
 const portrait = await readFile(
-  path.join(
-    repositoryFixtureRoot,
-    "..",
-    "og-design-inputs-v2",
-    "source-02-image-portrait.png",
-  ),
+  path.join(designInputRoot, "source-02-image-portrait.png"),
 );
 const portraitMutation = await readFile(
-  path.join(
-    repositoryFixtureRoot,
-    "..",
-    "og-design-inputs-v2",
-    "source-02-image-portrait-mutation.png",
-  ),
+  path.join(designInputRoot, "source-02-image-portrait-mutation.png"),
 );
 const topBrand = { left: 48, top: 42, width: 230, height: 38 };
 const bottomBrand = { left: 900, top: 548, width: 258, height: 42 };
@@ -343,8 +342,8 @@ const cases: AuditCase[] = [
     reference: "raw-01-image-landscape.png",
     name: "glacier-traverse-dawn.jpg",
     mimeType: "image/jpeg",
-    bytes: await sharp(landscape).jpeg({ quality: 90 }).toBuffer(),
-    mutation: await sharp(landscapeMutation).jpeg({ quality: 90 }).toBuffer(),
+    bytes: landscape,
+    mutation: landscapeMutation,
     expectedKind: "image",
     expectedVisual: "image",
     brand: topBrand,
@@ -1676,7 +1675,7 @@ try {
       id: "stress-06-mobile-crop",
       name: "mobile-center-crop.jpg",
       mime: "image/jpeg",
-      bytes: await sharp(landscape).jpeg({ quality: 90 }).toBuffer(),
+      bytes: landscape,
       base: "01-image-landscape",
     },
   ];

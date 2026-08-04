@@ -180,6 +180,9 @@ function rasterWorkerEnvironment(): NodeJS.ProcessEnv {
   for (const key of WORKER_ENVIRONMENT_KEYS) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
   }
+  if (process.platform === "linux" && process.env.NODE_ENV === "production") {
+    Object.assign(environment, { TMPDIR: "/tmp", TEMP: "/tmp", TMP: "/tmp" });
+  }
   return environment;
 }
 

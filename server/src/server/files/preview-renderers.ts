@@ -262,7 +262,7 @@ async function withVerifiedSnapshot<T>(
     const source = await readFullVerifiedSource(input);
     if (!source) return null;
     const directory = await mkdtemp(
-      path.join(os.tmpdir(), "file-hosting-preview-"),
+      path.join(workerTemporaryRoot(), "file-hosting-preview-"),
     );
     const snapshotPath = path.join(directory, "source");
     try {
@@ -602,6 +602,12 @@ const MEDIA_OUTPUT_LIMIT = 8 * 1024 * 1024;
 const MEDIA_WARMUP_TIMEOUT_MS = 10_000;
 let mediaWarmup: Promise<void> | undefined;
 
+function workerTemporaryRoot(): string {
+  return process.platform === "linux" && process.env.NODE_ENV === "production"
+    ? "/tmp"
+    : os.tmpdir();
+}
+
 function remainingExtractionMs(input: RendererInput): number {
   const remaining =
     (input.deadlineAt ?? Date.now() + MEDIA_TIMEOUT_MS) - Date.now();
@@ -621,6 +627,9 @@ function mediaEnvironment(): NodeJS.ProcessEnv {
     "LC_ALL",
   ] as const) {
     if (process.env[key] !== undefined) environment[key] = process.env[key];
+  }
+  if (process.platform === "linux" && process.env.NODE_ENV === "production") {
+    Object.assign(environment, { TMPDIR: "/tmp", TEMP: "/tmp", TMP: "/tmp" });
   }
   return environment;
 }

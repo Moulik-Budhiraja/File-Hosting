@@ -83,7 +83,10 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
   const sandboxProbe = releaseJob.match(
     /- name: Enable and verify the Linux process sandbox\n\s+run: \|\n([\s\S]*?)(?=\n\s+- name:)/u,
   )?.[1];
-  assert.ok(sandboxProbe, "release job must contain the Linux sandbox probe step");
+  assert.ok(
+    sandboxProbe,
+    "release job must contain the Linux sandbox probe step",
+  );
   assert.match(
     processTree,
     /import \{ linuxSandboxArguments \} from "\.\.\/\.\.\/\.\.\/runtime\/linux-sandbox\.js";/u,
@@ -138,6 +141,53 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
   );
 });
 
+test("Linux sandbox keeps nested app roots read-only and pins worker temp paths", async () => {
+  const [{ linuxSandboxArguments }, previewRenderers, rasterWorker] =
+    await Promise.all([
+      import(
+        pathToFileURL(path.join(root, "server/runtime/linux-sandbox.js")).href
+      ),
+      text("server/src/server/files/preview-renderers.ts"),
+      text("server/src/server/files/raster-worker.ts"),
+    ]);
+  const nestedRoot = "/tmp/file-hosting-standalone/app";
+  const arguments_ = linuxSandboxArguments(
+    nestedRoot,
+    nestedRoot,
+    process.execPath,
+  );
+  const temporaryBind = arguments_.findIndex(
+    (value, index) =>
+      value === "--bind" &&
+      arguments_[index + 1] === "/tmp" &&
+      arguments_[index + 2] === "/tmp",
+  );
+  const rootBind = arguments_.findIndex(
+    (value, index) =>
+      value === "--ro-bind" &&
+      arguments_[index + 1] === nestedRoot &&
+      arguments_[index + 2] === nestedRoot,
+  );
+  assert.ok(temporaryBind >= 0 && rootBind > temporaryBind);
+  assert.match(previewRenderers, /workerTemporaryRoot\(\)/u);
+  assert.match(previewRenderers, /TMPDIR: "\/tmp"/u);
+  assert.match(rasterWorker, /TMPDIR: "\/tmp"/u);
+});
+
+test("text rasterization expands for measured ink overhang without moving global glyphs", async () => {
+  const worker = await text("server/runtime/og-render-worker.mjs");
+  for (const contract of [
+    /inkLeft/u,
+    /inkRight/u,
+    /extraLeft/u,
+    /extraRight/u,
+    /const drawX = baseDrawX \+ extraLeft/u,
+    /const imageX = baseImageX - extraLeft/u,
+  ]) {
+    assert.match(worker, contract);
+  }
+});
+
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
   const runtime = await text("scripts/compose-runtime-check.sh");
   assert.match(runtime, /docker compose build/u);
@@ -177,8 +227,18 @@ test("canonical freeze and manifest are source-pinned without a fixture update c
   );
 });
 
-test("portrait design inputs are immutable tracked bytes rather than platform encodes", async () => {
+test("facts-bearing image inputs are immutable tracked bytes rather than platform encodes", async () => {
   const fixtures = [
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-01-image-landscape.jpg",
+      24_325,
+      "ab6ba96e46a1367fc36757df43ca5e447eba651e2d4d9c186921de5c14efd02d",
+    ],
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-01-image-landscape-mutation.jpg",
+      23_434,
+      "28983842de8c3945c2cbe0ceeb1713aea36775ea42b031bd23a3d8b85793c6ca",
+    ],
     [
       "server/test-fixtures/og-design-inputs-v2/source-02-image-portrait.png",
       51_357,
@@ -196,12 +256,26 @@ test("portrait design inputs are immutable tracked bytes rather than platform en
     assert.equal(createHash("sha256").update(bytes).digest("hex"), digest);
   }
   const audit = await text("server/scripts/design-audit.ts");
+  assert.match(audit, /source-01-image-landscape\.jpg/u);
+  assert.match(audit, /source-01-image-landscape-mutation\.jpg/u);
   assert.match(audit, /source-02-image-portrait\.png/u);
   assert.match(audit, /source-02-image-portrait-mutation\.png/u);
   assert.doesNotMatch(
     audit,
-    /const portrait = await independentRaster\(/u,
+    /const (?:landscape|portrait) = await independentRaster\(|sharp\(landscape\)\.jpeg/u,
     "the source byte size rendered in approved facts must not depend on host libvips",
+  );
+});
+
+test("RSS gate streams its disk fixture without charging setup allocation to the runtime envelope", async () => {
+  const rssGate = await text("server/src/server/files/og-rss.test.ts");
+  assert.match(rssGate, /const RSS_FILL_CHUNK_BYTES = 64 \* 1024;/u);
+  assert.match(rssGate, /await handle\.writeFile\(chunk/u);
+  assert.match(rssGate, /sourceHash\.update\(chunk/u);
+  assert.doesNotMatch(
+    rssGate,
+    /Buffer\.concat\(\[\s*generated\.stdout/u,
+    "the transitive RSS measurement must not retain a full-size setup buffer in its parent",
   );
 });
 
@@ -300,7 +374,9 @@ test("standalone traces exact Twemoji licensing and excludes TypeScript", async 
     "Linux must use one bounded sharp stage and the RGB-only PNG encoder",
   );
   assert.doesNotMatch(
-    renderWorker.match(/if \(process\.platform === "linux"\)([\s\S]*?)\n\s*\} else \{/u)?.[1] ?? "",
+    renderWorker.match(
+      /if \(process\.platform === "linux"\)([\s\S]*?)\n\s*\} else \{/u,
+    )?.[1] ?? "",
     /validateOpaquePng/u,
     "Linux must not claim a tautological postcondition check",
   );
@@ -347,7 +423,8 @@ test("RGB PNG encoder is executable, lossless, opaque, and corruption-detecting"
       const offset = (y * 1200 + x) * 3;
       representative[offset] = (x + Math.floor(y / 8)) & 0xff;
       representative[offset + 1] = (Math.floor(x / 3) + y) & 0xff;
-      representative[offset + 2] = (Math.floor(x / 8) + Math.floor(y / 3)) & 0xff;
+      representative[offset + 2] =
+        (Math.floor(x / 8) + Math.floor(y / 3)) & 0xff;
     }
   }
   assert.ok(
