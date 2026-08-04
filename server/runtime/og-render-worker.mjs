@@ -51,10 +51,15 @@ function decodeXml(value) {
 
 function canonicalizeTextColor(context, width, height, fill) {
   if (process.platform !== "linux") return;
-  const match = /^#([a-f0-9]{6})$/iu.exec(fill);
-  if (!match) throw new Error("unsupported text color");
+  const normalizedFill =
+    fill.toLowerCase() === "black"
+      ? "000000"
+      : fill.toLowerCase() === "white"
+        ? "ffffff"
+        : /^#([a-f0-9]{6})$/iu.exec(fill)?.[1];
+  if (!normalizedFill) throw new Error("unsupported text color");
   const fillChannels = [0, 2, 4].map((offset) =>
-    Number.parseInt(match[1].slice(offset, offset + 2), 16),
+    Number.parseInt(normalizedFill.slice(offset, offset + 2), 16),
   );
   const image = context.getImageData(0, 0, width, height);
   for (let offset = 0; offset < image.data.length; offset += 4) {
