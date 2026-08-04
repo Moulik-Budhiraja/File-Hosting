@@ -8,7 +8,7 @@ import path from "node:path";
 import { gzipSync } from "node:zlib";
 
 import ffmpegPath from "ffmpeg-static";
-import { PDFDocument, StandardFonts } from "pdf-lib";
+
 import sharp from "sharp";
 import yazl from "yazl";
 
@@ -134,19 +134,6 @@ async function independentRaster(
   return sharp(svg).png().toBuffer();
 }
 
-async function pdfFixture(text: string): Promise<Buffer> {
-  const document = await PDFDocument.create();
-  const page = document.addPage([612, 792]);
-  const font = await document.embedFont(StandardFonts.Helvetica);
-  page.drawText(text, { x: 64, y: 700, size: 30, font });
-  page.drawText("Independent synthetic release evidence", {
-    x: 64,
-    y: 650,
-    size: 16,
-    font,
-  });
-  return Buffer.from(await document.save({ useObjectStreams: false }));
-}
 async function docxFixture(text: string): Promise<Buffer> {
   return new Promise((resolve, reject) => {
     const archive = new yazl.ZipFile();
@@ -335,6 +322,10 @@ const portrait = await readFile(
 const portraitMutation = await readFile(
   path.join(designInputRoot, "source-02-image-portrait-mutation.png"),
 );
+const pdf = await readFile(path.join(designInputRoot, "source-05-pdf.pdf"));
+const pdfMutation = await readFile(
+  path.join(designInputRoot, "source-05-pdf-mutation.pdf"),
+);
 const topBrand = { left: 48, top: 42, width: 230, height: 38 };
 const bottomBrand = { left: 900, top: 548, width: 258, height: 42 };
 const cases: AuditCase[] = [
@@ -409,8 +400,8 @@ const cases: AuditCase[] = [
     reference: "raw-05-pdf-first-page.png",
     name: "annual-report-2025.pdf",
     mimeType: "application/pdf",
-    bytes: await pdfFixture("Annual report 2025"),
-    mutation: await pdfFixture("Annual report 2026"),
+    bytes: pdf,
+    mutation: pdfMutation,
     expectedKind: "pdf",
     expectedVisual: "page",
     directReviewRefinement: true,

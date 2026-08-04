@@ -294,6 +294,16 @@ test("facts-bearing image inputs are immutable tracked bytes rather than platfor
       51_328,
       "1300e303fb18c6625690f96ac1c117599dcc607a0a9e48b1e008468a1d7e5955",
     ],
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-05-pdf.pdf",
+      1_375,
+      "af6c56f0e3062d7600ac715008ae04b27d0bd0fae7d4f0cc7a66b56cfc2eae7e",
+    ],
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-05-pdf-mutation.pdf",
+      1_375,
+      "0f2e4694d4b22828d2c63b72757e27b8e4b72308dbb7a0c3c44939faf7b6df0c",
+    ],
   ];
   for (const [relative, size, digest] of fixtures) {
     const bytes = await readFile(path.join(root, relative));
@@ -307,7 +317,7 @@ test("facts-bearing image inputs are immutable tracked bytes rather than platfor
   assert.match(audit, /source-02-image-portrait-mutation\.png/u);
   assert.doesNotMatch(
     audit,
-    /const (?:landscape|portrait) = await independentRaster\(|sharp\(landscape\)\.jpeg/u,
+    /const (?:landscape|portrait) = await independentRaster\(|sharp\(landscape\)\.jpeg|PDFDocument|pdfFixture/u,
     "the source byte size rendered in approved facts must not depend on host libvips",
   );
 });
