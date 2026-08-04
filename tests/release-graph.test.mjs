@@ -85,7 +85,7 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
   );
   assert.match(
     processTree,
-    /linuxSandboxArguments\(\s*process\.cwd\(\),\s*options\.cwd \?\? process\.cwd\(\),\s*\)/u,
+    /linuxSandboxArguments\(\s*process\.cwd\(\),\s*options\.cwd \?\? process\.cwd\(\),\s*process\.execPath,\s*\)/u,
     "production must pass its actual child working directory to the shared builder",
   );
   assert.match(
@@ -100,13 +100,14 @@ test("release CI executes the canonical gate and requires Docker Compose runtime
   );
   assert.match(
     sandboxVerifier,
-    /spawnSync\(\s*"\/usr\/bin\/bwrap",\s*\[\s*\.\.\.linuxSandboxArguments\(process\.cwd\(\)\),\s*"--",\s*"\/usr\/bin\/true"\s*\]/u,
+    /spawnSync\(\s*"\/usr\/bin\/bwrap",\s*\[\s*\.\.\.linuxSandboxArguments\(\s*process\.cwd\(\),\s*process\.cwd\(\),\s*process\.execPath,?\s*\),\s*"--",\s*process\.execPath,\s*"-e",\s*"process\.exit\(0\)",?\s*\]/u,
     "CI must execute the shared production arguments without reconstructing them",
   );
   for (const exactMount of [
     '["--ro-bind", "/usr", "/usr"]',
     '["--ro-bind", "/lib", "/lib"]',
     '["--ro-bind", "/lib64", "/lib64"]',
+    '["--ro-bind", "/opt", "/opt"]',
     '["--bind", "/tmp", "/tmp"]',
   ]) {
     assert.ok(

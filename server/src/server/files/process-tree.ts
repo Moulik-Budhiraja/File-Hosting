@@ -97,6 +97,7 @@ export async function runKillableProcess(
     const sandboxRootArguments = linuxSandboxArguments(
       process.cwd(),
       options.cwd ?? process.cwd(),
+      process.execPath,
     );
     const spawnCommand = restrictForks
       ? "/usr/bin/sandbox-exec"

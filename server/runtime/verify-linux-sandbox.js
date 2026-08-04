@@ -3,7 +3,13 @@ import { linuxSandboxArguments } from "./linux-sandbox.js";
 
 const result = spawnSync(
   "/usr/bin/bwrap",
-  [...linuxSandboxArguments(process.cwd()), "--", "/usr/bin/true"],
+  [
+    ...linuxSandboxArguments(process.cwd(), process.cwd(), process.execPath),
+    "--",
+    process.execPath,
+    "-e",
+    "process.exit(0)",
+  ],
   { stdio: "inherit" },
 );
 
