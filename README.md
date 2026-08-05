@@ -113,8 +113,10 @@ process containment come from the platform sandbox: Darwin sandbox profiles deny
 network access and disallowed forks, while Linux production requires `/usr/bin/bwrap`
 with no network or `/data`, a read-only application mount, and writable `/tmp` only.
 The container drops every ordinary capability from its non-root server process and
-retains `SYS_ADMIN` only in the capability bounding set for the sole setuid binary,
-`/usr/bin/bwrap`; every other setuid/setgid bit is removed during image construction.
+retains in the bounding set only Bubblewrap 0.8's required `SETGID`, `SETUID`,
+`NET_ADMIN`, `SYS_CHROOT`, `SYS_PTRACE`, and `SYS_ADMIN` capabilities for the sole
+setuid binary, `/usr/bin/bwrap`; every other setuid/setgid bit is removed during
+image construction.
 Sandbox startup failure is fail-closed. Native media tools receive a private, mode-0600 snapshot
 path inside that restricted filesystem, fixed arguments, and
 FFmpeg's `file,pipe` protocol whitelist; snapshots are checksum-bound before and

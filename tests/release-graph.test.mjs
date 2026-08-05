@@ -357,7 +357,11 @@ test("production image uses glibc for the frozen packaged media binaries", async
     "Bubblewrap must be the image's only setuid launcher",
   );
   const compose = await text("compose.yaml");
-  assert.match(compose, /cap_drop:\s*\n\s*- ALL[\s\S]*cap_add:\s*\n\s*- SYS_ADMIN/u);
+  assert.match(
+    compose,
+    /cap_drop:\s*\n\s*- ALL[\s\S]*cap_add:\s*\n\s*- SETGID\s*\n\s*- SETUID\s*\n\s*- NET_ADMIN\s*\n\s*- SYS_CHROOT\s*\n\s*- SYS_PTRACE\s*\n\s*- SYS_ADMIN\s*\n/u,
+    "the container must expose only Bubblewrap 0.8's six required capabilities",
+  );
 });
 
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {
@@ -382,8 +386,8 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
   assert.match(runtime, /REQUIRE_DOCKER/u);
   assert.match(
     runtime,
-    /CapEff[\s\S]*CapBnd[\s\S]*200000/u,
-    "the runtime gate must prove the server is unprivileged while only SYS_ADMIN remains bounded for setuid Bubblewrap",
+    /CapEff[\s\S]*CapBnd[\s\S]*2c10c0/u,
+    "the runtime gate must prove the server is unprivileged while only Bubblewrap's required capabilities remain bounded",
   );
   assert.match(runtime, /stat -c %a \/usr\/bin\/bwrap/u);
   assert.match(

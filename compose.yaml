@@ -10,6 +10,11 @@ services:
     cap_drop:
       - ALL
     cap_add:
+      - SETGID
+      - SETUID
+      - NET_ADMIN
+      - SYS_CHROOT
+      - SYS_PTRACE
       - SYS_ADMIN
     environment:
       FS_TOKEN: ${FS_TOKEN:?Set FS_TOKEN in .env before starting the service}
