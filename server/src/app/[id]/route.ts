@@ -14,6 +14,7 @@ import {
   publicUnfurlRevisionMatches,
   renderUnfurlHead,
 } from "@/server/files/unfurl";
+import { prepareUnfurlArtifact } from "@/server/files/preview-artifact";
 import {
   settleUnavailableTiming,
   unavailablePageResponse,
@@ -43,11 +44,21 @@ async function responseFor(
     );
     const sourceIdentity = await captureSourceIdentity(service, file);
     if (!sourceIdentity) throw notFound();
-    const unfurlHead =
+    const artifact =
       file.visibility === "public"
-        ? renderUnfurlHead(await buildUnfurlModel(service, file))
-        : "";
-    const html = await renderPreview(service, file, unfurlHead);
+        ? await prepareUnfurlArtifact(service, file)
+        : undefined;
+    const unfurlHead = artifact
+      ? renderUnfurlHead(
+          await buildUnfurlModel(service, file, artifact.preview),
+        )
+      : "";
+    const html = await renderPreview(
+      service,
+      file,
+      unfurlHead,
+      artifact?.preview,
+    );
     if (
       file.visibility === "public" &&
       !publicUnfurlRevisionMatches(file, await service.get(file.id))

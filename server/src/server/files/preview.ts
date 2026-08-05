@@ -6,6 +6,7 @@ import {
   derivePreview,
   PreviewBusyError,
   PreviewSourceUnavailableError,
+  type PreviewExtraction,
 } from "./preview-renderers";
 import type { FileService } from "./service";
 import { sanitizePublicText } from "./text-safety";
@@ -268,10 +269,11 @@ async function renderPdfFirstPage(
   service: FileService,
   file: StoredFile,
   escapedName: string,
+  preparedPreview?: PreviewExtraction,
 ): Promise<string> {
-  let preview;
+  let preview = preparedPreview;
   try {
-    preview = await derivePreview({
+    preview ??= await derivePreview({
       trustedMime: file.mimeType,
       name: file.name,
       size: file.size,
@@ -298,6 +300,7 @@ export async function renderPreview(
   service: FileService,
   file: StoredFile,
   unfurlHead = "",
+  preparedPreview?: PreviewExtraction,
 ): Promise<string> {
   const rawUrl = `/raw/${encodeURIComponent(file.id)}`;
   const displayName = sanitizePublicText(file.name, 300) || "Untitled file";
@@ -317,7 +320,12 @@ export async function renderPreview(
   } else if (file.mimeType.startsWith("video/")) {
     preview = `<video src="${rawUrl}" controls></video>`;
   } else if (file.mimeType === "application/pdf") {
-    preview = await renderPdfFirstPage(service, file, escapedName);
+    preview = await renderPdfFirstPage(
+      service,
+      file,
+      escapedName,
+      preparedPreview,
+    );
   } else {
     preview =
       '<p class="notice">No browser preview is available for this file type.</p>';

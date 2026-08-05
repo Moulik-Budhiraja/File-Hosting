@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
@@ -152,6 +159,30 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       "hello world",
     );
     assert.equal(service.toMetadata(file).archive, null);
+    const artifacts = await readdir(
+      path.join(service.config.storageDir, ".unfurl-artifacts"),
+    );
+    assert.deepEqual(artifacts, [
+      `${file.id}-${file.sha256}-og-v2-881d043.json`,
+    ]);
+    const artifact = JSON.parse(
+      await readFile(
+        path.join(
+          service.config.storageDir,
+          ".unfurl-artifacts",
+          artifacts[0]!,
+        ),
+        "utf8",
+      ),
+    ) as { revision: string; sha256: string; cardBase64: string };
+    assert.equal(artifact.revision, "og-v2-881d043");
+    assert.equal(artifact.sha256, file.sha256);
+    assert.equal(
+      Buffer.from(artifact.cardBase64, "base64")
+        .subarray(1, 4)
+        .toString("ascii"),
+      "PNG",
+    );
   });
 
   it("filters by query, glob, AND tags, visibility, and cursor", async () => {

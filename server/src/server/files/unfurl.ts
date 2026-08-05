@@ -80,16 +80,19 @@ export function publicUnfurlRevisionMatches(
 export async function buildUnfurlModel(
   service: FileService,
   file: StoredFile,
+  preparedPreview?: PreviewExtraction,
 ): Promise<PublicUnfurlModel> {
   if (file.visibility !== "public")
     throw new Error("Unfurls require a public file");
-  const preview = await derivePreview({
-    trustedMime: file.mimeType,
-    name: file.name,
-    size: file.size,
-    sha256: file.sha256,
-    sourcePath: service.storagePath(file),
-  });
+  const preview =
+    preparedPreview ??
+    (await derivePreview({
+      trustedMime: file.mimeType,
+      name: file.name,
+      size: file.size,
+      sha256: file.sha256,
+      sourcePath: service.storagePath(file),
+    }));
   const supportedKinds = new Set<PublicUnfurlModel["kind"]>([
     "markdown",
     "document",
