@@ -35,9 +35,9 @@ export async function PATCH(
 ): Promise<Response> {
   try {
     const id = validateId((await context.params).id);
-    const { service } = await getAuthorizedFile(request, id, true);
+    const { service, principal } = await getAuthorizedFile(request, id, true);
     const record = await jsonObject(request);
-    const allowed = new Set(["visibility", "tags"]);
+    const allowed = new Set(["visibility", "tags", "owner_id"]);
     if (Object.keys(record).some((key) => !allowed.has(key))) {
       throw new AppError(
         400,
@@ -50,6 +50,28 @@ export async function PATCH(
       record.visibility === undefined
         ? undefined
         : parseVisibility(record.visibility);
+    let ownerId: string | undefined;
+    if (record.owner_id !== undefined) {
+      if (principal.role !== "admin") {
+        throw new AppError(
+          403,
+          "forbidden",
+          "Administrator access is required",
+        );
+      }
+      if (typeof record.owner_id !== "string" || !record.owner_id) {
+        throw new AppError(400, "invalid_owner", "Owner is required");
+      }
+      const owner = await service.auth.getUser(record.owner_id);
+      if (!owner?.active) {
+        throw new AppError(
+          400,
+          "invalid_owner",
+          "Owner must be an active user",
+        );
+      }
+      ownerId = owner.id;
+    }
     let tags: { operation: TagOperation; values: string[] } | undefined;
     if (record.tags !== undefined) {
       if (
@@ -84,15 +106,20 @@ export async function PATCH(
         values: validateTags(tagPatch.values),
       };
     }
-    if (!visibility && !tags) {
+    if (!visibility && !tags && !ownerId) {
       throw new AppError(
         400,
         "invalid_patch",
-        "Patch must change visibility and/or tags",
+        "Patch must change visibility, ownership, and/or tags",
       );
     }
 
-    const file = await service.update(id, { visibility, tags });
+    const actorUserId = principal.source === "legacy" ? null : principal.userId;
+    const file = await service.update(
+      id,
+      { visibility, tags, ownerId },
+      actorUserId,
+    );
     if (!file) throw notFound();
     return json(service.toMetadata(file));
   } catch (error) {
@@ -106,8 +133,9 @@ export async function DELETE(
 ): Promise<Response> {
   try {
     const id = validateId((await context.params).id);
-    const { service } = await getAuthorizedFile(request, id, true);
-    const file = await service.delete(id);
+    const { service, principal } = await getAuthorizedFile(request, id, true);
+    const actorUserId = principal.source === "legacy" ? null : principal.userId;
+    const file = await service.delete(id, actorUserId);
     if (!file) throw notFound();
     return new Response(null, { status: 204 });
   } catch (error) {

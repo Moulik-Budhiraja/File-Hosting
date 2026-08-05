@@ -35,13 +35,17 @@ async function respond(
     sizeForRangeError = file.size;
     const range = parseRangeHeader(request.headers.get("range"), file.size);
     const contentLength = range ? range.end - range.start + 1 : file.size;
+    const frameAncestors =
+      file.mimeType === "application/pdf" ? "'self'" : "'none'";
     const headers = new Headers({
       "accept-ranges": "bytes",
       "cache-control": "no-store",
       "content-disposition": contentDisposition(file.name),
       "content-length": String(contentLength),
+      "content-security-policy": `sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors ${frameAncestors}`,
       "content-type": file.mimeType,
       etag: `"sha256-${file.sha256}"`,
+      "referrer-policy": "no-referrer",
       "x-content-type-options": "nosniff",
     });
     if (range)
@@ -49,12 +53,6 @@ async function respond(
         "content-range",
         `bytes ${range.start}-${range.end}/${file.size}`,
       );
-    if (file.mimeType === "text/html" || file.mimeType === "image/svg+xml") {
-      headers.set(
-        "content-security-policy",
-        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
-      );
-    }
     if (head || file.size === 0) {
       return new Response(null, { status: range ? 206 : 200, headers });
     }

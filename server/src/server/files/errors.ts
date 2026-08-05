@@ -1,12 +1,15 @@
 export class AppError extends Error {
+  public readonly headers: Headers;
+
   constructor(
     public readonly status: number,
     public readonly code: string,
     message: string,
-    options?: ErrorOptions,
+    options?: ErrorOptions & { headers?: HeadersInit },
   ) {
     super(message, options);
     this.name = "AppError";
+    this.headers = new Headers(options?.headers);
   }
 }
 

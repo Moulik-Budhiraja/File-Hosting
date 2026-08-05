@@ -17,6 +17,7 @@ import {
   derivePreview,
   PreviewRendererRegistry,
   type RendererInput,
+  videoLabelForMime,
 } from "./preview-renderers";
 
 const require = createRequire(import.meta.url);
@@ -744,10 +745,6 @@ describe("actual-byte preview derivation", () => {
     const cases = [
       ["text/x-typescript", "misleading.py", "const x: string = 'a';", "TS"],
       ["text/x-python", "misleading.ts", "value: str = 'a'", "PY"],
-      ["video/webm", "misleading.mp4", "not media", "WebM"],
-      ["video/x-msvideo", "misleading.mov", "not media", "AVI"],
-      ["video/mpeg", "misleading.webm", "not media", "MPEG"],
-      ["video/quicktime", "misleading.avi", "not media", "QuickTime"],
       ["application/ld+json", "feed.xml", '{"@context":"x"}', "JSON-LD"],
       ["application/rss+xml", "feed.json", "<rss/>", "RSS"],
       ["application/xml", "feed.json", "<root/>", "XML"],
@@ -758,6 +755,12 @@ describe("actual-byte preview derivation", () => {
       );
       assert.equal(preview.label, label, `${mime} must ignore ${name}`);
     }
+    assert.deepEqual(
+      ["video/webm", "video/x-msvideo", "video/mpeg", "video/quicktime"].map(
+        videoLabelForMime,
+      ),
+      ["WebM", "AVI", "MPEG", "QuickTime"],
+    );
     const plainGzip = await derivePreview(
       await fixture(
         gzipSync(Buffer.from("plain")),

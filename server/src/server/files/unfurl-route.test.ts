@@ -633,10 +633,17 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     assert.match(pageBody, /Preview unavailable/u);
     const imageBody = Buffer.from(imageSnapshots[0].body, "base64");
     assert.equal(imageBody.subarray(1, 4).toString("ascii"), "PNG");
+    for (const snapshot of pageSnapshots) {
+      const headers = new Headers(snapshot.headers);
+      assert.equal(headers.get("referrer-policy"), "same-origin");
+    }
+    for (const snapshot of imageSnapshots) {
+      const headers = new Headers(snapshot.headers);
+      assert.equal(headers.get("referrer-policy"), "no-referrer");
+    }
     for (const snapshot of [...pageSnapshots, ...imageSnapshots]) {
       const headers = new Headers(snapshot.headers);
       assert.equal(headers.get("x-content-type-options"), "nosniff");
-      assert.equal(headers.get("referrer-policy"), "no-referrer");
       assert.match(
         headers.get("content-security-policy") ?? "",
         /frame-ancestors 'none'/u,

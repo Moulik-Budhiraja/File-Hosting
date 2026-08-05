@@ -10,6 +10,7 @@ export function json(data: unknown, init?: ResponseInit): Response {
   );
   headers.set("referrer-policy", "no-referrer");
   headers.set("x-content-type-options", "nosniff");
+  headers.set("x-frame-options", "DENY");
   return new Response(JSON.stringify(data), { ...init, headers });
 }
 
@@ -17,7 +18,7 @@ export function errorResponse(error: unknown): Response {
   if (isAppError(error)) {
     return json(
       { error: { code: error.code, message: error.message } },
-      { status: error.status },
+      { status: error.status, headers: error.headers },
     );
   }
   console.error("Unhandled request error", error);

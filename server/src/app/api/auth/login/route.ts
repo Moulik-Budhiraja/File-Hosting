@@ -2,7 +2,8 @@ import {
   assertCsrf,
   jsonObject,
   publicUser,
-  SESSION_COOKIE,
+  sessionCookieHeader,
+  trustedClientAddress,
 } from "@/server/auth/http";
 import { errorResponse, json } from "@/server/files/http";
 import { getFileService } from "@/server/files/singleton";
@@ -29,19 +30,18 @@ export async function POST(request: Request): Promise<Response> {
         { status: 401 },
       );
     }
-    const remoteAddress =
-      request.headers.get("x-real-ip") ??
-      request.headers.get("x-forwarded-for")?.split(",", 1)[0]?.trim() ??
-      "unknown";
     const authentication = await service.auth.authenticatePassword(
       body.username,
       body.password,
-      remoteAddress,
+      trustedClientAddress(request, service.config),
     );
     const session = await service.auth.createSession(authentication);
     const { user } = authentication;
-    const secure = new URL(service.config.publicUrl).protocol === "https:";
-    const cookie = `${SESSION_COOKIE}=${encodeURIComponent(session.token)}; Path=/; HttpOnly; SameSite=Strict; Max-Age=${Math.floor((Date.parse(session.expiresAt) - Date.now()) / 1000)}${secure ? "; Secure" : ""}`;
+    const cookie = sessionCookieHeader(
+      service.config.publicUrl,
+      session.token,
+      Math.floor((Date.parse(session.expiresAt) - Date.now()) / 1000),
+    );
     return json(
       { user: publicUser(user), expires_at: session.expiresAt },
       { headers: { "set-cookie": cookie } },

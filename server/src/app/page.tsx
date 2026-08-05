@@ -1,11 +1,11 @@
+import Link from "next/link";
+
 export default function Home() {
   return (
-    <main>
+    <main className="landing">
       <h1>File hosting</h1>
-      <p>This service hosts files uploaded with the fs CLI.</p>
       <p>
-        Preview URLs use <code>/{"{id}"}</code>; raw bytes use{" "}
-        <code>/raw/{"{id}"}</code>.
+        <Link href="/login">Sign in</Link>
       </p>
     </main>
   );

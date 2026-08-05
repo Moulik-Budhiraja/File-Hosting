@@ -13,7 +13,24 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request): Promise<Response> {
   try {
     const { service } = await requireAdmin(request);
-    return json({ users: (await service.auth.listUsers()).map(publicUser) });
+    const users = await service.auth.listUsers();
+    const ids = users.map((user) => user.id);
+    const [usage, fileCounts] = await Promise.all([
+      service.auth.usageByUser(ids),
+      service.repository.countByOwner(ids),
+    ]);
+    return json({
+      users: users.map((user) => {
+        const access = usage.get(user.id);
+        return {
+          ...publicUser(user),
+          files_count: fileCounts.get(user.id) ?? 0,
+          api_keys_count: access?.apiKeys ?? 0,
+          sessions_count: access?.sessions ?? 0,
+          last_active_at: access?.lastActiveAt ?? null,
+        };
+      }),
+    });
   } catch (error) {
     return errorResponse(error);
   }
@@ -33,6 +50,34 @@ export async function POST(request: Request): Promise<Response> {
         400,
         "invalid_user",
         "Username, password, and role are required",
+      );
+    }
+    if (body.request_id !== undefined && typeof body.request_id !== "string") {
+      throw new AppError(
+        400,
+        "invalid_request_id",
+        "request_id must be a string",
+      );
+    }
+    if (typeof body.request_id === "string") {
+      // Idempotent creation: a retry with the same opaque request id
+      // reconciles to the originally committed user (200, created:false)
+      // instead of duplicating or failing, so a client that lost the
+      // response can truthfully finish the show-once credential flow.
+      const outcome = await service.auth.createUserIdempotent(
+        {
+          username: body.username,
+          password: body.password,
+          role: body.role,
+        },
+        {
+          userId: principal.source === "legacy" ? null : principal.userId,
+        },
+        body.request_id,
+      );
+      return json(
+        { user: publicUser(outcome.user), created: outcome.created },
+        { status: outcome.created ? 201 : 200 },
       );
     }
     const user = await service.auth.createUser(

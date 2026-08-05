@@ -15,9 +15,10 @@ export async function DELETE(
   try {
     const { service, principal } = await requirePrincipal(request);
     assertCsrf(request, service, principal);
+    const actorUserId = principal.source === "legacy" ? null : principal.userId;
     await service.auth.revokeApiKey(
       (await context.params).id,
-      principal.userId ?? "",
+      actorUserId,
       principal.role === "admin",
     );
     return new Response(null, { status: 204 });

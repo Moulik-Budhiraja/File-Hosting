@@ -5,7 +5,9 @@ RUN npm ci
 
 FROM node:22-bookworm-slim AS builder
 WORKDIR /app
+ARG FS_PUBLIC_URL
 ENV NEXT_TELEMETRY_DISABLED=1
+ENV FS_PUBLIC_URL=$FS_PUBLIC_URL
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
 RUN npm run assert:runtime
@@ -36,4 +38,4 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=dependencies --chown=nextjs:nodejs /app/node_modules/@libsql ./node_modules/@libsql
 USER nextjs
 EXPOSE 3000
-CMD ["npm", "run", "start:verified"]
+CMD ["node", "start.js"]
