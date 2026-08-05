@@ -54,6 +54,16 @@ const packageAssets = [
   "node_modules/@twemoji/svg/2764.svg",
   "node_modules/@twemoji/svg/1f1fa-1f1f8.svg",
   "node_modules/@twemoji/svg/1f468-200d-1f469-200d-1f467-200d-1f466.svg",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitSerif.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitSerifBold.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitSerifItalic.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitSerifBoldItalic.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitFixed.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitFixedBold.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitFixedItalic.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitFixedBoldItalic.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitSymbol.pfb",
+  "node_modules/pdfjs-dist/standard_fonts/FoxitDingbats.pfb",
 ];
 for (const relative of packageAssets) {
   try {

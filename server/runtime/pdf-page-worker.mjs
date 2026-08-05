@@ -23,26 +23,61 @@ console.error = () => {};
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
 const USE_PACKAGED_STANDARD_FONT = process.platform === "linux";
 const STANDARD_HELVETICA_FAMILY = "PdfStandardHelvetica";
-if (
-  USE_PACKAGED_STANDARD_FONT &&
-  !GlobalFonts.registerFromPath(
-    fileURLToPath(
-      new URL("./fonts/NotoSansCJKjp-Regular.otf", import.meta.url),
-    ),
+const STANDARD_TIMES_FAMILY = "PdfStandardTimes";
+const STANDARD_COURIER_FAMILY = "PdfStandardCourier";
+const STANDARD_SYMBOL_FAMILY = "PdfStandardSymbol";
+const STANDARD_DINGBATS_FAMILY = "PdfStandardDingbats";
+const standardFontRoot = new URL(
+  "../node_modules/pdfjs-dist/standard_fonts/",
+  import.meta.url,
+);
+const standardFontRegistrations = [
+  [
+    new URL("./fonts/NotoSansCJKjp-Regular.otf", import.meta.url),
     STANDARD_HELVETICA_FAMILY,
-  )
-) {
-  throw new Error("standard PDF font registration failed");
+  ],
+  [new URL("FoxitSerif.pfb", standardFontRoot), STANDARD_TIMES_FAMILY],
+  [new URL("FoxitSerifBold.pfb", standardFontRoot), STANDARD_TIMES_FAMILY],
+  [new URL("FoxitSerifItalic.pfb", standardFontRoot), STANDARD_TIMES_FAMILY],
+  [
+    new URL("FoxitSerifBoldItalic.pfb", standardFontRoot),
+    STANDARD_TIMES_FAMILY,
+  ],
+  [new URL("FoxitFixed.pfb", standardFontRoot), STANDARD_COURIER_FAMILY],
+  [new URL("FoxitFixedBold.pfb", standardFontRoot), STANDARD_COURIER_FAMILY],
+  [new URL("FoxitFixedItalic.pfb", standardFontRoot), STANDARD_COURIER_FAMILY],
+  [
+    new URL("FoxitFixedBoldItalic.pfb", standardFontRoot),
+    STANDARD_COURIER_FAMILY,
+  ],
+  [new URL("FoxitSymbol.pfb", standardFontRoot), STANDARD_SYMBOL_FAMILY],
+  [new URL("FoxitDingbats.pfb", standardFontRoot), STANDARD_DINGBATS_FAMILY],
+];
+if (USE_PACKAGED_STANDARD_FONT) {
+  for (const [fontUrl, family] of standardFontRegistrations) {
+    if (!GlobalFonts.registerFromPath(fileURLToPath(fontUrl), family)) {
+      throw new Error("standard PDF font registration failed");
+    }
+  }
 }
 
 function standardPdfFontFamily(value) {
-  if (!/"Helvetica(?:-(?:Bold|Oblique|BoldOblique))?"/u.test(value)) {
-    return value;
+  const mappings = [
+    [
+      /"Helvetica(?:-(?:Bold|Oblique|BoldOblique))?"/u,
+      STANDARD_HELVETICA_FAMILY,
+    ],
+    [/"Times-(?:Roman|Bold|Italic|BoldItalic)"/u, STANDARD_TIMES_FAMILY],
+    [/"Courier(?:-(?:Bold|Oblique|BoldOblique))?"/u, STANDARD_COURIER_FAMILY],
+    [/"Symbol"/u, STANDARD_SYMBOL_FAMILY],
+    [/"ZapfDingbats"/u, STANDARD_DINGBATS_FAMILY],
+  ];
+  for (const [pattern, family] of mappings) {
+    if (pattern.test(value)) {
+      return value.replace(pattern, `"${family}"`).replace(/(?:,[^,]+)*$/u, "");
+    }
   }
-  return value.replace(
-    /"Helvetica(?:-(?:Bold|Oblique|BoldOblique))?"(?:,[^,]+)*$/u,
-    `"${STANDARD_HELVETICA_FAMILY}"`,
-  );
+  return value;
 }
 
 const chunks = [];
@@ -94,7 +129,7 @@ try {
     if (!fontDescriptor?.get || !fontDescriptor.set) {
       throw new Error("canvas font contract unavailable");
     }
-    let mappedStandardFont = false;
+    let mappedHelveticaFont = false;
     Object.defineProperty(context, "font", {
       configurable: true,
       get() {
@@ -103,7 +138,8 @@ try {
       set(value) {
         const requested = String(value);
         const mapped = standardPdfFontFamily(requested);
-        mappedStandardFont = mapped !== requested;
+        mappedHelveticaFont =
+          mapped !== requested && mapped.includes(STANDARD_HELVETICA_FAMILY);
         fontDescriptor.set.call(context, mapped);
       },
     });
@@ -111,12 +147,12 @@ try {
     context.fillText = (text, x, y, maxWidth) => {
       if (maxWidth === undefined) {
         nativeFillText(text, x, y);
-        return mappedStandardFont
+        return mappedHelveticaFont
           ? nativeFillText(text, x + 0.25, y)
           : undefined;
       }
       nativeFillText(text, x, y, maxWidth);
-      return mappedStandardFont
+      return mappedHelveticaFont
         ? nativeFillText(text, x + 0.25, y, maxWidth)
         : undefined;
     };

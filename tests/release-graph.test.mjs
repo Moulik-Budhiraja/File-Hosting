@@ -241,7 +241,7 @@ test("PDF raster worker canonicalizes transparent edge colors before white compo
   assert.match(worker, /image\.data\[offset \+ 3\] = 255/u);
 });
 
-test("PDF raster worker forces Linux Helvetica through a packaged canvas font", async () => {
+test("PDF raster worker binds all standard families and preserves frozen Linux Helvetica", async () => {
   const [worker, runtimeAssets] = await Promise.all([
     text("server/runtime/pdf-page-worker.mjs"),
     text("server/runtime/assert-runtime-assets.mjs"),
@@ -266,6 +266,14 @@ test("PDF raster worker forces Linux Helvetica through a packaged canvas font", 
     /"PdfStandardHelvetica"/u,
     "unembedded Helvetica must use a private deterministic canvas family",
   );
+  for (const family of [
+    "PdfStandardTimes",
+    "PdfStandardCourier",
+    "PdfStandardSymbol",
+    "PdfStandardDingbats",
+  ]) {
+    assert.match(worker, new RegExp(`"${family}"`, "u"));
+  }
   assert.match(
     worker,
     /disableFontFace:\s*true/u,
@@ -284,10 +292,24 @@ test("PDF raster worker forces Linux Helvetica through a packaged canvas font", 
   );
   assert.match(
     worker,
-    /mappedStandardFont[\s\S]*context\.fillText[\s\S]*x \+ 0\.25/u,
+    /mappedHelveticaFont[\s\S]*context\.fillText[\s\S]*x \+ 0\.25/u,
     "Linux Skia must receive the frozen quarter-pixel standard-font antialias compensation",
   );
   assert.match(runtimeAssets, /fonts\/NotoSansCJKjp-Regular\.otf/u);
+  for (const asset of [
+    "FoxitSerif.pfb",
+    "FoxitSerifBold.pfb",
+    "FoxitSerifItalic.pfb",
+    "FoxitSerifBoldItalic.pfb",
+    "FoxitFixed.pfb",
+    "FoxitFixedBold.pfb",
+    "FoxitFixedItalic.pfb",
+    "FoxitFixedBoldItalic.pfb",
+    "FoxitSymbol.pfb",
+    "FoxitDingbats.pfb",
+  ]) {
+    assert.match(runtimeAssets, new RegExp(asset.replace(".", "\\."), "u"));
+  }
 });
 
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
