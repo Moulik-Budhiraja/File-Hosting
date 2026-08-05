@@ -61,7 +61,6 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
         .split("\n"),
     );
   } catch {
-    // A git archive contains tracked files but intentionally omits repository metadata.
     tracked = new Set(runtimeAssets.map((asset) => `server/${asset}`));
   }
   for (const asset of runtimeAssets) {
@@ -79,7 +78,7 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
     "utf8",
   );
   assert.match(dockerfile, /RUN npm run assert:runtime/u);
-  assert.match(dockerfile, /CMD \["npm", "run", "start:verified"\]/u);
+  assert.match(dockerfile, /CMD \["node", "start\.js"\]/u);
 });
 
 test("production image installs the fonts used by generated cards", async () => {
@@ -91,4 +90,102 @@ test("production image installs the fonts used by generated cards", async () => 
   assert.match(dockerfile, /apt-get install[\s\S]*bubblewrap/u);
   assert.match(dockerfile, /apt-get install[\s\S]*fonts-noto-core/u);
   assert.match(dockerfile, /apt-get install[\s\S]*fonts-noto-cjk/u);
+});
+
+test("server CI enables and verifies the production Linux sandbox before browser tests", async () => {
+  const workflow = await readFile(
+    path.join(rootDir, ".github", "workflows", "server.yml"),
+    "utf8",
+  );
+  const sandbox = workflow.indexOf(
+    "- name: Enable and verify the Linux process sandbox",
+  );
+  const browser = workflow.indexOf(
+    "- name: Production browser tests (standalone server)",
+  );
+  assert.ok(sandbox >= 0 && sandbox < browser);
+  assert.match(workflow, /apt-get install -y bubblewrap/u);
+  assert.match(
+    workflow,
+    /sysctl -w kernel\.apparmor_restrict_unprivileged_userns=0/u,
+  );
+  assert.match(workflow, /node server\/runtime\/verify-linux-sandbox\.js/u);
+});
+
+test("compose builds and runs with the same public URL transport contract", async () => {
+  const [compose, dockerfile] = await Promise.all([
+    readFile(path.join(rootDir, "compose.yaml"), "utf8"),
+    readFile(path.join(rootDir, "server", "Dockerfile"), "utf8"),
+  ]);
+
+  assert.match(
+    compose,
+    /^\s+args:\n\s+FS_PUBLIC_URL: \$\{FS_PUBLIC_URL:-https:\/\/files\.moulik\.dev\}$/mu,
+  );
+  assert.match(
+    compose,
+    /^\s+environment:[\s\S]*?^\s+FS_PUBLIC_URL: \$\{FS_PUBLIC_URL:-https:\/\/files\.moulik\.dev\}$/mu,
+  );
+  assert.match(dockerfile, /^ARG FS_PUBLIC_URL$/mu);
+  assert.match(dockerfile, /^ENV FS_PUBLIC_URL=\$FS_PUBLIC_URL$/mu);
+});
+
+test("every production launcher uses the fail-closed standalone entrypoint", async () => {
+  const [dockerfile, packageJson, e2eLauncher, captureLauncher] =
+    await Promise.all([
+      readFile(path.join(rootDir, "server", "Dockerfile"), "utf8"),
+      readFile(path.join(rootDir, "server", "package.json"), "utf8"),
+      readFile(
+        path.join(rootDir, "server", "scripts", "start-e2e-server.mjs"),
+        "utf8",
+      ),
+      readFile(
+        path.join(rootDir, "server", "scripts", "capture-screens.mjs"),
+        "utf8",
+      ),
+    ]);
+
+  assert.match(dockerfile, /CMD \["node", "start\.js"\]/u);
+  assert.equal(
+    JSON.parse(packageJson).scripts.start,
+    "node .next/standalone/start.js",
+  );
+  assert.match(e2eLauncher, /"standalone", "start\.js"/u);
+  assert.match(captureLauncher, /"standalone", "start\.js"/u);
+  assert.doesNotMatch(e2eLauncher, /"standalone", "server\.js"/u);
+  assert.doesNotMatch(captureLauncher, /"standalone", "server\.js"/u);
+});
+
+test("container CI authenticates file smoke requests with the login session", async () => {
+  const workflow = await readFile(
+    path.join(rootDir, ".github", "workflows", "server.yml"),
+    "utf8",
+  );
+
+  assert.match(
+    workflow,
+    /upload="\$\(curl --fail --silent --show-error --cookie \/tmp\/fs-cookies[\s\S]*?-H 'origin: http:\/\/127\.0\.0\.1:37641'[\s\S]*?--data-binary 'compose-smoke'/u,
+  );
+  assert.match(workflow, /body\.name!=="compose-smoke\.txt"/u);
+  assert.doesNotMatch(workflow, /\.\.\./u);
+});
+
+test("container CI prepares cold-runner bind mounts for uid 1001 before Compose", async () => {
+  const workflow = await readFile(
+    path.join(rootDir, ".github", "workflows", "server.yml"),
+    "utf8",
+  );
+  const prepare = workflow.indexOf(
+    "install -d -m 700 -o 1001 -g 1001 runtime/files runtime/sqlite",
+  );
+  const build = workflow.indexOf("docker compose build --pull");
+  const up = workflow.indexOf("docker compose up --detach --wait");
+
+  assert.notEqual(
+    prepare,
+    -1,
+    "runtime bind mounts must be prepared explicitly",
+  );
+  assert.ok(prepare < build, "runtime bind mounts must exist before build");
+  assert.ok(prepare < up, "runtime bind mounts must exist before compose up");
 });

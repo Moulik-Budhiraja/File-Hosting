@@ -1,0 +1,46 @@
+export const DEFAULT_NEXT_PATH = "/files";
+
+const RAW_CONTROL_OR_WHITESPACE = /[\u0000-\u001f\u007f\s]/u;
+const DECODED_CONTROL = /[\u0000-\u001f\u007f]/u;
+
+/**
+ * Central sanitizer for post-login `next` targets. Only same-origin
+ * path+query+hash values survive; everything else falls back to /files.
+ * Resolution happens against the configured origin so browser quirks
+ * (backslash and network-path references, credentials, encoded control
+ * characters) cannot turn login completion into an open redirect.
+ */
+export function sanitizeNextPath(
+  raw: string | null | undefined,
+  base?: string,
+): string {
+  if (typeof raw !== "string" || raw.length === 0) return DEFAULT_NEXT_PATH;
+  // Only rooted paths are candidates; absolute URLs, scheme-relative
+  // references, and backslash variants are rejected outright.
+  if (!raw.startsWith("/")) return DEFAULT_NEXT_PATH;
+  if (raw.startsWith("//")) return DEFAULT_NEXT_PATH;
+  if (raw.includes("\\")) return DEFAULT_NEXT_PATH;
+  if (RAW_CONTROL_OR_WHITESPACE.test(raw)) return DEFAULT_NEXT_PATH;
+
+  // Invalid or hostile percent-encoding (encoded backslashes, NUL, CR/LF)
+  // is rejected before the URL parser can normalize it away.
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(raw);
+  } catch {
+    return DEFAULT_NEXT_PATH;
+  }
+  if (decoded.includes("\\")) return DEFAULT_NEXT_PATH;
+  if (DECODED_CONTROL.test(decoded)) return DEFAULT_NEXT_PATH;
+
+  const origin = base ?? window.location.origin;
+  let resolved: URL;
+  try {
+    resolved = new URL(raw, origin);
+  } catch {
+    return DEFAULT_NEXT_PATH;
+  }
+  if (resolved.origin !== new URL(origin).origin) return DEFAULT_NEXT_PATH;
+  if (resolved.username || resolved.password) return DEFAULT_NEXT_PATH;
+  return `${resolved.pathname}${resolved.search}${resolved.hash}`;
+}

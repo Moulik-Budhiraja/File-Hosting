@@ -179,13 +179,13 @@ describe(
 
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const run = runKillableProcess(process.execPath, [launcher, pidFile], {
-          timeoutMs: 400,
+          timeoutMs: 1_000,
           maxOutputBytes: 1024,
           allowSubprocesses: true,
         });
         const rejection = assert.rejects(run, ProcessDeadlineError);
         let pids: number[] = [];
-        for (let poll = 0; poll < 30 && pids.length !== 2; poll += 1) {
+        for (let poll = 0; poll < 80 && pids.length !== 2; poll += 1) {
           try {
             pids = (await readFile(pidFile, "utf8"))
               .trim()

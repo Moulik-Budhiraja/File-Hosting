@@ -1073,6 +1073,10 @@ const VIDEO_LABELS = new Map([
   ["video/quicktime", "QuickTime"],
 ]);
 
+export function videoLabelForMime(trustedMime: string): string {
+  return VIDEO_LABELS.get(trustedMime) ?? "Video";
+}
+
 export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry {
   return new PreviewRendererRegistry()
     .register(
@@ -1272,7 +1276,7 @@ export function createDefaultPreviewRendererRegistry(): PreviewRendererRegistry 
           return baseExtraction(
             probe,
             "video",
-            VIDEO_LABELS.get(probe.input.trustedMime) ?? "Video",
+            videoLabelForMime(probe.input.trustedMime),
             poster
               ? { kind: "poster", raster: poster.raster }
               : { kind: "binary" },

@@ -1,6 +1,11 @@
-import { assertCsrf, jsonObject, requirePrincipal } from "@/server/auth/http";
+import {
+  assertCsrf,
+  jsonObject,
+  requirePrincipal,
+  sessionCookieHeader,
+} from "@/server/auth/http";
 import { AppError } from "@/server/files/errors";
-import { errorResponse } from "@/server/files/http";
+import { errorResponse, json } from "@/server/files/http";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -9,7 +14,7 @@ export async function POST(request: Request): Promise<Response> {
   try {
     const { service, principal } = await requirePrincipal(request);
     assertCsrf(request, service, principal);
-    if (!principal.userId) {
+    if (!principal.userId || !principal.sessionToken) {
       throw new AppError(
         400,
         "user_session_required",
@@ -27,12 +32,24 @@ export async function POST(request: Request): Promise<Response> {
         "Current and new passwords are required",
       );
     }
-    await service.auth.changePassword(
+    const rotated = await service.auth.changePasswordAndRotateSession(
       principal.userId,
       body.current_password,
       body.new_password,
+      principal.sessionToken,
     );
-    return new Response(null, { status: 204 });
+    const maxAge = Math.floor(
+      (Date.parse(rotated.expiresAt) - Date.now()) / 1000,
+    );
+    const cookie = sessionCookieHeader(
+      service.config.publicUrl,
+      rotated.token,
+      maxAge,
+    );
+    return json(
+      { expires_at: rotated.expiresAt },
+      { headers: { "set-cookie": cookie } },
+    );
   } catch (error) {
     return errorResponse(error);
   }

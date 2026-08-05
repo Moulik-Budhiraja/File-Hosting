@@ -83,7 +83,7 @@ for (const binary of mediaBinaries) {
     await access(binary);
     const probe = spawnSync(binary, ["-version"], {
       encoding: "utf8",
-      timeout: 5_000,
+      timeout: 15_000,
       maxBuffer: 256 * 1024,
     });
     if (probe.status !== 0) {

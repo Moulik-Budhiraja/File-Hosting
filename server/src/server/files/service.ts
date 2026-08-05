@@ -290,8 +290,10 @@ export class FileService {
     id: string,
     input: {
       visibility?: Visibility;
+      ownerId?: string;
       tags?: { operation: TagOperation; values: string[] };
     },
+    actorUserId?: string | null,
   ): Promise<StoredFile | null> {
     const current = await this.repository.get(id);
     if (!current) return null;
@@ -306,7 +308,7 @@ export class FileService {
     }
     let updated: StoredFile | null;
     try {
-      updated = await this.repository.update(id, input);
+      updated = await this.repository.update(id, input, actorUserId);
     } catch (error) {
       if (becomingPublic)
         await removePreviewArtifact(this, candidate).catch(() => undefined);
@@ -319,8 +321,11 @@ export class FileService {
     return updated;
   }
 
-  async delete(id: string): Promise<StoredFile | null> {
-    const file = await this.repository.delete(id);
+  async delete(
+    id: string,
+    actorUserId?: string | null,
+  ): Promise<StoredFile | null> {
+    const file = await this.repository.delete(id, actorUserId);
     if (file) {
       await removePreviewArtifact(this, file);
       await unlink(this.storagePath(file)).catch(

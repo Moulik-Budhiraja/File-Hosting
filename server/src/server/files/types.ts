@@ -44,6 +44,9 @@ export interface ListFilesOptions {
   name?: string;
   tags: string[];
   visibility?: Visibility;
+  /** Restrict to files owned by this user id — applied in SQL before
+   * cursor pagination so filtered pages and empties are truthful. */
+  owner?: string;
   limit: number;
   cursor?: { createdAt: string; id: string };
   access?: AccessScope;

@@ -4,6 +4,8 @@ services:
   server:
     build:
       context: ./server
+      args:
+        FS_PUBLIC_URL: ${FS_PUBLIC_URL:-https://files.moulik.dev}
     restart: unless-stopped
     stop_grace_period: 30s
     init: true
@@ -28,6 +30,9 @@ services:
       FS_MIN_FREE_BYTES: ${FS_MIN_FREE_BYTES:-1073741824}
       FS_BOOTSTRAP_USERNAME: ${FS_BOOTSTRAP_USERNAME:-}
       FS_BOOTSTRAP_PASSWORD: ${FS_BOOTSTRAP_PASSWORD:-}
+      FS_TRUSTED_INGRESS_IP_HEADER: ${FS_TRUSTED_INGRESS_IP_HEADER:-}
+      FS_TRUSTED_INGRESS_SECRET_HEADER: ${FS_TRUSTED_INGRESS_SECRET_HEADER:-}
+      FS_TRUSTED_INGRESS_SECRET: ${FS_TRUSTED_INGRESS_SECRET:-}
     volumes:
       - ${FS_FILES_DIR:-./runtime/files}:/data/files
       - ${FS_SQLITE_DIR:-./runtime/sqlite}:/data/sqlite

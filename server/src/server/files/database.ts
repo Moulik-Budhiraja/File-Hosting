@@ -3,9 +3,13 @@ import {
   type Client,
   type InValue,
   type Row,
-  type Transaction,
 } from "@libsql/client";
 
+import {
+  beginWriteTransaction,
+  closeWriteTransaction,
+  runDatabaseWrite,
+} from "../database/write-transaction";
 import { prepareLocalDatabaseDirectory } from "./database-url";
 import { AppError } from "./errors";
 import type {
@@ -17,8 +21,7 @@ import type {
   Visibility,
 } from "./types";
 
-const SCHEMA = `
-CREATE TABLE IF NOT EXISTS files (
+const FILES_COLUMNS = `
   id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
   name TEXT NOT NULL,
   size INTEGER NOT NULL CHECK(size >= 0),
@@ -30,25 +33,93 @@ CREATE TABLE IF NOT EXISTS files (
   archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
-);
+`;
+
+const FILE_TAGS_COLUMNS = `
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
+  PRIMARY KEY (file_id, tag_name)
+`;
+
+const FILE_INDEXES = {
+  files_created_at_id_idx:
+    "CREATE INDEX files_created_at_id_idx ON files(created_at DESC, id DESC)",
+  files_name_idx: "CREATE INDEX files_name_idx ON files(name)",
+  files_visibility_idx:
+    "CREATE INDEX files_visibility_idx ON files(visibility)",
+  files_owner_visibility_idx:
+    "CREATE INDEX files_owner_visibility_idx ON files(owner_id, visibility)",
+  file_tags_tag_name_idx:
+    "CREATE INDEX file_tags_tag_name_idx ON file_tags(tag_name, file_id)",
+};
+
+const SCHEMA = `
+CREATE TABLE IF NOT EXISTS files (${FILES_COLUMNS});
 
 CREATE TABLE IF NOT EXISTS tags (
   name TEXT PRIMARY KEY COLLATE NOCASE,
   created_at TEXT NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS file_tags (
-  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
-  tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
-  PRIMARY KEY (file_id, tag_name)
-);
+CREATE TABLE IF NOT EXISTS file_tags (${FILE_TAGS_COLUMNS});
 
-CREATE INDEX IF NOT EXISTS files_created_at_id_idx ON files(created_at DESC, id DESC);
-CREATE INDEX IF NOT EXISTS files_name_idx ON files(name);
-CREATE INDEX IF NOT EXISTS files_visibility_idx ON files(visibility);
-CREATE INDEX IF NOT EXISTS files_owner_visibility_idx ON files(owner_id, visibility);
-CREATE INDEX IF NOT EXISTS file_tags_tag_name_idx ON file_tags(tag_name, file_id);
+${Object.values(FILE_INDEXES)
+  .map((sql) => sql.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS"))
+  .join(";\n")};
 `;
+
+function normalizeSchemaSql(sql: string): string {
+  return sql
+    .replace(/\bIF NOT EXISTS\b/giu, "")
+    .replaceAll('"', "")
+    .replaceAll("`", "")
+    .replaceAll("[", "")
+    .replaceAll("]", "")
+    .replace(/\s+/gu, " ")
+    .replace(/\s*([(),=])\s*/gu, "$1")
+    .trim()
+    .toLocaleLowerCase("en-US");
+}
+
+const FILE_SCHEMA_OBJECTS = {
+  files: `CREATE TABLE files (${FILES_COLUMNS})`,
+  file_tags: `CREATE TABLE file_tags (${FILE_TAGS_COLUMNS})`,
+  ...FILE_INDEXES,
+};
+
+async function hasCanonicalFileSchema(
+  executor: Pick<Client, "execute">,
+): Promise<boolean> {
+  const names = Object.keys(FILE_SCHEMA_OBJECTS);
+  const result = await executor.execute({
+    sql: `SELECT name, sql FROM sqlite_master
+      WHERE name IN (${names.map(() => "?").join(", ")})`,
+    args: names,
+  });
+  const actual = new Map(
+    result.rows.map((row) => [
+      typeof row.name === "string" ? row.name : "",
+      typeof row.sql === "string" ? normalizeSchemaSql(row.sql) : "",
+    ]),
+  );
+  return names.every(
+    (name) =>
+      actual.get(name) ===
+      normalizeSchemaSql(
+        FILE_SCHEMA_OBJECTS[name as keyof typeof FILE_SCHEMA_OBJECTS],
+      ),
+  );
+}
+
+let fileMigrationQueue: Promise<unknown> = Promise.resolve();
+function runFileMigrationExclusive<T>(task: () => Promise<T>): Promise<T> {
+  const run = fileMigrationQueue.then(task, task);
+  fileMigrationQueue = run.then(
+    () => undefined,
+    () => undefined,
+  );
+  return run;
+}
 
 function rowString(row: Row, key: string): string {
   const value = row[key];
@@ -86,14 +157,6 @@ function escapeLike(value: string): string {
   return value.replace(/[\\%_]/gu, "\\$&");
 }
 
-function isDatabaseBusy(error: unknown): boolean {
-  return (
-    error instanceof Error &&
-    "code" in error &&
-    (error as Error & { code?: string }).code === "SQLITE_BUSY"
-  );
-}
-
 export function encodeCursor(cursor: {
   createdAt: string;
   id: string;
@@ -128,7 +191,10 @@ export function decodeCursor(value: string): { createdAt: string; id: string } {
 export class FileRepository {
   private readonly ready: Promise<void>;
 
-  constructor(private readonly client: Client) {
+  constructor(
+    private readonly client: Client,
+    private readonly databaseUrl: string,
+  ) {
     this.ready = this.initialize();
   }
 
@@ -136,77 +202,80 @@ export class FileRepository {
     await prepareLocalDatabaseDirectory(databaseUrl);
     const repository = new FileRepository(
       createClient({ url: databaseUrl, intMode: "number" }),
+      databaseUrl,
     );
     await repository.ensureReady();
     return repository;
   }
 
-  private async acquireMigrationTransaction(): Promise<Transaction> {
-    const deadline = Date.now() + 5_000;
-    for (;;) {
-      try {
-        return await this.client.transaction("write");
-      } catch (error) {
-        if (!isDatabaseBusy(error) || Date.now() >= deadline) throw error;
-        await new Promise((resolve) => setTimeout(resolve, 25));
-      }
-    }
-  }
+  private async migrateFileSchema(): Promise<void> {
+    const existing = await this.client.execute(
+      "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'files'",
+    );
+    if (!existing.rows[0] || (await hasCanonicalFileSchema(this.client)))
+      return;
 
-  private async migrateLegacyFiles(): Promise<void> {
-    await this.client.execute("PRAGMA foreign_keys = OFF");
-    await this.client.execute("PRAGMA busy_timeout = 0");
+    const transaction = await beginWriteTransaction(this.client, {
+      retryBusy: true,
+      foreignKeys: false,
+    });
     let migrated = false;
-    let transaction: Transaction | null = null;
     try {
-      transaction = await this.acquireMigrationTransaction();
-      const existing = await transaction.execute(
-        "SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'files'",
-      );
-      const definition = existing.rows[0]?.sql;
-      const needsMigration =
-        typeof definition === "string" &&
-        (!definition.includes("owner_id") ||
-          !definition.includes("'protected'"));
-      if (!needsMigration) {
-        transaction.close();
-        transaction = null;
+      if (await hasCanonicalFileSchema(transaction)) {
+        await transaction.commit();
         return;
       }
-      await transaction.batch([
-        `CREATE TABLE files_v2 (
-            id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
-            name TEXT NOT NULL, size INTEGER NOT NULL CHECK(size >= 0),
-            mime_type TEXT NOT NULL, sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
-            visibility TEXT NOT NULL CHECK(visibility IN ('public', 'protected', 'private')),
-            owner_id TEXT REFERENCES users(id) ON DELETE RESTRICT,
-            storage_key TEXT NOT NULL UNIQUE,
-            archive TEXT CHECK(archive IS NULL OR archive = 'tar.gz'),
-            created_at TEXT NOT NULL, updated_at TEXT NOT NULL
-          )`,
-        `INSERT INTO files_v2
-            (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
-            SELECT id, name, size, mime_type, sha256, visibility, NULL, storage_key, archive, created_at, updated_at FROM files`,
-        `CREATE TABLE file_tags_v2 (
-            file_id TEXT NOT NULL REFERENCES files_v2(id) ON DELETE CASCADE,
-            tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
-            PRIMARY KEY (file_id, tag_name)
-          )`,
-        "INSERT INTO file_tags_v2 SELECT file_id, tag_name FROM file_tags",
-        "DROP TABLE file_tags",
-        "DROP TABLE files",
-        "ALTER TABLE files_v2 RENAME TO files",
-        "ALTER TABLE file_tags_v2 RENAME TO file_tags",
-      ]);
+      const fileColumns = await transaction.execute("PRAGMA table_info(files)");
+      const fileColumnNames = new Set(
+        fileColumns.rows.map((row) =>
+          typeof row.name === "string" ? row.name : "",
+        ),
+      );
+      const fileTags = await transaction.execute(
+        "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'file_tags'",
+      );
+      const ownerExpression = fileColumnNames.has("owner_id")
+        ? "owner_id"
+        : "NULL";
+      await transaction.execute("DROP TABLE IF EXISTS files_rebuild");
+      await transaction.execute("DROP TABLE IF EXISTS file_tags_rebuild");
+      await transaction.execute(
+        `CREATE TABLE files_rebuild (${FILES_COLUMNS})`,
+      );
+      await transaction.execute(`INSERT INTO files_rebuild
+        (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
+        SELECT id, name, size, mime_type, sha256, visibility, ${ownerExpression}, storage_key, archive, created_at, updated_at
+        FROM files`);
+      await transaction.execute(
+        `CREATE TABLE file_tags_rebuild (
+          file_id TEXT NOT NULL REFERENCES files_rebuild(id) ON DELETE CASCADE,
+          tag_name TEXT NOT NULL COLLATE NOCASE REFERENCES tags(name) ON DELETE CASCADE,
+          PRIMARY KEY (file_id, tag_name)
+        )`,
+      );
+      if (fileTags.rows[0]) {
+        await transaction.execute(
+          "INSERT INTO file_tags_rebuild SELECT file_id, tag_name FROM file_tags",
+        );
+        await transaction.execute("DROP TABLE file_tags");
+      }
+      await transaction.execute("DROP TABLE files");
+      await transaction.execute("ALTER TABLE files_rebuild RENAME TO files");
+      await transaction.execute(
+        "ALTER TABLE file_tags_rebuild RENAME TO file_tags",
+      );
+      for (const sql of Object.values(FILE_INDEXES)) {
+        await transaction.execute(sql);
+      }
       migrated = true;
       await transaction.commit();
     } catch (error) {
-      if (transaction) await transaction.rollback();
+      await transaction.rollback();
       throw error;
     } finally {
-      transaction?.close();
-      await this.client.execute("PRAGMA busy_timeout = 5000");
-      await this.client.execute("PRAGMA foreign_keys = ON");
+      await closeWriteTransaction(this.client, transaction, {
+        foreignKeys: true,
+      });
     }
     if (!migrated) return;
     const violations = await this.client.execute("PRAGMA foreign_key_check");
@@ -227,8 +296,16 @@ export class FileRepository {
     } catch {
       // Remote libSQL endpoints manage journaling themselves.
     }
-    await this.migrateLegacyFiles();
-    await this.client.executeMultiple(SCHEMA);
+    await runDatabaseWrite(this.databaseUrl, () =>
+      runFileMigrationExclusive(async () => {
+        await this.migrateFileSchema();
+        await this.client.executeMultiple(SCHEMA);
+      }),
+    );
+  }
+
+  private runWrite<T>(task: () => Promise<T>): Promise<T> {
+    return runDatabaseWrite(this.databaseUrl, task);
   }
 
   async ensureReady(): Promise<void> {
@@ -238,6 +315,24 @@ export class FileRepository {
   async ping(): Promise<void> {
     await this.ready;
     await this.client.execute("SELECT 1");
+  }
+
+  async countByOwner(userIds: string[]): Promise<Map<string, number>> {
+    await this.ready;
+    if (userIds.length === 0) return new Map();
+    const result = await this.client.execute({
+      sql: `SELECT owner_id, COUNT(*) AS count FROM files
+        WHERE owner_id IN (${userIds.map(() => "?").join(",")})
+        GROUP BY owner_id`,
+      args: userIds,
+    });
+    return new Map(
+      result.rows.flatMap((row) =>
+        typeof row.owner_id === "string"
+          ? [[row.owner_id, Number(row.count)] as const]
+          : [],
+      ),
+    );
   }
 
   async close(): Promise<void> {
@@ -280,56 +375,60 @@ export class FileRepository {
     tags: string[],
   ): Promise<StoredFile> {
     await this.ready;
-    const transaction = await this.client.transaction("write");
-    try {
-      const inserted = await transaction.execute({
-        sql: `INSERT INTO files
+    return this.runWrite(async () => {
+      const transaction = await beginWriteTransaction(this.client, {
+        retryBusy: true,
+      });
+      try {
+        const inserted = await transaction.execute({
+          sql: `INSERT INTO files
           (id, name, size, mime_type, sha256, visibility, owner_id, storage_key, archive, created_at, updated_at)
           SELECT ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?
           WHERE ? IS NULL OR EXISTS (
             SELECT 1 FROM users WHERE id = ? AND active = 1
           )`,
-        args: [
-          file.id,
-          file.name,
-          file.size,
-          file.mimeType,
-          file.sha256,
-          file.visibility,
-          file.ownerId,
-          file.storageKey,
-          file.archive,
-          file.createdAt,
-          file.updatedAt,
-          file.ownerId,
-          file.ownerId,
-        ],
-      });
-      if (inserted.rowsAffected === 0) {
-        throw new AppError(
-          401,
-          "account_inactive",
-          "The upload owner is no longer active",
-        );
-      }
-      for (const tag of tags) {
-        await transaction.execute({
-          sql: "INSERT INTO tags (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
-          args: [tag, file.createdAt],
+          args: [
+            file.id,
+            file.name,
+            file.size,
+            file.mimeType,
+            file.sha256,
+            file.visibility,
+            file.ownerId,
+            file.storageKey,
+            file.archive,
+            file.createdAt,
+            file.updatedAt,
+            file.ownerId,
+            file.ownerId,
+          ],
         });
-        await transaction.execute({
-          sql: "INSERT INTO file_tags (file_id, tag_name) VALUES (?, ?)",
-          args: [file.id, tag],
-        });
+        if (inserted.rowsAffected === 0) {
+          throw new AppError(
+            401,
+            "account_inactive",
+            "The upload owner is no longer active",
+          );
+        }
+        for (const tag of tags) {
+          await transaction.execute({
+            sql: "INSERT INTO tags (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
+            args: [tag, file.createdAt],
+          });
+          await transaction.execute({
+            sql: "INSERT INTO file_tags (file_id, tag_name) VALUES (?, ?)",
+            args: [file.id, tag],
+          });
+        }
+        await transaction.commit();
+        return { ...file, tags: [...tags].sort((a, b) => a.localeCompare(b)) };
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        await closeWriteTransaction(this.client, transaction);
       }
-      await transaction.commit();
-      return { ...file, tags: [...tags].sort((a, b) => a.localeCompare(b)) };
-    } catch (error) {
-      await transaction.rollback();
-      throw error;
-    } finally {
-      transaction.close();
-    }
+    });
   }
 
   async list(options: ListFilesOptions): Promise<ListFilesResult> {
@@ -364,6 +463,10 @@ export class FileRepository {
     if (options.visibility) {
       where.push("f.visibility = ?");
       args.push(options.visibility);
+    }
+    if (options.owner) {
+      where.push("f.owner_id = ?");
+      args.push(options.owner);
     }
     for (const tag of options.tags) {
       where.push(`EXISTS (
@@ -409,69 +512,115 @@ export class FileRepository {
     id: string,
     input: {
       visibility?: Visibility;
+      ownerId?: string;
       tags?: { operation: TagOperation; values: string[] };
     },
+    actorUserId?: string | null,
   ): Promise<StoredFile | null> {
     await this.ready;
-    const current = await this.get(id);
-    if (!current) return null;
+    return this.runWrite(async () => {
+      const current = await this.get(id);
+      if (!current) return null;
 
-    const transaction = await this.client.transaction("write");
-    const now = new Date().toISOString();
-    try {
-      if (input.visibility) {
-        await transaction.execute({
-          sql: "UPDATE files SET visibility = ?, updated_at = ? WHERE id = ?",
-          args: [input.visibility, now, id],
-        });
-      }
-      if (input.tags) {
-        if (input.tags.operation === "set") {
-          await transaction.execute({
-            sql: "DELETE FROM file_tags WHERE file_id = ?",
-            args: [id],
+      const transaction = await beginWriteTransaction(this.client, {
+        retryBusy: true,
+      });
+      const now = new Date().toISOString();
+      try {
+        if (actorUserId != null) {
+          const authorized = await transaction.execute({
+            sql: `SELECT 1 FROM files f JOIN users actor ON actor.id = ?
+            WHERE f.id = ? AND actor.active = 1
+              AND (actor.role = 'admin' OR f.owner_id = actor.id)
+              AND (? = 0 OR actor.role = 'admin')
+              AND (? IS NULL OR EXISTS (
+                SELECT 1 FROM users owner WHERE owner.id = ? AND owner.active = 1
+              ))`,
+            args: [
+              actorUserId,
+              id,
+              input.ownerId ? 1 : 0,
+              input.ownerId ?? null,
+              input.ownerId ?? null,
+            ],
           });
-        }
-        for (const tag of input.tags.values) {
-          if (input.tags.operation === "remove") {
-            await transaction.execute({
-              sql: "DELETE FROM file_tags WHERE file_id = ? AND tag_name = ? COLLATE NOCASE",
-              args: [id, tag],
-            });
-          } else {
-            await transaction.execute({
-              sql: "INSERT INTO tags (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
-              args: [tag, now],
-            });
-            await transaction.execute({
-              sql: "INSERT INTO file_tags (file_id, tag_name) VALUES (?, ?) ON CONFLICT DO NOTHING",
-              args: [id, tag],
-            });
+          if (!authorized.rows[0]) {
+            await transaction.rollback();
+            return null;
           }
         }
-        await transaction.execute({
-          sql: "UPDATE files SET updated_at = ? WHERE id = ?",
-          args: [now, id],
-        });
+        if (input.visibility) {
+          await transaction.execute({
+            sql: "UPDATE files SET visibility = ?, updated_at = ? WHERE id = ?",
+            args: [input.visibility, now, id],
+          });
+        }
+        if (input.ownerId) {
+          await transaction.execute({
+            sql: "UPDATE files SET owner_id = ?, updated_at = ? WHERE id = ?",
+            args: [input.ownerId, now, id],
+          });
+        }
+        if (input.tags) {
+          if (input.tags.operation === "set") {
+            await transaction.execute({
+              sql: "DELETE FROM file_tags WHERE file_id = ?",
+              args: [id],
+            });
+          }
+          for (const tag of input.tags.values) {
+            if (input.tags.operation === "remove") {
+              await transaction.execute({
+                sql: "DELETE FROM file_tags WHERE file_id = ? AND tag_name = ? COLLATE NOCASE",
+                args: [id, tag],
+              });
+            } else {
+              await transaction.execute({
+                sql: "INSERT INTO tags (name, created_at) VALUES (?, ?) ON CONFLICT(name) DO NOTHING",
+                args: [tag, now],
+              });
+              await transaction.execute({
+                sql: "INSERT INTO file_tags (file_id, tag_name) VALUES (?, ?) ON CONFLICT DO NOTHING",
+                args: [id, tag],
+              });
+            }
+          }
+          await transaction.execute({
+            sql: "UPDATE files SET updated_at = ? WHERE id = ?",
+            args: [now, id],
+          });
+        }
+        await transaction.commit();
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        await closeWriteTransaction(this.client, transaction);
       }
-      await transaction.commit();
-    } catch (error) {
-      await transaction.rollback();
-      throw error;
-    } finally {
-      transaction.close();
-    }
-    return this.get(id);
+      return this.get(id);
+    });
   }
 
-  async delete(id: string): Promise<StoredFile | null> {
+  async delete(
+    id: string,
+    actorUserId?: string | null,
+  ): Promise<StoredFile | null> {
     await this.ready;
-    const file = await this.get(id);
-    if (!file) return null;
-    await this.client.execute({
-      sql: "DELETE FROM files WHERE id = ?",
-      args: [id],
+    return this.runWrite(async () => {
+      const file = await this.get(id);
+      if (!file) return null;
+      const result = await this.client.execute({
+        sql: `DELETE FROM files WHERE id = ? AND (
+          ? IS NULL OR EXISTS (
+            SELECT 1 FROM users actor
+            WHERE actor.id = ? AND actor.active = 1
+              AND (actor.role = 'admin' OR actor.id = files.owner_id)
+          )
+        )`,
+        args: [id, actorUserId ?? null, actorUserId ?? null],
+      });
+      if (result.rowsAffected !== 1) return null;
+      return file;
     });
-    return file;
   }
 }

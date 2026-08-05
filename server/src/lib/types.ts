@@ -1,0 +1,55 @@
+export type Role = "admin" | "member";
+
+export interface PublicUser {
+  id: string;
+  username: string;
+  role: Role;
+  active: boolean;
+  created_at: string;
+  updated_at: string;
+  password_changed_at?: string;
+  files_count?: number;
+  api_keys_count?: number;
+  sessions_count?: number;
+  last_active_at?: string | null;
+}
+
+export interface ApiKeyMetadata {
+  id: string;
+  user_id: string;
+  name: string;
+  prefix: string;
+  last_four: string;
+  created_at: string;
+  last_used_at: string | null;
+  revoked_at: string | null;
+  /** "pending" keys were created by phase 1 of the browser flow and never
+   * authenticate; absent (legacy serializations) means active. */
+  status?: "pending" | "active";
+  pending_expires_at?: string | null;
+}
+
+export type Visibility = "public" | "protected" | "private";
+
+export interface FileMetadata {
+  id: string;
+  name: string;
+  size: number;
+  mime_type: string;
+  sha256: string;
+  visibility: Visibility;
+  owner_id: string | null;
+  tags: string[];
+  preview_url: string;
+  raw_url: string;
+  archive: "tar.gz" | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface MeResponse {
+  user: PublicUser | null;
+  legacy_service_credential: boolean;
+  role: Role;
+  session?: { created_at: string; expires_at: string } | null;
+}

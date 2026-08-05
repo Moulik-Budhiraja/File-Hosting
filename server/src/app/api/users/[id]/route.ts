@@ -24,7 +24,7 @@ export async function PATCH(
     assertCsrf(request, service, principal);
     const id = (await context.params).id;
     const body = await jsonObject(request);
-    const allowed = new Set(["role", "active", "password"]);
+    const allowed = new Set(["role", "active", "password", "request_id"]);
     if (
       Object.keys(body).length === 0 ||
       Object.keys(body).some((key) => !allowed.has(key))
@@ -32,7 +32,31 @@ export async function PATCH(
       throw new AppError(
         400,
         "invalid_user_patch",
-        "Patch may contain role, active, and password",
+        "Patch may contain role, active, password, and request_id",
+      );
+    }
+    if (body.request_id !== undefined && typeof body.request_id !== "string") {
+      throw new AppError(
+        400,
+        "invalid_request_id",
+        "request_id must be a string",
+      );
+    }
+    if (body.request_id !== undefined && body.password === undefined) {
+      throw new AppError(
+        400,
+        "invalid_user_patch",
+        "request_id applies only to password resets",
+      );
+    }
+    const mutations = [body.role, body.active, body.password].filter(
+      (value) => value !== undefined,
+    );
+    if (mutations.length !== 1) {
+      throw new AppError(
+        400,
+        "invalid_user_patch",
+        "Patch must contain exactly one user change",
       );
     }
     if (
@@ -52,14 +76,36 @@ export async function PATCH(
 
     let user = await service.auth.getUser(id);
     if (!user) throw new AppError(404, "user_not_found", "User not found");
+    const actorUserId = principal.source === "legacy" ? null : principal.userId;
     if (body.role === "admin" || body.role === "member") {
-      user = await service.auth.setRole(id, body.role);
+      user = await service.auth.setRole(id, body.role, actorUserId);
     }
     if (typeof body.active === "boolean") {
-      user = await service.auth.setActive(id, body.active);
+      user = await service.auth.setActive(id, body.active, actorUserId);
     }
     if (typeof body.password === "string") {
-      user = await service.auth.setPassword(id, body.password);
+      if (typeof body.request_id === "string") {
+        // Idempotent reset: the candidate password applies exactly once
+        // per request id; a retry after a lost response reconciles
+        // without generating or re-applying another password.
+        const outcome = await service.auth.resetPasswordIdempotent(
+          id,
+          body.password,
+          principal.source === "legacy" ? null : principal.userId,
+          body.request_id,
+        );
+        return json({
+          user: publicUser(outcome.user),
+          password_applied: outcome.applied,
+        });
+      }
+      user = await service.auth.setPassword(
+        id,
+        body.password,
+        new Date(),
+        undefined,
+        actorUserId,
+      );
     }
     return json({ user: publicUser(user) });
   } catch (error) {

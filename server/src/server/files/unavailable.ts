@@ -32,7 +32,16 @@ function unavailablePage(publicUrl?: string): Buffer {
 <meta name="twitter:image" content="${imageUrl}">
 <meta name="twitter:image:alt" content="File unavailable">
 <link rel="canonical" href="${origin}">
-<title>File unavailable</title></head><body><main><h1>File unavailable</h1><p>Preview unavailable</p><p>${new URL(origin).hostname}</p></main></body></html>`);
+<title>File unavailable</title><style>
+body{margin:0;display:grid;place-items:center;min-height:100vh;background:#101214;color:#E8EAED;font:14px/20px ui-sans-serif,system-ui,sans-serif}
+main{max-width:420px;padding:24px;text-align:center}
+.brand{font-weight:600;color:#E8EAED;margin:0 0 20px}
+.code{font-family:ui-monospace,monospace;font-size:12px;letter-spacing:.09em;color:#828C94}
+h1{font-size:16px;font-weight:600;margin:8px 0}
+p{color:#A9B1B9;margin:0}
+a{display:inline-block;margin-top:20px;padding:8px 14px;border:1px solid #394047;border-radius:6px;color:#E8EAED;text-decoration:none}
+a:focus-visible{outline:2px solid #E8EAED;outline-offset:2px}
+</style></head><body><main><p class="brand">fs-server</p><p class="code">404 · NOT FOUND</p><h1>This link doesn't exist or you don't have access.</h1><a href="/login?next=referrer">Sign in</a></main></body></html>`);
   pageCache.set(origin, page);
   return page;
 }
@@ -66,9 +75,13 @@ export function unavailablePageResponse(
   publicUrl?: string,
 ): Response {
   const page = unavailablePage(publicUrl);
+  const headers = commonHeaders("text/html; charset=utf-8", page.length);
+  // Preserve only a same-origin recovery path. Cross-origin requests still
+  // receive no path-bearing referrer data.
+  headers.set("referrer-policy", "same-origin");
   return new Response(includeBody ? new Uint8Array(page) : null, {
     status: 200,
-    headers: commonHeaders("text/html; charset=utf-8", page.length),
+    headers,
   });
 }
 

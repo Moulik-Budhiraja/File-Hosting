@@ -12,6 +12,7 @@ import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
 
+import type { Client, TransactionMode } from "@libsql/client";
 import { PDFDocument } from "pdf-lib";
 
 import {
@@ -24,7 +25,9 @@ import { GET as previewFile } from "../../app/[id]/route";
 import { GET as health } from "../../app/healthz/route";
 import { GET as rawFile, HEAD as headRawFile } from "../../app/raw/[id]/route";
 import { isAuthorized } from "./auth";
-import { decodeCursor, encodeCursor } from "./database";
+import { AuthRepository } from "../auth/database";
+import { loadConfig } from "./config";
+import { decodeCursor, encodeCursor, FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
 import { parseRangeHeader } from "./range";
@@ -110,6 +113,135 @@ describe("pure file helpers", () => {
     const cursor = { createdAt: "2026-07-11T12:00:00.000Z", id: "aB3dE5g" };
     assert.deepEqual(decodeCursor(encodeCursor(cursor)), cursor);
     assert.throws(() => decodeCursor("not-a-cursor"), /Cursor is invalid/u);
+  });
+});
+
+describe("same-process repository writes", () => {
+  it("serializes concurrent file and auth writes without blocking the event loop", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-shared-write-queue-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "shared.db")}`;
+    const auth = await AuthRepository.create(databaseUrl);
+    const firstFiles = await FileRepository.create(databaseUrl);
+    const secondFiles = await FileRepository.create(databaseUrl);
+    try {
+      const admin = await auth.bootstrapAdmin({
+        username: "queue.admin",
+        password: "fixture-queue-admin-credential",
+      });
+      const temporary = await auth.createUser({
+        username: "queue.temporary",
+        password: "fixture-queue-temporary-credential",
+        role: "member",
+      });
+      const temporaryExpiry = Date.parse(temporary.temporaryPasswordExpiresAt!);
+      const temporaryAuthentication = await auth.authenticatePassword(
+        temporary.username,
+        "fixture-queue-temporary-credential",
+        null,
+        new Date(temporaryExpiry - 1),
+      );
+      const contentionExpiry = new Date(Date.now() + 200).toISOString();
+      const authInternal = auth as unknown as { client: Client };
+      await authInternal.client.execute({
+        sql: "UPDATE users SET temporary_password_expires_at = ? WHERE id = ?",
+        args: [contentionExpiry, temporary.id],
+      });
+      const internal = firstFiles as unknown as { client: Client };
+      const originalTransaction = internal.client.transaction.bind(
+        internal.client,
+      );
+      let release!: () => void;
+      const held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      let signalHeld!: () => void;
+      const lockHeld = new Promise<void>((resolve) => {
+        signalHeld = resolve;
+      });
+      internal.client.transaction = async (mode?: TransactionMode) => {
+        const transaction = await originalTransaction(mode);
+        const originalExecute = transaction.execute.bind(transaction);
+        let delayed = false;
+        transaction.execute = async (statement) => {
+          const result = await originalExecute(statement);
+          const sql = typeof statement === "string" ? statement : statement.sql;
+          if (!delayed && sql.includes("INSERT INTO files")) {
+            delayed = true;
+            signalHeld();
+            await held;
+          }
+          return result;
+        };
+        return transaction;
+      };
+
+      const file = (id: string) => ({
+        id,
+        name: `${id}.txt`,
+        size: 1,
+        mimeType: "text/plain",
+        sha256: "a".repeat(64),
+        visibility: "public" as const,
+        ownerId: null,
+        storageKey: id,
+        archive: null,
+        createdAt: "2026-08-04T12:00:00.000Z",
+        updatedAt: "2026-08-04T12:00:00.000Z",
+      });
+      const first = firstFiles.insert(file("QueueA1"), ["first"]);
+      await lockHeld;
+
+      const timerStarted = Date.now();
+      const timer = new Promise<number>((resolve) =>
+        setTimeout(() => resolve(Date.now() - timerStarted), 25),
+      );
+      const second = secondFiles.insert(file("QueueB2"), ["second"]);
+      const authWrite = auth.createSession(admin.id);
+      const expiredSession = auth.createSession(temporaryAuthentication);
+      const expiredAssertion = assert.rejects(
+        expiredSession,
+        (error) =>
+          error instanceof AppError &&
+          error.code === "temporary_password_expired",
+      );
+      const timerDelay = await timer;
+      assert.ok(timerDelay < 500, `event loop stalled for ${timerDelay}ms`);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+      release();
+
+      const [firstResult, secondResult, session] = await Promise.all([
+        first,
+        second,
+        authWrite,
+      ]);
+      assert.equal(firstResult.id, "QueueA1");
+      assert.equal(secondResult.id, "QueueB2");
+      assert.equal((await auth.resolveSession(session.token))?.id, admin.id);
+      await expiredAssertion;
+      assert.equal(
+        (await auth.getUser(temporary.id))?.temporaryPasswordExpiresAt,
+        contentionExpiry,
+      );
+
+      const [updated, deleted] = await Promise.all([
+        firstFiles.update("QueueA1", {
+          visibility: "private",
+          tags: { operation: "set", values: ["updated"] },
+        }),
+        secondFiles.delete("QueueB2"),
+      ]);
+      assert.equal(updated?.visibility, "private");
+      assert.deepEqual(updated?.tags, ["updated"]);
+      assert.equal(deleted?.id, "QueueB2");
+      assert.equal(await firstFiles.get("QueueB2"), null);
+    } finally {
+      await firstFiles.close();
+      await secondFiles.close();
+      await auth.close();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 });
 
@@ -311,6 +443,8 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
   it("requires auth for the API and returns the stable error envelope", async () => {
     const response = await listFiles(new Request("http://localhost/api/files"));
     assert.equal(response.status, 401);
+    assert.equal(response.headers.get("x-content-type-options"), "nosniff");
+    assert.equal(response.headers.get("x-frame-options"), "DENY");
     assert.deepEqual(await response.json(), {
       error: {
         code: "unauthorized",
@@ -319,7 +453,16 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     });
   });
 
-  it("uploads through the raw-body endpoint and exposes metadata routes", async () => {
+  it("uses the canonical deploy origin in upload metadata and Location", async (t) => {
+    const previousPublicUrl = service.config.publicUrl;
+    service.config.publicUrl = loadConfig({
+      NODE_ENV: "test",
+      FS_TOKEN: TOKEN,
+      FS_PUBLIC_URL: "HtTpS://FILES.Example.Test:443/",
+    }).publicUrl;
+    t.after(() => {
+      service.config.publicUrl = previousPublicUrl;
+    });
     const response = await postFile(
       new Request(
         "http://localhost/api/files?name=unsafe.html&tag=web&tag=sample&archive=tar.gz",
@@ -484,6 +627,88 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.equal(invalid.headers.get("content-range"), "bytes */40");
   });
 
+  it("allows only exact-metadata PDFs in same-origin preview frames", async () => {
+    const pdf = await service.upload(chunks("%PDF-1.4\n%%EOF\n"), {
+      name: "deceptive.html",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "application/pdf",
+    });
+    const html = await service.upload(
+      chunks("<script>top.location='/files'</script>"),
+      {
+        name: "deceptive.pdf",
+        tags: [],
+        visibility: "public",
+        archive: null,
+        mimeType: "text/html",
+      },
+    );
+
+    const pdfResponse = await rawFile(
+      new Request(`http://localhost/raw/${pdf.id}`),
+      routeContext(pdf.id),
+    );
+    assert.equal(pdfResponse.headers.get("content-type"), "application/pdf");
+    assert.equal(
+      pdfResponse.headers.get("content-security-policy"),
+      "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'self'",
+    );
+    assert.equal(pdfResponse.headers.get("referrer-policy"), "no-referrer");
+    assert.equal(pdfResponse.headers.get("x-content-type-options"), "nosniff");
+
+    const htmlResponse = await rawFile(
+      new Request(`http://localhost/raw/${html.id}`),
+      routeContext(html.id),
+    );
+    assert.equal(htmlResponse.headers.get("content-type"), "text/html");
+    assert.equal(
+      htmlResponse.headers.get("content-security-policy"),
+      "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    );
+  });
+
+  it("sandboxes every raw response including browser-active XML families", async () => {
+    for (const [name, mimeType, body] of [
+      [
+        "payload.xhtml",
+        "application/xhtml+xml",
+        "<script>top.location='/api/auth/me'</script>",
+      ],
+      [
+        "payload.xml",
+        "application/xml",
+        "<?xml-stylesheet href='/raw/other' type='text/xsl'?><root/>",
+      ],
+      [
+        "payload.atom",
+        "application/atom+xml",
+        "<feed xmlns='http://www.w3.org/2005/Atom'/>",
+      ],
+      ["payload.txt", "text/plain", "inert"],
+    ] as const) {
+      const file = await service.upload(chunks(body), {
+        name,
+        tags: [],
+        visibility: "public",
+        archive: null,
+        mimeType,
+      });
+      const response = await rawFile(
+        new Request(`http://localhost/raw/${file.id}`),
+        routeContext(file.id),
+      );
+      assert.equal(response.status, 200);
+      assert.equal(response.headers.get("content-type"), mimeType);
+      assert.equal(
+        response.headers.get("content-security-policy"),
+        "sandbox; default-src 'none'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+      );
+      assert.equal(await response.text(), body);
+    }
+  });
+
   it("rejects oversized file PATCH bodies before parsing", async () => {
     const file = await service.upload(chunks("bounded"), {
       name: "bounded-patch.txt",
@@ -596,7 +821,7 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       new Request("http://localhost/api/files?name=csrf.txt", {
         method: "POST",
         headers: {
-          cookie: `fs_session=${ownerSession.token}`,
+          cookie: `__Host-fs_session=${ownerSession.token}`,
           origin: "https://evil.example",
         },
         body: "blocked",
@@ -622,6 +847,41 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     const privateId = privateMetadata.id;
     assert.equal(privateMetadata.owner_id, owner.id);
     assert.equal((await service.get(privateId))?.ownerId, owner.id);
+
+    const memberTransfer = await patchFile(
+      new Request(`http://localhost/api/files/${privateId}`, {
+        method: "PATCH",
+        headers: { ...ownerAuth, "content-type": "application/json" },
+        body: JSON.stringify({ owner_id: other.id }),
+      }),
+      routeContext(privateId),
+    );
+    assert.equal(memberTransfer.status, 403);
+
+    const adminTransfer = await patchFile(
+      new Request(`http://localhost/api/files/${privateId}`, {
+        method: "PATCH",
+        headers: { ...AUTHORIZATION, "content-type": "application/json" },
+        body: JSON.stringify({ owner_id: other.id }),
+      }),
+      routeContext(privateId),
+    );
+    assert.equal(adminTransfer.status, 200);
+    assert.equal(
+      ((await adminTransfer.json()) as { owner_id: string }).owner_id,
+      other.id,
+    );
+    assert.equal((await service.get(privateId))?.ownerId, other.id);
+
+    const transferBack = await patchFile(
+      new Request(`http://localhost/api/files/${privateId}`, {
+        method: "PATCH",
+        headers: { ...AUTHORIZATION, "content-type": "application/json" },
+        body: JSON.stringify({ owner_id: owner.id }),
+      }),
+      routeContext(privateId),
+    );
+    assert.equal(transferBack.status, 200);
 
     const protectedUpload = await postFile(
       new Request(
@@ -697,6 +957,152 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       body.items.some((item) => item.id === privateId),
       false,
     );
+  });
+
+  it("serves a branded HTML unavailable page with exact status/body indistinguishability", async () => {
+    // Upload a private file owned by a real user; anonymous and
+    // unauthorized-member previews must be byte-identical to a missing id.
+    const denialOwner = await service.auth.createUser({
+      username: "denial.owner",
+      password: "a sufficiently long owner password",
+      role: "member",
+    });
+    const outsider = await service.auth.createUser({
+      username: "denial.outsider",
+      password: "a sufficiently long outsider password",
+      role: "member",
+    });
+    const outsiderKey = await service.auth.createApiKey(outsider.id, "probe");
+    const hiddenFile = await service.upload(chunks("secret"), {
+      name: "denial.txt",
+      tags: [],
+      visibility: "private",
+      archive: null,
+      ownerId: denialOwner.id,
+    });
+
+    const anonymousPrivate = await previewFile(
+      new Request(`http://localhost/${hiddenFile.id}`),
+      routeContext(hiddenFile.id),
+    );
+    const anonymousMissing = await previewFile(
+      new Request("http://localhost/0000000"),
+      routeContext("0000000"),
+    );
+    const memberPrivate = await previewFile(
+      new Request(`http://localhost/${hiddenFile.id}`, {
+        headers: { authorization: `Bearer ${outsiderKey.secret}` },
+      }),
+      routeContext(hiddenFile.id),
+    );
+
+    for (const response of [
+      anonymousPrivate,
+      anonymousMissing,
+      memberPrivate,
+    ]) {
+      assert.equal(response.status, 200);
+      assert.match(response.headers.get("content-type") ?? "", /text\/html/u);
+    }
+    const bodies = await Promise.all(
+      [anonymousPrivate, anonymousMissing, memberPrivate].map((response) =>
+        response.text(),
+      ),
+    );
+    assert.equal(bodies[0], bodies[1]);
+    assert.equal(bodies[0], bodies[2]);
+    assert.match(bodies[0]!, /404 · NOT FOUND/u);
+    assert.match(bodies[0]!, /<p class="brand">fs-server<\/p>/u);
+    assert.match(bodies[0]!, /doesn't exist or you don't have access/u);
+    // The branded page carries the same defensive headers as previews.
+    assert.equal(
+      anonymousMissing.headers.get("x-content-type-options"),
+      "nosniff",
+    );
+    assert.equal(
+      anonymousMissing.headers.get("referrer-policy"),
+      "same-origin",
+    );
+    assert.match(
+      anonymousMissing.headers.get("content-security-policy") ?? "",
+      /frame-ancestors 'none'/u,
+    );
+  });
+
+  it("filters by owner in SQL before cursor pagination", async () => {
+    const scopeOwner = await service.auth.createUser({
+      username: "scope.owner",
+      password: "a sufficiently long owner password",
+      role: "member",
+    });
+    const scopeOther = await service.auth.createUser({
+      username: "scope.other",
+      password: "a sufficiently long other password",
+      role: "member",
+    });
+    // The owner's single file is older than a full page of other-owned
+    // files — a client-side page filter would falsely report empty.
+    const owned = await service.upload(chunks("owned"), {
+      name: "scope-owned.txt",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      ownerId: scopeOwner.id,
+    });
+    for (let index = 0; index < 6; index += 1) {
+      await service.upload(chunks(`noise-${index}`), {
+        name: `scope-noise-${index}.txt`,
+        tags: [],
+        visibility: "public",
+        archive: null,
+        ownerId: scopeOther.id,
+      });
+    }
+
+    // Repository level: the owner predicate applies before LIMIT.
+    const page = await service.list({
+      tags: [],
+      limit: 2,
+      owner: scopeOwner.id,
+      access: { role: "member", userId: scopeOwner.id },
+    });
+    assert.equal(page.files.length, 1);
+    assert.equal(page.files[0]!.id, owned.id);
+    assert.equal(page.nextCursor, null);
+
+    // Route level: owner=me scopes to the caller before pagination.
+    const ownerKey = await service.auth.createApiKey(scopeOwner.id, "scope");
+    const response = await listFiles(
+      new Request("http://localhost/api/files?owner=me&limit=2", {
+        headers: { authorization: `Bearer ${ownerKey.secret}` },
+      }),
+    );
+    assert.equal(response.status, 200);
+    const body = (await response.json()) as {
+      items: Array<{ id: string }>;
+      next_cursor: string | null;
+    };
+    assert.deepEqual(
+      body.items.map((item) => item.id),
+      [owned.id],
+    );
+    assert.equal(body.next_cursor, null);
+
+    // Unsupported owner values are rejected, not silently ignored.
+    const invalid = await listFiles(
+      new Request("http://localhost/api/files?owner=someone-else", {
+        headers: { authorization: `Bearer ${ownerKey.secret}` },
+      }),
+    );
+    assert.equal(invalid.status, 400);
+
+    // The legacy service credential has no user identity for owner=me.
+    const legacy = await listFiles(
+      new Request("http://localhost/api/files?owner=me", {
+        headers: { authorization: `Bearer ${TOKEN}` },
+      }),
+    );
+    assert.equal(legacy.status, 400);
   });
 
   it("reports health, deletes metadata and bytes, then returns 404", async () => {

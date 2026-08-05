@@ -418,34 +418,66 @@ describe("public unfurl view-model", () => {
   });
 
   it("describes PDF, audio, video, and binary with terse structural facts only", async () => {
-    const cases: Array<[Partial<StoredFile>, RegExp, string, string]> = [
+    const cases: Array<
+      [Partial<StoredFile>, RegExp, string, string, string, string]
+    > = [
       [
         { name: "audit.pdf", mimeType: "application/pdf" },
         /^PDF · \d+ B$/u,
         "article",
         "summary_large_image",
+        "pdf",
+        "PDF",
       ],
       [
         { name: "standup.m4a", mimeType: "audio/mp4" },
         /^Audio · \d+ B$/u,
         "website",
         "summary_large_image",
+        "audio",
+        "Audio",
       ],
       [
         { name: "demo.mp4", mimeType: "video/mp4" },
         /^MP4 · \d+ B$/u,
         "website",
         "summary_large_image",
+        "video",
+        "MP4",
       ],
       [
         { name: "firmware.bin", mimeType: "application/octet-stream" },
         /^Binary · \d+ B$/u,
         "website",
         "summary_large_image",
+        "binary",
+        "Binary",
       ],
     ];
-    for (const [overrides, description, ogType, twitterCard] of cases) {
-      const model = await modelFor("some bytes", overrides);
+    const contents = "some bytes";
+    const sourceDigest = createHash("sha256").update(contents).digest("hex");
+    for (const [
+      overrides,
+      description,
+      ogType,
+      twitterCard,
+      family,
+      label,
+    ] of cases) {
+      const service = await fakeService(contents);
+      const file = storedFile({
+        size: Buffer.byteLength(contents),
+        sha256: sourceDigest,
+        ...overrides,
+      });
+      const model = await buildUnfurlModel(service, file, {
+        family: family as "pdf" | "audio" | "video" | "binary",
+        label,
+        title: file.name,
+        facts: [`${file.size} B`],
+        sourceDigest,
+        visual: { kind: "binary" },
+      });
       assert.equal(model.title, overrides.name);
       assert.match(model.description ?? "", description);
       assert.equal(model.ogType, ogType);
