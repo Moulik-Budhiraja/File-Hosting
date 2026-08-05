@@ -317,13 +317,18 @@ test("PDF raster worker binds all standard families and preserves frozen Linux H
   }
 });
 
-test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
+test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {
   const runtime = await text("scripts/compose-runtime-check.sh");
   assert.match(runtime, /docker compose build/u);
   assert.match(runtime, /docker compose up -d/u);
   assert.match(runtime, /docker compose exec -T server/u);
   assert.match(runtime, /\/healthz/u);
   assert.match(runtime, /\/og\//u);
+  assert.match(
+    runtime,
+    /trap .*docker compose logs/u,
+    "a failed container startup must expose logs before teardown",
+  );
   assert.match(runtime, /trap .*docker compose down/u);
   assert.match(runtime, /REQUIRE_DOCKER/u);
 });

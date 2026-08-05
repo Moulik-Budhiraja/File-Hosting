@@ -21,7 +21,7 @@ export FS_FILES_DIR="$temporary_root/files"
 export FS_SQLITE_DIR="$temporary_root/sqlite"
 mkdir -p "$FS_FILES_DIR" "$FS_SQLITE_DIR"
 chmod 700 "$FS_FILES_DIR" "$FS_SQLITE_DIR"
-trap 'docker compose down --remove-orphans --volumes >/dev/null 2>&1 || true; rm -rf "$temporary_root"' EXIT
+trap 'status=$?; if [[ $status -ne 0 ]]; then docker compose ps >&2 || true; docker compose logs --no-color --tail=200 server >&2 || true; fi; docker compose down --remove-orphans --volumes >/dev/null 2>&1 || true; rm -rf "$temporary_root"; exit $status' EXIT
 
 docker network inspect nginx-proxy_default >/dev/null 2>&1 || docker network create nginx-proxy_default >/dev/null
 docker compose build
