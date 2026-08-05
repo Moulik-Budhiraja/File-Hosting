@@ -275,7 +275,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     assert.doesNotMatch(head, /<script(?:\s|>)/iu);
   });
 
-  it("returns the generic unavailable contract when unfurl extraction is busy", async () => {
+  it("serves stable precomputed metadata across a transient artifact read failure", async () => {
     const file = await service.upload(bytes("busy source bytes"), {
       name: "busy-public.txt",
       tags: [],
@@ -312,15 +312,16 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     const get = await request(false);
     assert.equal(get.status, 200);
     const html = await get.text();
-    assert.match(html, /File unavailable/u);
+    assert.doesNotMatch(html, /File unavailable/u);
     assert.match(
       html,
-      /property="og:image" content="https:\/\/files\.moulik\.dev\/og\/0000000\.png"/u,
+      new RegExp(
+        `property="og:image" content="https://canonical\\.example\\.test/og/${file.id}\\.png"`,
+        "u",
+      ),
     );
-    assert.doesNotMatch(
-      html,
-      new RegExp(`${file.id}|busy-public|${file.sha256}`, "u"),
-    );
+    assert.match(html, /busy-public\.txt/u);
+    assert.match(html, new RegExp(file.sha256, "u"));
     const head = await request(true);
     assert.equal(head.status, 200);
     assert.equal(await head.text(), "");

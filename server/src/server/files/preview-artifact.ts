@@ -47,6 +47,30 @@ interface SerializedArtifact {
   cardBase64: string;
 }
 
+function serializeSourceIdentity(
+  identity: SourceIdentity,
+): Record<keyof SourceIdentity, string> {
+  return {
+    dev: identity.dev.toString(),
+    ino: identity.ino.toString(),
+    size: identity.size.toString(),
+    mtimeNs: identity.mtimeNs.toString(),
+    ctimeNs: identity.ctimeNs.toString(),
+  };
+}
+
+function deserializeSourceIdentity(
+  identity: Record<keyof SourceIdentity, string>,
+): SourceIdentity {
+  return {
+    dev: BigInt(identity.dev),
+    ino: BigInt(identity.ino),
+    size: BigInt(identity.size),
+    mtimeNs: BigInt(identity.mtimeNs),
+    ctimeNs: BigInt(identity.ctimeNs),
+  };
+}
+
 function artifactPath(service: FileService, file: StoredFile): string {
   return path.join(
     service.config.storageDir,
@@ -111,12 +135,7 @@ export async function readUnfurlArtifact(
     const bytes = await readFile(artifactPath(service, file));
     if (bytes.length > PREVIEW_ARTIFACT_MAX_BYTES) return null;
     const artifact = JSON.parse(bytes.toString("utf8")) as SerializedArtifact;
-    const expected = Object.fromEntries(
-      Object.entries(artifact.sourceIdentity).map(([key, value]) => [
-        key,
-        BigInt(value),
-      ]),
-    ) as unknown as SourceIdentity;
+    const expected = deserializeSourceIdentity(artifact.sourceIdentity);
     if (!(await sourceIdentityMatches(service, file, expected))) return null;
     return deserialize(artifact, file);
   } catch {
@@ -150,12 +169,7 @@ export async function prepareUnfurlArtifact(
     JSON.stringify({
       revision: ARTIFACT_REVISION,
       sha256: file.sha256,
-      sourceIdentity: Object.fromEntries(
-        Object.entries(sourceIdentity).map(([key, value]) => [
-          key,
-          value.toString(),
-        ]),
-      ) as Record<keyof SourceIdentity, string>,
+      sourceIdentity: serializeSourceIdentity(sourceIdentity),
       preview: serialize(preview),
       cardBase64: card.toString("base64"),
     } satisfies SerializedArtifact),
