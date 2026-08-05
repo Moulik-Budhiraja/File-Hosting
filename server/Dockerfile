@@ -23,6 +23,7 @@ RUN apt-get update \
         fonts-noto-cjk \
         fonts-noto-core \
     && chmod 4755 /usr/bin/bwrap \
+    && find /usr/bin /usr/sbin /bin /sbin -xdev -type f -perm /6000 ! -path /usr/bin/bwrap -exec chmod a-s {} + \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 1001 nodejs \
     && useradd --uid 1001 --gid nodejs --create-home --shell /usr/sbin/nologin nextjs \

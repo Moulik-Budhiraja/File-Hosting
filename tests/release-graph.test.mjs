@@ -351,6 +351,13 @@ test("production image uses glibc for the frozen packaged media binaries", async
     /chmod 4755 \/usr\/bin\/bwrap/u,
     "the non-root runtime must retain Bubblewrap's privileged launcher mode when nested user namespaces are unavailable",
   );
+  assert.match(
+    dockerfile,
+    /find \/usr\/bin \/usr\/sbin \/bin \/sbin[\s\S]*! -path \/usr\/bin\/bwrap -exec chmod a-s/u,
+    "Bubblewrap must be the image's only setuid launcher",
+  );
+  const compose = await text("compose.yaml");
+  assert.match(compose, /cap_drop:\s*\n\s*- ALL[\s\S]*cap_add:\s*\n\s*- SYS_ADMIN/u);
 });
 
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {
@@ -373,6 +380,12 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
     "the gate must remove only the external network it created",
   );
   assert.match(runtime, /REQUIRE_DOCKER/u);
+  assert.match(
+    runtime,
+    /CapEff[\s\S]*CapBnd[\s\S]*200000/u,
+    "the runtime gate must prove the server is unprivileged while only SYS_ADMIN remains bounded for setuid Bubblewrap",
+  );
+  assert.match(runtime, /stat -c %a \/usr\/bin\/bwrap/u);
 });
 
 test("non-production rich-link runner has a production guard and generates visual contexts", async () => {

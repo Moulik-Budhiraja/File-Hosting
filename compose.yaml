@@ -7,6 +7,10 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     init: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SYS_ADMIN
     environment:
       FS_TOKEN: ${FS_TOKEN:?Set FS_TOKEN in .env before starting the service}
       DATABASE_URL: ${DATABASE_URL:-file:/data/sqlite/files.db}
