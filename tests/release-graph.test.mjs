@@ -329,7 +329,7 @@ test("canonical freeze and manifest are source-pinned without a fixture update c
   );
 });
 
-test("facts-bearing image inputs are immutable tracked bytes rather than platform encodes", async () => {
+test("facts-bearing media inputs are immutable tracked bytes rather than platform encodes", async () => {
   const fixtures = [
     [
       "server/test-fixtures/og-design-inputs-v2/source-01-image-landscape.jpg",
@@ -361,6 +361,16 @@ test("facts-bearing image inputs are immutable tracked bytes rather than platfor
       1_375,
       "0f2e4694d4b22828d2c63b72757e27b8e4b72308dbb7a0c3c44939faf7b6df0c",
     ],
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-09-audio-artwork.mp3",
+      3_595,
+      "151c77da37594ccc770851ffccf8c1e4beb539bc0150893e3e8de112aaacc36b",
+    ],
+    [
+      "server/test-fixtures/og-design-inputs-v2/source-09-audio-artwork-mutation.mp3",
+      1_866,
+      "5845bc811291c8b4a5b1971d9c61c59b3996e4a24e81036aacc0717fa8b48e7f",
+    ],
   ];
   for (const [relative, size, digest] of fixtures) {
     const bytes = await readFile(path.join(root, relative));
@@ -372,10 +382,12 @@ test("facts-bearing image inputs are immutable tracked bytes rather than platfor
   assert.match(audit, /source-01-image-landscape-mutation\.jpg/u);
   assert.match(audit, /source-02-image-portrait\.png/u);
   assert.match(audit, /source-02-image-portrait-mutation\.png/u);
+  assert.match(audit, /source-09-audio-artwork\.mp3/u);
+  assert.match(audit, /source-09-audio-artwork-mutation\.mp3/u);
   assert.doesNotMatch(
     audit,
-    /const (?:landscape|portrait) = await independentRaster\(|sharp\(landscape\)\.jpeg|PDFDocument|pdfFixture/u,
-    "the source byte size rendered in approved facts must not depend on host libvips",
+    /const (?:landscape|portrait) = await independentRaster\(|sharp\(landscape\)\.jpeg|PDFDocument|pdfFixture|artworkFixture/u,
+    "the source byte size rendered in approved facts must not depend on host native encoders",
   );
 });
 

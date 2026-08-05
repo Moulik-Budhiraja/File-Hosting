@@ -255,33 +255,6 @@ function videoFallbackFixture(duration: number): Buffer {
     "aac",
   ]);
 }
-function artworkFixture(variant: "red" | "green"): Buffer {
-  const artworkSource =
-    variant === "red" ? "testsrc2=s=96x96:d=0.1" : "smptebars=s=96x96:d=0.1";
-  return ffmpegFixture(`art-${variant}.mp3`, [
-    "-f",
-    "lavfi",
-    "-i",
-    "sine=frequency=440:sample_rate=8000:duration=1.1",
-    "-f",
-    "lavfi",
-    "-i",
-    artworkSource,
-    "-map",
-    "0:a",
-    "-map",
-    "1:v:0",
-    "-c:v",
-    "png",
-    "-disposition:v",
-    "attached_pic",
-    "-id3v2_version",
-    "3",
-    "-c:a",
-    "libmp3lame",
-  ]);
-}
-
 interface AuditCase {
   id: string;
   reference: string;
@@ -325,6 +298,12 @@ const portraitMutation = await readFile(
 const pdf = await readFile(path.join(designInputRoot, "source-05-pdf.pdf"));
 const pdfMutation = await readFile(
   path.join(designInputRoot, "source-05-pdf-mutation.pdf"),
+);
+const audioArtwork = await readFile(
+  path.join(designInputRoot, "source-09-audio-artwork.mp3"),
+);
+const audioArtworkMutation = await readFile(
+  path.join(designInputRoot, "source-09-audio-artwork-mutation.mp3"),
 );
 const topBrand = { left: 48, top: 42, width: 230, height: 38 };
 const bottomBrand = { left: 900, top: 548, width: 258, height: 42 };
@@ -480,8 +459,8 @@ const cases: AuditCase[] = [
     reference: "raw-09-audio-artwork.png",
     name: "night-radio-session.mp3",
     mimeType: "audio/mpeg",
-    bytes: artworkFixture("red"),
-    mutation: artworkFixture("green"),
+    bytes: audioArtwork,
+    mutation: audioArtworkMutation,
     expectedKind: "audio",
     expectedVisual: "artwork",
     brand: { left: 678, top: 42, width: 230, height: 38 },
