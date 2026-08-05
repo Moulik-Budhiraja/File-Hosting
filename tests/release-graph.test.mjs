@@ -323,6 +323,15 @@ test("runtime assertion executes packaged media tools before server startup", as
   assert.match(runtimeAssets, /probe\.status !== 0/u);
 });
 
+test("Linux media tools run below the detached ownership supervisor", async () => {
+  const processTree = await text("server/src/server/files/process-tree.ts");
+  assert.match(
+    processTree,
+    /const supervised =\s*process\.platform === "linux" \|\|/u,
+    "trusted Linux media tools must not execute directly as detached gcompat processes",
+  );
+});
+
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {
   const runtime = await text("scripts/compose-runtime-check.sh");
   assert.match(runtime, /docker compose build/u);

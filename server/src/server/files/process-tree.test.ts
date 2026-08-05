@@ -71,15 +71,15 @@ describe(
       const directory = await mkdtemp(path.join(os.tmpdir(), "fs-og-tree-"));
       temporaryDirectories.push(directory);
       const pidFile = path.join(directory, "pids.txt");
-      const childScript = path.join(directory, "child.mjs");
+      const childScript = path.join(directory, "child.sh");
       const launcherScript = path.join(directory, "launcher.mjs");
       await writeFile(
         childScript,
-        `import { appendFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nconst grandchild = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "ignore" });\nappendFileSync(process.argv[2], \` \${process.pid} \${grandchild.pid}\`);\nsetInterval(() => {}, 1000);\n`,
+        `#!/bin/sh\nsleep 1000 &\ngrandchild=$!\nprintf ' %s %s' "$$" "$grandchild" >> "$1"\nwait\n`,
       );
       await writeFile(
         launcherScript,
-        `import { writeFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nwriteFileSync(process.argv[2], String(process.pid));\nspawn(process.execPath, [process.argv[3], process.argv[2]], { stdio: "ignore" });\nsetInterval(() => {}, 1000);\n`,
+        `import { writeFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nwriteFileSync(process.argv[2], String(process.pid));\nspawn("/bin/sh", [process.argv[3], process.argv[2]], { stdio: "ignore" });\nsetInterval(() => {}, 1000);\n`,
       );
 
       const rssBefore = process.memoryUsage().rss;
