@@ -174,15 +174,16 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
         ),
         "utf8",
       ),
-    ) as { revision: string; sha256: string; cardBase64: string };
+    ) as {
+      revision: string;
+      sha256: string;
+      preview: Record<string, unknown>;
+      cardBase64?: string;
+    };
     assert.equal(artifact.revision, "og-v2-881d043");
     assert.equal(artifact.sha256, file.sha256);
-    assert.equal(
-      Buffer.from(artifact.cardBase64, "base64")
-        .subarray(1, 4)
-        .toString("ascii"),
-      "PNG",
-    );
+    assert.ok(Object.keys(artifact.preview).length > 0);
+    assert.equal(artifact.cardBase64, undefined);
   });
 
   it("filters by query, glob, AND tags, visibility, and cursor", async () => {

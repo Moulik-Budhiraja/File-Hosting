@@ -14,7 +14,6 @@ import {
   type PreviewExtraction,
   type PreviewVisual,
 } from "./preview-renderers";
-import { renderOgImage } from "./og-image";
 import type { FileService } from "./service";
 import {
   captureSourceIdentity,
@@ -22,14 +21,14 @@ import {
   type SourceIdentity,
 } from "./source-state";
 import type { StoredFile } from "./types";
-import { buildUnfurlModel } from "./unfurl";
 
 const ARTIFACT_REVISION = "og-v2-881d043";
 export const PREVIEW_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024;
 
 export interface PreparedUnfurlArtifact {
   preview: PreviewExtraction;
-  card: Buffer;
+  card?: Buffer;
+  sourceIdentity: SourceIdentity;
 }
 
 type SerializedVisual =
@@ -44,7 +43,7 @@ interface SerializedArtifact {
   sha256: string;
   sourceIdentity: Record<keyof SourceIdentity, string>;
   preview: Omit<PreviewExtraction, "visual"> & { visual: SerializedVisual };
-  cardBase64: string;
+  cardBase64?: string;
 }
 
 function serializeSourceIdentity(
@@ -93,6 +92,7 @@ function serialize(preview: PreviewExtraction): SerializedArtifact["preview"] {
 function deserialize(
   artifact: SerializedArtifact,
   file: StoredFile,
+  sourceIdentity: SourceIdentity,
 ): PreparedUnfurlArtifact | null {
   if (
     artifact.revision !== ARTIFACT_REVISION ||
@@ -112,18 +112,27 @@ function deserialize(
     const raster = Buffer.from(visual.rasterBase64, "base64");
     if (raster.length === 0 || raster.length > PREVIEW_ARTIFACT_MAX_BYTES)
       return null;
-    const card = Buffer.from(artifact.cardBase64, "base64");
-    if (card.length === 0 || card.length > PREVIEW_ARTIFACT_MAX_BYTES)
+    const card = artifact.cardBase64
+      ? Buffer.from(artifact.cardBase64, "base64")
+      : undefined;
+    if (card && (card.length === 0 || card.length > PREVIEW_ARTIFACT_MAX_BYTES))
       return null;
     return {
       preview: { ...artifact.preview, visual: { kind: visual.kind, raster } },
       card,
+      sourceIdentity,
     };
   }
-  const card = Buffer.from(artifact.cardBase64, "base64");
-  if (card.length === 0 || card.length > PREVIEW_ARTIFACT_MAX_BYTES)
+  const card = artifact.cardBase64
+    ? Buffer.from(artifact.cardBase64, "base64")
+    : undefined;
+  if (card && (card.length === 0 || card.length > PREVIEW_ARTIFACT_MAX_BYTES))
     return null;
-  return { preview: artifact.preview as PreviewExtraction, card };
+  return {
+    preview: artifact.preview as PreviewExtraction,
+    card,
+    sourceIdentity,
+  };
 }
 
 export async function readUnfurlArtifact(
@@ -137,7 +146,7 @@ export async function readUnfurlArtifact(
     const artifact = JSON.parse(bytes.toString("utf8")) as SerializedArtifact;
     const expected = deserializeSourceIdentity(artifact.sourceIdentity);
     if (!(await sourceIdentityMatches(service, file, expected))) return null;
-    return deserialize(artifact, file);
+    return deserialize(artifact, file, expected);
   } catch {
     return null;
   }
@@ -158,11 +167,20 @@ export async function prepareUnfurlArtifact(
     sha256: file.sha256,
     sourcePath: service.storagePath(file),
   });
-  const model = await buildUnfurlModel(service, file, preview);
-  const card = await renderOgImage(service, file, model);
-  const filename = artifactPath(service, file);
   if (!(await sourceIdentityMatches(service, file, sourceIdentity)))
     throw new Error("preview source changed during extraction");
+  await writeArtifact(service, file, preview, sourceIdentity);
+  return { preview, sourceIdentity };
+}
+
+async function writeArtifact(
+  service: FileService,
+  file: StoredFile,
+  preview: PreviewExtraction,
+  sourceIdentity: SourceIdentity,
+  card?: Buffer,
+): Promise<void> {
+  const filename = artifactPath(service, file);
   await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
   const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const bytes = Buffer.from(
@@ -171,7 +189,7 @@ export async function prepareUnfurlArtifact(
       sha256: file.sha256,
       sourceIdentity: serializeSourceIdentity(sourceIdentity),
       preview: serialize(preview),
-      cardBase64: card.toString("base64"),
+      ...(card ? { cardBase64: card.toString("base64") } : {}),
     } satisfies SerializedArtifact),
   );
   if (bytes.length > PREVIEW_ARTIFACT_MAX_BYTES)
@@ -182,7 +200,24 @@ export async function prepareUnfurlArtifact(
   } finally {
     await unlink(temporary).catch(() => undefined);
   }
-  return { preview, card };
+}
+
+export async function persistUnfurlCard(
+  service: FileService,
+  file: StoredFile,
+  artifact: PreparedUnfurlArtifact,
+  card: Buffer,
+): Promise<PreparedUnfurlArtifact> {
+  if (!(await sourceIdentityMatches(service, file, artifact.sourceIdentity)))
+    throw new Error("preview source changed during rendering");
+  await writeArtifact(
+    service,
+    file,
+    artifact.preview,
+    artifact.sourceIdentity,
+    card,
+  );
+  return { ...artifact, card };
 }
 
 export async function removePreviewArtifact(

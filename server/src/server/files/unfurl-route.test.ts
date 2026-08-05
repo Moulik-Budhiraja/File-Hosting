@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { crc32 } from "node:zlib";
@@ -824,6 +824,20 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       .toBuffer();
     assert.deepEqual([...corner], [0x0d, 0x0e, 0x10]);
     assert.deepEqual(firstBytes, secondBytes);
+    const persisted = JSON.parse(
+      await readFile(
+        path.join(
+          service.config.storageDir,
+          ".unfurl-artifacts",
+          `${file.id}-${file.sha256}-og-v2-881d043.json`,
+        ),
+        "utf8",
+      ),
+    ) as { cardBase64?: string };
+    assert.deepEqual(
+      Buffer.from(persisted.cardBase64 ?? "", "base64"),
+      firstBytes,
+    );
     for (const forbidden of [
       file.id,
       file.sha256,
