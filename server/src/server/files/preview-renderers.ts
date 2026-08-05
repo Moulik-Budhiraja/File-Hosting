@@ -636,13 +636,22 @@ function mediaEnvironment(): NodeJS.ProcessEnv {
 
 export function warmPreviewMediaTools(): Promise<void> {
   mediaWarmup ??= (async () => {
-    for (const command of [packagedFfprobe, packagedFfmpeg]) {
-      await runKillableProcess(command, ["-version"], {
-        timeoutMs: MEDIA_WARMUP_TIMEOUT_MS,
-        maxOutputBytes: 256 * 1024,
-        env: mediaEnvironment(),
-        allowSandboxForks: true,
-      });
+    for (const [label, command] of [
+      ["ffprobe", packagedFfprobe],
+      ["ffmpeg", packagedFfmpeg],
+    ] as const) {
+      try {
+        await runKillableProcess(command, ["-version"], {
+          timeoutMs: MEDIA_WARMUP_TIMEOUT_MS,
+          maxOutputBytes: 256 * 1024,
+          env: mediaEnvironment(),
+          allowSandboxForks: true,
+        });
+      } catch (error) {
+        const reason =
+          error instanceof ProcessExecutionError ? error.message : "unknown error";
+        throw new ProcessExecutionError(`${label} warmup failed: ${reason}`);
+      }
     }
   })();
   return mediaWarmup;
