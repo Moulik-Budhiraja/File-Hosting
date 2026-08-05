@@ -672,9 +672,12 @@ describe("actual-byte preview derivation", () => {
   });
 
   it("derives bounded TAR.GZ metadata from compressed bytes", async () => {
-    const first = gzipSync(tarWithEntry("manifest.json", "one"), {
-      level: 9,
-    });
+    const first = gzipSync(
+      tarWithEntry("private/customer/manifest.json", "one"),
+      {
+        level: 9,
+      },
+    );
     const second = gzipSync(tarWithEntry("database.sql", "two"), {
       level: 9,
     });
@@ -690,6 +693,20 @@ describe("actual-byte preview derivation", () => {
       assert.deepEqual(one.visual.entries, ["manifest.json"]);
       assert.deepEqual(two.visual.entries, ["database.sql"]);
     }
+  });
+
+  it("removes locator-shaped TAR.GZ entry names from public archive models", async () => {
+    const extraction = await derivePreview(
+      await fixture(
+        gzipSync(tarWithEntry("private/customer/urn:private-token", "one"), {
+          level: 9,
+        }),
+        "application/gzip",
+        "site-backup.tar.gz",
+      ),
+    );
+    assert.notEqual(extraction.visual.kind, "archive");
+    assert.doesNotMatch(JSON.stringify(extraction), /urn:|private-token/u);
   });
 
   it("uses subtype labels, approved fact ordering, and byte-derived binary hex", async () => {

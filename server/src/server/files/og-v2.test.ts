@@ -596,6 +596,50 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
     assert.match(text, />            a/u);
   });
 
+  it("uses canonical Twemoji assets for FE0F-retaining ZWJ forms and alternate spellings", async () => {
+    const forms = "🏳️‍🌈 🏳‍🌈 ❤️‍🔥 ❤‍🔥";
+    const model = {
+      title: forms,
+      description: "TEXT · 1 B",
+      ogType: "article" as const,
+      twitterCard: "summary_large_image" as const,
+      canonicalUrl: "https://example.test/composed-emoji",
+      imageUrl: "https://example.test/og/composed-emoji.png",
+      imageAlt: "safe",
+      kind: "text" as const,
+      preview: {
+        family: "text" as const,
+        label: "TEXT",
+        title: forms,
+        facts: ["1 B"],
+        sourceDigest: "e".repeat(64),
+        visual: { kind: "text" as const, lines: [forms] },
+      },
+    };
+    const svg = composeOgCardSvg(model);
+    assert.equal(
+      (svg.toString("utf8").match(/data:image\/svg\+xml;base64/gu) ?? [])
+        .length,
+      8,
+      "every title and body form must resolve to the pinned FE0F-retaining artwork",
+    );
+    const [png, fallback] = await Promise.all([
+      renderSvgInWorker(svg),
+      renderSvgInWorker(
+        composeOgCardSvg({
+          ...model,
+          title: "□□□□",
+          preview: {
+            ...model.preview,
+            title: "□□□□",
+            visual: { kind: "text" as const, lines: ["□□□□"] },
+          },
+        }),
+      ),
+    ]);
+    assert.notDeepEqual(png, fallback);
+  });
+
   it("renders broad emoji, Japanese, Arabic, combining marks, and ZWJ clusters without tofu", async () => {
     const international = "🎉 ❤️ 🇯🇵 👨‍👩‍👧‍👦 日本語 العربية e\u0301";
     const model = {

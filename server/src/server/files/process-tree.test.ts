@@ -18,7 +18,7 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function waitForPids(file: string): Promise<number[]> {
+async function waitForPids(file: string, expected = 3): Promise<number[]> {
   for (let attempt = 0; attempt < 30; attempt += 1) {
     try {
       const values = (await readFile(file, "utf8"))
@@ -26,7 +26,7 @@ async function waitForPids(file: string): Promise<number[]> {
         .split(/\s+/u)
         .map(Number)
         .filter(Number.isSafeInteger);
-      if (values.length === 3) return values;
+      if (values.length === expected) return values;
     } catch {
       // Launcher has not populated the probe yet.
     }
@@ -62,6 +62,32 @@ it("reports a bounded exit reason without echoing command arguments", async () =
     },
   );
 });
+
+it(
+  "kills a Windows media worker and its native-style child before deadline settlement",
+  { skip: process.platform !== "win32" },
+  async () => {
+    const directory = await mkdtemp(path.join(os.tmpdir(), "fs-og-win-tree-"));
+    temporaryDirectories.push(directory);
+    const pidFile = path.join(directory, "pids.txt");
+    const launcher = path.join(directory, "launcher.mjs");
+    await writeFile(
+      launcher,
+      `import { appendFileSync } from "node:fs";\nimport { spawn } from "node:child_process";\nappendFileSync(process.argv[2], String(process.pid));\nconst child = spawn(process.execPath, ["-e", "setInterval(() => {}, 1000)"], { stdio: "inherit", windowsHide: true });\nappendFileSync(process.argv[2], \` \${child.pid}\`);\nsetInterval(() => {}, 1000);\n`,
+    );
+    const run = runKillableProcess(process.execPath, [launcher, pidFile], {
+      timeoutMs: 500,
+      maxOutputBytes: 1024,
+      allowSandboxForks: true,
+    });
+    const rejection = assert.rejects(run, ProcessDeadlineError);
+    const pids = await waitForPids(pidFile, 2);
+    await rejection;
+    for (const pid of pids) {
+      assert.equal(processExists(pid), false, `pid ${pid} survived timeout`);
+    }
+  },
+);
 
 describe(
   "hard OG render worker deadlines",

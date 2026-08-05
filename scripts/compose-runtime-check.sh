@@ -12,6 +12,7 @@ if ! command -v docker >/dev/null 2>&1 || ! docker compose version >/dev/null 2>
 fi
 
 temporary_root="$(mktemp -d "${TMPDIR:-/tmp}/file-hosting-compose-release.XXXXXX")"
+created_proxy_network=0
 export COMPOSE_PROJECT_NAME="file-hosting-release-${RANDOM}-$$"
 export FS_TOKEN="compose-release-synthetic-token-with-enough-entropy"
 export FS_PUBLIC_URL="http://127.0.0.1:39741"
@@ -21,9 +22,12 @@ export FS_FILES_DIR="$temporary_root/files"
 export FS_SQLITE_DIR="$temporary_root/sqlite"
 mkdir -p "$FS_FILES_DIR" "$FS_SQLITE_DIR"
 chmod 700 "$FS_FILES_DIR" "$FS_SQLITE_DIR"
-trap 'status=$?; if [[ $status -ne 0 ]]; then docker compose ps >&2 || true; docker compose logs --no-color --tail=200 server >&2 || true; fi; docker compose down --remove-orphans --volumes >/dev/null 2>&1 || true; rm -rf "$temporary_root"; exit $status' EXIT
+trap 'status=$?; if [[ $status -ne 0 ]]; then docker compose ps >&2 || true; docker compose logs --no-color --tail=200 server >&2 || true; fi; docker compose down --remove-orphans --volumes >/dev/null 2>&1 || true; if [[ "$created_proxy_network" == "1" ]]; then docker network rm nginx-proxy_default >/dev/null 2>&1 || true; fi; rm -rf "$temporary_root"; exit $status' EXIT
 
-docker network inspect nginx-proxy_default >/dev/null 2>&1 || docker network create nginx-proxy_default >/dev/null
+if ! docker network inspect nginx-proxy_default >/dev/null 2>&1; then
+  docker network create nginx-proxy_default >/dev/null
+  created_proxy_network=1
+fi
 docker compose build
 docker compose up -d
 

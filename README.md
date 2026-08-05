@@ -124,8 +124,9 @@ but the server does not claim containment for a descendant that deliberately
 creates a new session. The server never signals a stored process-group number after
 the launcher exit event, avoiding stale-PGID reuse signalling. Every platform has a
 hard promise-settlement bound and destroys inherited pipes before releasing pool
-accounting. Windows terminates only the immediate child. Extracted standalone tests
-exercise the production renderer path.
+accounting. Windows uses the native `taskkill /T /F` tree operation before releasing
+accounting, and its release check exercises a real worker/child deadline. Extracted
+standalone tests exercise the production renderer path.
 
 ## API overview
 

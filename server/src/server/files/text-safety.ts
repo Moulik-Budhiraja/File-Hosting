@@ -62,6 +62,9 @@ const UNSAFE_FILENAME_CHARACTER = /[\\/?#&=:]|[\p{Cc}\p{Cs}]/u;
 const QUERY_ASSIGNMENT = /\?[^\s]*[=&][^\s]*/u;
 const DEFANGED_SCHEME_LOCATOR =
   /^(?:https?|ftp|file)[-_][^\s.]+(?:\.[^\s.]+){2,}(?:[/?#][^\s]*)?$/iu;
+const COLON_SCHEME_LOCATOR = /^[a-z][a-z0-9+.-]{0,31}:[^\s]+$/iu;
+const QUERY_ONLY_LOCATOR = /^\?[^\s]+$/u;
+const FRAGMENT_ONLY_LOCATOR = /^#[a-z][a-z0-9._~-]{4,}$/iu;
 
 function isSafeFilename(token: string): boolean {
   return (
@@ -88,6 +91,9 @@ function isLocatorToken(token: string): boolean {
     DOMAIN_SUFFIXES.has(labels.at(-1) ?? "");
   return (
     DEFANGED_SCHEME_LOCATOR.test(token) ||
+    COLON_SCHEME_LOCATOR.test(token) ||
+    QUERY_ONLY_LOCATOR.test(token) ||
+    FRAGMENT_ONLY_LOCATOR.test(token) ||
     (!isSafeFilename(token) &&
       (QUERY_ASSIGNMENT.test(token) ||
         ABSOLUTE_LOCATOR.test(token) ||

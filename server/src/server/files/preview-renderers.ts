@@ -12,11 +12,7 @@ import {
   deriveRasterPreviewInWorker,
   inspectRasterInWorker,
 } from "./raster-worker";
-import {
-  sanitizeExcerptLine,
-  sanitizeLocatorFreeText,
-  sanitizePublicText,
-} from "./text-safety";
+import { sanitizeExcerptLine, sanitizeLocatorFreeText } from "./text-safety";
 
 export type PreviewFamily =
   | "image"
@@ -526,7 +522,10 @@ function tarEntries(source: Buffer): string[] {
       !rawName.includes("\\") &&
       !rawName.split("/").includes("..")
     ) {
-      const safe = sanitizePublicText(rawName, 200);
+      const safe = sanitizeLocatorFreeText(
+        rawName.split("/").at(-1) ?? "",
+        200,
+      );
       if (safe) entries.push(safe);
     }
     offset += 512 + Math.ceil(size / 512) * 512;

@@ -162,24 +162,49 @@ const EMOJI_DIRECTORY = path.resolve(
 const EMOJI_DATA = new Map<string, string | null>();
 
 function knownEmojiData(grapheme: string): string | undefined {
-  const asset = [...grapheme]
+  const codepoints = [...grapheme]
     .map((character) => character.codePointAt(0))
-    .filter((codepoint) => codepoint !== undefined && codepoint !== 0xfe0f)
-    .map((codepoint) => codepoint!.toString(16))
-    .join("-");
-  if (!asset) return undefined;
-  const cached = EMOJI_DATA.get(asset);
-  if (cached !== undefined) return cached ?? undefined;
-  try {
-    const data = `data:image/svg+xml;base64,${readFileSync(
-      path.join(EMOJI_DIRECTORY, `${asset}.svg`),
-    ).toString("base64")}`;
-    EMOJI_DATA.set(asset, data);
-    return data;
-  } catch {
-    EMOJI_DATA.set(asset, null);
-    return undefined;
+    .filter((codepoint): codepoint is number => codepoint !== undefined);
+  const canonical = codepoints.filter(
+    (codepoint, index) =>
+      codepoint !== 0xfe0f || codepoints[index + 1] === 0x200d,
+  );
+  const candidates = [canonical];
+  if (
+    canonical.some(
+      (codepoint, index) =>
+        codepoint === 0x200d && canonical[index - 1] !== 0xfe0f,
+    )
+  ) {
+    candidates.push(
+      canonical.flatMap((codepoint, index) =>
+        codepoint === 0x200d && canonical[index - 1] !== 0xfe0f
+          ? [0xfe0f, codepoint]
+          : [codepoint],
+      ),
+    );
   }
+  for (const candidate of candidates) {
+    const asset = candidate
+      .map((codepoint) => codepoint.toString(16))
+      .join("-");
+    if (!asset) continue;
+    const cached = EMOJI_DATA.get(asset);
+    if (cached !== undefined) {
+      if (cached) return cached;
+      continue;
+    }
+    try {
+      const data = `data:image/svg+xml;base64,${readFileSync(
+        path.join(EMOJI_DIRECTORY, `${asset}.svg`),
+      ).toString("base64")}`;
+      EMOJI_DATA.set(asset, data);
+      return data;
+    } catch {
+      EMOJI_DATA.set(asset, null);
+    }
+  }
+  return undefined;
 }
 
 interface TextLineStyle {

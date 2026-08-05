@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { performance } from "node:perf_hooks";
 import { describe, it } from "node:test";
 
-import { sanitizeExcerptLine } from "./text-safety";
+import { sanitizeExcerptLine, sanitizeLocatorFreeText } from "./text-safety";
 
 describe("bounded excerpt sanitization", () => {
   it("preserves structural punctuation and indentation while removing actual locators", () => {
@@ -63,6 +63,26 @@ describe("bounded excerpt sanitization", () => {
         /secret\.example|admin@|192\.168|\/etc\/|token=|key=/u,
       );
     }
+  });
+
+  it("removes colon-only, query-only, and fragment-only locators without stripping syntax", () => {
+    const source = [
+      "resolve urn:private-token safely",
+      "connect ssh:internal-host now",
+      "decode data:text/plain,secret later",
+      "open ?token then #internal",
+    ];
+    for (const line of source) {
+      const output = sanitizeExcerptLine(line, 320);
+      assert.doesNotMatch(output, /urn:|ssh:|data:|\?token|#internal/u);
+    }
+    assert.equal(
+      sanitizeLocatorFreeText("urn:private-token", 120, "File"),
+      "File",
+    );
+    assert.equal(sanitizeLocatorFreeText("#internal", 120, "File"), "File");
+    assert.equal(sanitizeExcerptLine("services:", 320), "services:");
+    assert.equal(sanitizeExcerptLine("color: #fff;", 320), "color: #fff;");
   });
 
   it("clamps adversarial lines before locator analysis with a live linear latency bound", () => {

@@ -1,5 +1,6 @@
-import { spawn } from "node:child_process";
+import { spawn, spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
+import path from "node:path";
 import { linuxSandboxArguments } from "../../../runtime/linux-sandbox.js";
 
 export interface KillableProcessOptions {
@@ -34,6 +35,24 @@ export class ProcessExecutionError extends Error {
 
 function killProcessTree(child: ReturnType<typeof spawn>): void {
   if (child.pid === undefined || child.exitCode !== null) return;
+  if (process.platform === "win32") {
+    const taskkill = path.win32.join(
+      process.env.SystemRoot ?? String.raw`C:\Windows`,
+      "System32",
+      "taskkill.exe",
+    );
+    const result = spawnSync(
+      taskkill,
+      ["/PID", String(child.pid), "/T", "/F"],
+      {
+        shell: false,
+        stdio: "ignore",
+        timeout: 5_000,
+        windowsHide: true,
+      },
+    );
+    if (result.status === 0) return;
+  }
   if (process.platform !== "win32") {
     try {
       process.kill(-child.pid, "SIGKILL");

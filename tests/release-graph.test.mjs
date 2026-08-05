@@ -297,8 +297,8 @@ test("PDF raster worker binds all standard families and preserves frozen Linux H
   );
   assert.match(
     worker,
-    /mappedHelveticaFont[\s\S]*context\.fillText[\s\S]*x \+ 0\.25/u,
-    "Linux Skia must receive the frozen quarter-pixel standard-font antialias compensation",
+    /context\.fillText[\s\S]*fontDescriptor\.get\.call\(context\)[\s\S]*includes\(STANDARD_HELVETICA_FAMILY\)[\s\S]*x \+ 0\.25/u,
+    "Linux Skia must derive compensation from the effective restored canvas font",
   );
   assert.match(runtimeAssets, /fonts\/NotoSansCJKjp-Regular\.otf/u);
   for (const asset of [
@@ -326,13 +326,18 @@ test("runtime assertion executes packaged media tools before server startup", as
   assert.match(runtimeAssets, /media-command-worker\.mjs/u);
 });
 
-test("native media tools run below the detached ownership supervisor", async () => {
+test("native media tools retain owned-tree cleanup on POSIX and Windows", async () => {
   const processTree = await text("server/src/server/files/process-tree.ts");
   assert.match(
     processTree,
     /const supervised =\s*process\.platform !== "win32" \|\|/u,
     "trusted media tools must not execute directly as detached child processes",
   );
+  assert.match(processTree, /taskkill\.exe/u);
+  assert.match(processTree, /\["\/PID", String\(child\.pid\), "\/T", "\/F"\]/u);
+  const workflow = await text(".github/workflows/release.yml");
+  assert.match(workflow, /runs-on: windows-latest/u);
+  assert.match(workflow, /process-tree\.test\.ts/u);
 });
 
 test("production image uses glibc for the frozen packaged media binaries", async () => {
@@ -361,6 +366,12 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
     "a failed container startup must expose logs before teardown",
   );
   assert.match(runtime, /trap .*docker compose down/u);
+  assert.match(runtime, /created_proxy_network=0/u);
+  assert.match(
+    runtime,
+    /created_proxy_network.*docker network rm nginx-proxy_default/su,
+    "the gate must remove only the external network it created",
+  );
   assert.match(runtime, /REQUIRE_DOCKER/u);
 });
 
