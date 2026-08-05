@@ -160,25 +160,50 @@ await mkdir(dataRoot, { recursive: true });
 
 const launchRoot = mode === "standalone" ? appRoot : serverRoot;
 if (mode === "standalone") {
-  for (const executable of [
-    path.join(
-      launchRoot,
-      "node_modules/ffprobe-static/bin",
-      process.platform,
-      process.arch,
-      process.platform === "win32" ? "ffprobe.exe" : "ffprobe",
-    ),
-    path.join(
-      launchRoot,
-      "node_modules/ffmpeg-static",
-      process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
-    ),
+  for (const [selector, executable] of [
+    [
+      "ffprobe",
+      path.join(
+        launchRoot,
+        "node_modules/ffprobe-static/bin",
+        process.platform,
+        process.arch,
+        process.platform === "win32" ? "ffprobe.exe" : "ffprobe",
+      ),
+    ],
+    [
+      "ffmpeg",
+      path.join(
+        launchRoot,
+        "node_modules/ffmpeg-static",
+        process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+      ),
+    ],
   ]) {
     const probe = spawnSync(executable, ["-version"], {
       encoding: "utf8",
       timeout: 20_000,
     });
     assert.equal(probe.status, 0, probe.stderr || probe.error?.message);
+    if (process.platform === "darwin") {
+      const sandboxedProbe = spawnSync(
+        "/usr/bin/sandbox-exec",
+        [
+          "-p",
+          "(version 1)(allow default)(deny network*)",
+          process.execPath,
+          path.join(launchRoot, "runtime/media-command-worker.mjs"),
+          selector,
+          "-version",
+        ],
+        { encoding: "utf8", timeout: 20_000 },
+      );
+      assert.equal(
+        sandboxedProbe.status,
+        0,
+        sandboxedProbe.stderr || sandboxedProbe.error?.message,
+      );
+    }
   }
 }
 const launchEntry =
