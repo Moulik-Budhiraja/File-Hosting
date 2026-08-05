@@ -317,13 +317,10 @@ test("PDF raster worker binds all standard families and preserves frozen Linux H
   }
 });
 
-test("production image provides the Linux compatibility layer required by packaged media tools", async () => {
-  const dockerfile = await text("server/Dockerfile");
-  assert.match(
-    dockerfile,
-    /apk add --no-cache[\s\S]*\bgcompat\b/u,
-    "Alpine must provide the glibc loader ABI used by ffmpeg-static and ffprobe-static",
-  );
+test("runtime assertion executes packaged media tools before server startup", async () => {
+  const runtimeAssets = await text("server/runtime/assert-runtime-assets.mjs");
+  assert.match(runtimeAssets, /spawnSync\(binary, \["-version"\]/u);
+  assert.match(runtimeAssets, /probe\.status !== 0/u);
 });
 
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {

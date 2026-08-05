@@ -1,4 +1,5 @@
 import { access } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
 import path from "node:path";
 
@@ -44,6 +45,19 @@ for (const binary of mediaBinaries) {
   }
   try {
     await access(binary);
+    const probe = spawnSync(binary, ["-version"], {
+      encoding: "utf8",
+      timeout: 5_000,
+      maxBuffer: 256 * 1024,
+    });
+    if (probe.status !== 0) {
+      const detail = (probe.error?.message || probe.stderr || "unknown error")
+        .replaceAll(/[\r\n]+/gu, " ")
+        .slice(0, 300);
+      missing.push(
+        `${path.relative(process.cwd(), binary)} is not executable (${detail})`,
+      );
+    }
   } catch {
     missing.push(path.relative(process.cwd(), binary));
   }
