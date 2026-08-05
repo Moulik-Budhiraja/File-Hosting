@@ -1192,7 +1192,9 @@ try {
     );
     assert.equal(produced.model.kind, item.expectedKind);
     assert.equal(visualKind(produced.direct.visual), item.expectedVisual);
+    process.stderr.write(`[design-audit] ${item.id}: repeat render start\n`);
     const repeated = await productionCard(item.name, item.mimeType, item.bytes);
+    process.stderr.write(`[design-audit] ${item.id}: repeat render complete\n`);
     assert.deepEqual(
       produced.card,
       repeated.card,
@@ -1398,10 +1400,14 @@ try {
       reviewMutants.lowContrastWaveform = lowContrastResult.reasons;
     }
 
+    process.stderr.write(`[design-audit] ${item.id}: mutation render start\n`);
     const mutation = await productionCard(
       item.name,
       item.mimeType,
       item.mutation,
+    );
+    process.stderr.write(
+      `[design-audit] ${item.id}: mutation render complete\n`,
     );
     assert.notDeepEqual(
       mutation.card,
