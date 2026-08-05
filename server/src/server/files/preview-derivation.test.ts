@@ -664,11 +664,16 @@ describe("actual-byte preview derivation", () => {
     }
   });
 
-  it("always checksum-binds sources above 25 MiB and rejects same-size replacement", async () => {
+  it("uses digest-bound metadata-only output above 25 MiB without reading replacement bytes", async () => {
     const original = Buffer.alloc(26 * 1024 * 1024, 0x61);
     const source = await fixture(original, "text/plain", "large.txt");
     await writeFile(source.sourcePath, Buffer.alloc(original.length, 0x62));
-    await assert.rejects(derivePreview(source), /preview source unavailable/u);
+    const preview = await derivePreview(source);
+    assert.equal(preview.family, "binary");
+    assert.equal(preview.label, "FILE");
+    assert.equal(preview.sourceDigest, source.sha256);
+    assert.deepEqual(preview.visual, { kind: "binary" });
+    assert.doesNotMatch(JSON.stringify(preview), /bbb/u);
   });
 
   it("derives bounded TAR.GZ metadata from compressed bytes", async () => {
@@ -771,17 +776,19 @@ describe("actual-byte preview derivation", () => {
     assert.equal(validatedTar.label, "TAR.GZ");
   });
 
-  it("checksum-binds a 26 MiB historical source and rejects a same-size replacement", async () => {
+  it("keeps a 26 MiB historical source metadata-only across same-size replacement", async () => {
     const original = Buffer.alloc(26 * 1024 * 1024, 0x61);
     const source = await fixture(
       original,
       "application/octet-stream",
       "historical.bin",
     );
-    const preview = await derivePreview(source);
-    assert.equal(preview.sourceDigest, source.sha256);
+    const before = await derivePreview(source);
+    assert.equal(before.sourceDigest, source.sha256);
+    assert.deepEqual(before.visual, { kind: "binary" });
     await writeFile(source.sourcePath, Buffer.alloc(original.length, 0x62));
-    await assert.rejects(derivePreview(source), /preview source unavailable/u);
+    const after = await derivePreview(source);
+    assert.deepEqual(after, before);
   });
 
   it("validates source checksum and generic facts without exposing raw bytes", async () => {
