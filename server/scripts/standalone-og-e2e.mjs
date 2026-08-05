@@ -159,6 +159,28 @@ await rm(dataRoot, { recursive: true, force: true });
 await mkdir(dataRoot, { recursive: true });
 
 const launchRoot = mode === "standalone" ? appRoot : serverRoot;
+if (mode === "standalone") {
+  for (const executable of [
+    path.join(
+      launchRoot,
+      "node_modules/ffprobe-static/bin",
+      process.platform,
+      process.arch,
+      process.platform === "win32" ? "ffprobe.exe" : "ffprobe",
+    ),
+    path.join(
+      launchRoot,
+      "node_modules/ffmpeg-static",
+      process.platform === "win32" ? "ffmpeg.exe" : "ffmpeg",
+    ),
+  ]) {
+    const probe = spawnSync(executable, ["-version"], {
+      encoding: "utf8",
+      timeout: 20_000,
+    });
+    assert.equal(probe.status, 0, probe.stderr || probe.error?.message);
+  }
+}
 const launchEntry =
   mode === "standalone"
     ? "server.js"
@@ -214,7 +236,7 @@ async function upload(name, mime, bytes) {
     },
   );
   const responseBody = await response.text();
-  assert.equal(response.status, 201, responseBody);
+  assert.equal(response.status, 201, `${responseBody}\n${logs}`);
   return JSON.parse(responseBody);
 }
 
@@ -266,12 +288,14 @@ async function cardFor(name, mime, bytes) {
       format: "png",
       hasAlpha: false,
     },
+    logs,
   );
   return { card, page };
 }
 
 try {
   await waitUntilReady();
+
   const alpha = await cardFor(
     "notes.md",
     "text/markdown",

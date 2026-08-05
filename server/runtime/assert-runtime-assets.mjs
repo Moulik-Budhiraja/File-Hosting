@@ -9,6 +9,7 @@ const required = [
   "font-probe-worker.mjs",
   "pdf-page-worker.mjs",
   "docx-text-worker.mjs",
+  "media-command-worker.mjs",
   "fonts/fonts.conf",
   "fonts/Inter.ttf",
   "fonts/Inter-OFL.txt",

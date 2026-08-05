@@ -321,14 +321,19 @@ test("runtime assertion executes packaged media tools before server startup", as
   const runtimeAssets = await text("server/runtime/assert-runtime-assets.mjs");
   assert.match(runtimeAssets, /spawnSync\(binary, \["-version"\]/u);
   assert.match(runtimeAssets, /probe\.status !== 0/u);
+  await assert.rejects(
+    text("server/src/instrumentation.ts"),
+    /ENOENT/u,
+    "Next must not race duplicate asynchronous media probes after start:verified",
+  );
 });
 
-test("Linux media tools run below the detached ownership supervisor", async () => {
+test("native media tools run below the detached ownership supervisor", async () => {
   const processTree = await text("server/src/server/files/process-tree.ts");
   assert.match(
     processTree,
-    /const supervised =\s*process\.platform === "linux" \|\|/u,
-    "trusted Linux media tools must not execute directly as detached gcompat processes",
+    /const supervised =\s*process\.platform !== "win32" \|\|/u,
+    "trusted media tools must not execute directly as detached child processes",
   );
 });
 

@@ -117,7 +117,7 @@ export async function runKillableProcess(
         ? [...sandboxRootArguments, command, ...arguments_]
         : [...arguments_];
     const supervised =
-      process.platform === "linux" || !options.allowSandboxForks;
+      process.platform !== "win32" || !options.allowSandboxForks;
     const child = spawn(
       supervised ? process.execPath : spawnCommand,
       supervised

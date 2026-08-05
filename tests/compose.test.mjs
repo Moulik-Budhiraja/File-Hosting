@@ -29,6 +29,7 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
     "runtime/font-probe-worker.mjs",
     "runtime/pdf-page-worker.mjs",
     "runtime/docx-text-worker.mjs",
+    "runtime/media-command-worker.mjs",
     "runtime/fonts/fonts.conf",
     "runtime/fonts/Inter.ttf",
     "runtime/fonts/Inter-OFL.txt",
@@ -86,7 +87,7 @@ test("production image installs the fonts used by generated cards", async () => 
     "utf8",
   );
 
-  assert.match(dockerfile, /apk add --no-cache[^\n]*bubblewrap/u);
-  assert.match(dockerfile, /apk add --no-cache[^\n]*font-noto/u);
-  assert.match(dockerfile, /apk add --no-cache[^\n]*font-noto-cjk/u);
+  assert.match(dockerfile, /apt-get install[\s\S]*bubblewrap/u);
+  assert.match(dockerfile, /apt-get install[\s\S]*fonts-noto-core/u);
+  assert.match(dockerfile, /apt-get install[\s\S]*fonts-noto-cjk/u);
 });

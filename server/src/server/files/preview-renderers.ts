@@ -599,8 +599,6 @@ const packagedFfprobe = path.resolve(
 );
 const MEDIA_TIMEOUT_MS = 2_500;
 const MEDIA_OUTPUT_LIMIT = 8 * 1024 * 1024;
-const MEDIA_WARMUP_TIMEOUT_MS = 10_000;
-let mediaWarmup: Promise<void> | undefined;
 
 function workerTemporaryRoot(): string {
   return process.platform === "linux" && process.env.NODE_ENV === "production"
@@ -632,31 +630,6 @@ function mediaEnvironment(): NodeJS.ProcessEnv {
     Object.assign(environment, { TMPDIR: "/tmp", TEMP: "/tmp", TMP: "/tmp" });
   }
   return environment;
-}
-
-export function warmPreviewMediaTools(): Promise<void> {
-  mediaWarmup ??= (async () => {
-    for (const [label, command] of [
-      ["ffprobe", packagedFfprobe],
-      ["ffmpeg", packagedFfmpeg],
-    ] as const) {
-      try {
-        await runKillableProcess(command, ["-version"], {
-          timeoutMs: MEDIA_WARMUP_TIMEOUT_MS,
-          maxOutputBytes: 256 * 1024,
-          env: mediaEnvironment(),
-          allowSandboxForks: true,
-        });
-      } catch (error) {
-        const reason =
-          error instanceof ProcessExecutionError
-            ? error.message
-            : "unknown error";
-        throw new ProcessExecutionError(`${label} warmup failed: ${reason}`);
-      }
-    }
-  })();
-  return mediaWarmup;
 }
 
 async function documentExcerpt(input: RendererInput): Promise<string[]> {
@@ -754,14 +727,30 @@ async function runMediaCommand(
   arguments_: readonly string[],
   maxOutputBytes: number,
 ): Promise<Buffer> {
+  const selector =
+    command === packagedFfprobe
+      ? "ffprobe"
+      : command === packagedFfmpeg
+        ? "ffmpeg"
+        : null;
+  if (!selector) throw new ProcessExecutionError();
   for (let attempt = 0; attempt < 2; attempt += 1) {
     try {
-      const result = await runKillableProcess(command, arguments_, {
-        timeoutMs: remainingExtractionMs(input),
-        maxOutputBytes,
-        env: mediaEnvironment(),
-        allowSandboxForks: true,
-      });
+      const result = await runKillableProcess(
+        process.execPath,
+        [
+          "--max-old-space-size=64",
+          path.resolve(process.cwd(), "runtime/media-command-worker.mjs"),
+          selector,
+          ...arguments_,
+        ],
+        {
+          timeoutMs: remainingExtractionMs(input),
+          maxOutputBytes,
+          env: mediaEnvironment(),
+          allowSandboxForks: true,
+        },
+      );
       return result.stdout;
     } catch (error) {
       if (
