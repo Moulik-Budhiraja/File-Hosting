@@ -116,10 +116,10 @@ The container drops every ordinary capability from its non-root server process a
 retains in the bounding set only Bubblewrap 0.8's required `SETGID`, `SETUID`,
 `NET_ADMIN`, `SYS_CHROOT`, `SYS_PTRACE`, and `SYS_ADMIN` capabilities for the sole
 setuid binary, `/usr/bin/bwrap`; every other setuid/setgid bit is removed during
-image construction. Docker's outer AppArmor profile is disabled because it denies
-the mount-namespace operations Bubblewrap needs; the server remains non-root with
-zero effective capabilities, and Bubblewrap supplies the inner no-network,
-read-only application sandbox.
+image construction. Docker's outer AppArmor and seccomp profiles are disabled
+because they deny the mount and pivot-root namespace operations Bubblewrap needs;
+the server remains non-root with zero effective capabilities, and Bubblewrap
+supplies the inner no-network, read-only application sandbox.
 Sandbox startup failure is fail-closed. Native media tools receive a private, mode-0600 snapshot
 path inside that restricted filesystem, fixed arguments, and
 FFmpeg's `file,pipe` protocol whitelist; snapshots are checksum-bound before and

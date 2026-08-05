@@ -364,8 +364,8 @@ test("production image uses glibc for the frozen packaged media binaries", async
   );
   assert.match(
     compose,
-    /security_opt:\s*\n\s*- apparmor=unconfined/u,
-    "the outer Docker AppArmor profile must not block Bubblewrap mount-namespace setup",
+    /security_opt:\s*\n\s*- apparmor=unconfined\s*\n\s*- seccomp=unconfined/u,
+    "Docker's outer AppArmor and seccomp profiles must not block Bubblewrap namespace setup",
   );
 });
 
@@ -396,6 +396,7 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
   );
   assert.match(runtime, /stat -c %a \/usr\/bin\/bwrap/u);
   assert.match(runtime, /\/proc\/self\/attr\/current[\s\S]*unconfined/u);
+  assert.match(runtime, /Seccomp[\s\S]*!==0/u);
   assert.match(
     runtime,
     /docker compose run --rm --no-deps --entrypoint node server runtime\/verify-linux-sandbox\.js/u,

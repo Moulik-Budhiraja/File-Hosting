@@ -18,6 +18,7 @@ services:
       - SYS_ADMIN
     security_opt:
       - apparmor=unconfined
+      - seccomp=unconfined
     environment:
       FS_TOKEN: ${FS_TOKEN:?Set FS_TOKEN in .env before starting the service}
       DATABASE_URL: ${DATABASE_URL:-file:/data/sqlite/files.db}
