@@ -94,7 +94,6 @@ try {
     if (!fontDescriptor?.get || !fontDescriptor.set) {
       throw new Error("canvas font contract unavailable");
     }
-    let usesPackagedStandardFont = false;
     Object.defineProperty(context, "font", {
       configurable: true,
       get() {
@@ -103,19 +102,9 @@ try {
       set(value) {
         const requested = String(value);
         const mapped = standardPdfFontFamily(requested);
-        usesPackagedStandardFont = mapped !== requested;
         fontDescriptor.set.call(context, mapped);
       },
     });
-    const nativeFillText = context.fillText.bind(context);
-    // The Linux Skia baseline sits four source pixels above the approved Darwin
-    // fallback. Correct that fixed raster offset before the shared page fit/crop.
-    context.fillText = (text, x, y, maxWidth) => {
-      const baseline = y + (usesPackagedStandardFont ? 4 : 0);
-      return maxWidth === undefined
-        ? nativeFillText(text, x, baseline)
-        : nativeFillText(text, x, baseline, maxWidth);
-    };
   }
   await page.render({ canvasContext: context, viewport }).promise;
   const image = context.getImageData(0, 0, canvas.width, canvas.height);

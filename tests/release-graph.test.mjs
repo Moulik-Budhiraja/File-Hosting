@@ -282,6 +282,11 @@ test("PDF raster worker forces Linux Helvetica through a packaged canvas font", 
     /standardPdfFontFamily/u,
     "the canvas font setter must map standard PDF families explicitly",
   );
+  assert.doesNotMatch(
+    worker,
+    /context\.fillText\s*=/u,
+    "the packaged font must retain the frozen PDF baseline instead of shifting text",
+  );
   assert.match(runtimeAssets, /fonts\/NotoSansCJKjp-Regular\.otf/u);
 });
 
