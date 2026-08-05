@@ -113,6 +113,37 @@ try {
   if (document.numPages < 1 || document.numPages > 10_000)
     throw new Error("invalid page count");
   const page = await document.getPage(1);
+  if (USE_PACKAGED_STANDARD_FONT) {
+    const operatorList = await page.getOperatorList();
+    const fontReferences = new Set();
+    for (const arguments_ of operatorList.argsArray) {
+      const pending = [arguments_];
+      while (pending.length > 0) {
+        const value = pending.pop();
+        if (typeof value === "string" && value.startsWith("g_")) {
+          fontReferences.add(value);
+        } else if (Array.isArray(value)) {
+          pending.push(...value);
+        }
+      }
+    }
+    for (const reference of fontReferences) {
+      let font;
+      try {
+        font = page.commonObjs.get(reference);
+      } catch {
+        continue;
+      }
+      if (!font?.missingFile || typeof font.name !== "string") continue;
+      const mapped = standardPdfFontFamily(`"${font.name}"`);
+      for (const family of standardFontRegistrations.keys()) {
+        if (mapped.includes(family)) {
+          registerStandardFontFamily(family);
+          break;
+        }
+      }
+    }
+  }
   const base = page.getViewport({ scale: 1 });
   if (
     !Number.isFinite(base.width) ||
@@ -148,12 +179,6 @@ try {
       set(value) {
         const requested = String(value);
         const mapped = standardPdfFontFamily(requested);
-        for (const family of standardFontRegistrations.keys()) {
-          if (mapped !== requested && mapped.includes(family)) {
-            registerStandardFontFamily(family);
-            break;
-          }
-        }
         mappedHelveticaFont =
           mapped !== requested && mapped.includes(STANDARD_HELVETICA_FAMILY);
         fontDescriptor.set.call(context, mapped);

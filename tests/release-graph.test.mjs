@@ -292,8 +292,8 @@ test("PDF raster worker binds all standard families and preserves frozen Linux H
   );
   assert.match(
     worker,
-    /set\(value\)[\s\S]*registerStandardFontFamily\(family\)/u,
-    "standard families must register lazily at the exact unembedded-font request",
+    /getOperatorList\(\)[\s\S]*missingFile[\s\S]*registerStandardFontFamily\(family\)/u,
+    "standard families must register from parsed missing-font objects before canvas rendering",
   );
   assert.match(
     worker,
