@@ -241,21 +241,48 @@ test("PDF raster worker canonicalizes transparent edge colors before white compo
   assert.match(worker, /image\.data\[offset \+ 3\] = 255/u);
 });
 
-test("PDF raster worker binds packaged standard fonts instead of platform fallbacks", async () => {
+test("PDF raster worker forces Linux Helvetica through a packaged canvas font", async () => {
   const [worker, runtimeAssets] = await Promise.all([
     text("server/runtime/pdf-page-worker.mjs"),
     text("server/runtime/assert-runtime-assets.mjs"),
   ]);
   assert.match(
     worker,
-    /standardFontDataUrl:\s*new URL\(\s*"\.\.\/node_modules\/pdfjs-dist\/standard_fonts\/",\s*import\.meta\.url,?\s*\)\.href/u,
-    "unembedded standard PDF fonts must resolve from pdfjs-dist rather than host fonts",
+    /GlobalFonts\.registerFromPath/u,
+    "the canvas process must register a packaged Helvetica substitute",
   );
   assert.match(
-    runtimeAssets,
-    /node_modules\/pdfjs-dist\/standard_fonts\/LiberationSans-Regular\.ttf/u,
-    "standalone startup must fail closed when the canonical Helvetica substitute is absent",
+    worker,
+    /process\.platform === "linux"/u,
+    "the repair must preserve the approved Darwin renderer pixels",
   );
+  assert.match(
+    worker,
+    /fonts\/NotoSansCJKjp-Regular\.otf/u,
+    "Linux must use the already packaged deterministic sans font",
+  );
+  assert.match(
+    worker,
+    /"PdfStandardHelvetica"/u,
+    "unembedded Helvetica must use a private deterministic canvas family",
+  );
+  assert.match(
+    worker,
+    /disableFontFace:\s*true/u,
+    "embedded PDF fonts must retain deterministic glyph-path rendering",
+  );
+  assert.match(worker, /useSystemFonts:\s*false/u);
+  assert.doesNotMatch(
+    worker,
+    /standardFontDataUrl/u,
+    "unembedded standard fonts must not switch between loaded glyph paths and host fallback based on checkout path",
+  );
+  assert.match(
+    worker,
+    /standardPdfFontFamily/u,
+    "the canvas font setter must map standard PDF families explicitly",
+  );
+  assert.match(runtimeAssets, /fonts\/NotoSansCJKjp-Regular\.otf/u);
 });
 
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {

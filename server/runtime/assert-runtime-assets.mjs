@@ -49,7 +49,6 @@ for (const binary of mediaBinaries) {
   }
 }
 const packageAssets = [
-  "node_modules/pdfjs-dist/standard_fonts/LiberationSans-Regular.ttf",
   "node_modules/@twemoji/svg/package.json",
   "node_modules/@twemoji/svg/1f389.svg",
   "node_modules/@twemoji/svg/2764.svg",

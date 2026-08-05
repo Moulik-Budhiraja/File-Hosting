@@ -1,6 +1,13 @@
 import { writeSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 
-import { createCanvas, DOMMatrix, ImageData, Path2D } from "@napi-rs/canvas";
+import {
+  createCanvas,
+  DOMMatrix,
+  GlobalFonts,
+  ImageData,
+  Path2D,
+} from "@napi-rs/canvas";
 
 globalThis.DOMMatrix ??= DOMMatrix;
 globalThis.ImageData ??= ImageData;
@@ -14,6 +21,30 @@ console.warn = () => {};
 console.error = () => {};
 
 const MAX_PDF_BYTES = 25 * 1024 * 1024;
+const USE_PACKAGED_STANDARD_FONT = process.platform === "linux";
+const STANDARD_HELVETICA_FAMILY = "PdfStandardHelvetica";
+if (
+  USE_PACKAGED_STANDARD_FONT &&
+  !GlobalFonts.registerFromPath(
+    fileURLToPath(
+      new URL("./fonts/NotoSansCJKjp-Regular.otf", import.meta.url),
+    ),
+    STANDARD_HELVETICA_FAMILY,
+  )
+) {
+  throw new Error("standard PDF font registration failed");
+}
+
+function standardPdfFontFamily(value) {
+  if (!/"Helvetica(?:-(?:Bold|Oblique|BoldOblique))?"/u.test(value)) {
+    return value;
+  }
+  return value.replace(
+    /"Helvetica(?:-(?:Bold|Oblique|BoldOblique))?"(?:,[^,]+)*$/u,
+    `"${STANDARD_HELVETICA_FAMILY}"`,
+  );
+}
+
 const chunks = [];
 let bytes = 0;
 
@@ -26,10 +57,6 @@ try {
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const loadingTask = getDocument({
     data: new Uint8Array(Buffer.concat(chunks)),
-    standardFontDataUrl: new URL(
-      "../node_modules/pdfjs-dist/standard_fonts/",
-      import.meta.url,
-    ).href,
     disableFontFace: true,
     disableRange: true,
     disableStream: true,
@@ -59,6 +86,37 @@ try {
     Math.ceil(viewport.height),
   );
   const context = canvas.getContext("2d");
+  if (USE_PACKAGED_STANDARD_FONT) {
+    const fontDescriptor = Object.getOwnPropertyDescriptor(
+      Object.getPrototypeOf(context),
+      "font",
+    );
+    if (!fontDescriptor?.get || !fontDescriptor.set) {
+      throw new Error("canvas font contract unavailable");
+    }
+    let usesPackagedStandardFont = false;
+    Object.defineProperty(context, "font", {
+      configurable: true,
+      get() {
+        return fontDescriptor.get.call(context);
+      },
+      set(value) {
+        const requested = String(value);
+        const mapped = standardPdfFontFamily(requested);
+        usesPackagedStandardFont = mapped !== requested;
+        fontDescriptor.set.call(context, mapped);
+      },
+    });
+    const nativeFillText = context.fillText.bind(context);
+    // The Linux Skia baseline sits four source pixels above the approved Darwin
+    // fallback. Correct that fixed raster offset before the shared page fit/crop.
+    context.fillText = (text, x, y, maxWidth) => {
+      const baseline = y + (usesPackagedStandardFont ? 4 : 0);
+      return maxWidth === undefined
+        ? nativeFillText(text, x, baseline)
+        : nativeFillText(text, x, baseline, maxWidth);
+    };
+  }
   await page.render({ canvasContext: context, viewport }).promise;
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
   for (let offset = 0; offset < image.data.length; offset += 4) {
