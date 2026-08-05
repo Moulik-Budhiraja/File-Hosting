@@ -341,6 +341,11 @@ test("production image uses glibc for the frozen packaged media binaries", async
   assert.match(dockerfile, /^FROM node:22-bookworm-slim AS builder/mu);
   assert.match(dockerfile, /^FROM node:22-bookworm-slim AS runner/mu);
   assert.doesNotMatch(dockerfile, /node:22-alpine|gcompat/u);
+  assert.match(
+    dockerfile,
+    /chmod 4755 \/usr\/bin\/bwrap/u,
+    "the non-root runtime must retain Bubblewrap's privileged launcher mode when nested user namespaces are unavailable",
+  );
 });
 
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {

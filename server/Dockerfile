@@ -22,6 +22,7 @@ RUN apt-get update \
         bubblewrap \
         fonts-noto-cjk \
         fonts-noto-core \
+    && chmod 4755 /usr/bin/bwrap \
     && rm -rf /var/lib/apt/lists/*
 RUN groupadd --gid 1001 nodejs \
     && useradd --uid 1001 --gid nodejs --create-home --shell /usr/sbin/nologin nextjs \
