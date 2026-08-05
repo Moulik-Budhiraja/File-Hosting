@@ -92,7 +92,7 @@ describe(
           const run = renderSvgInWorker(Buffer.from("<svg/>"), {
             workerPath: launcherScript,
             workerArguments: [pidFile, childScript],
-            timeoutMs: 150,
+            timeoutMs: 500,
             allowSubprocesses: true,
           });
           const rejection = assert.rejects(run, ProcessDeadlineError);
