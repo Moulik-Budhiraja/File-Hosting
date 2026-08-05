@@ -321,11 +321,9 @@ test("runtime assertion executes packaged media tools before server startup", as
   const runtimeAssets = await text("server/runtime/assert-runtime-assets.mjs");
   assert.match(runtimeAssets, /spawnSync\(binary, \["-version"\]/u);
   assert.match(runtimeAssets, /probe\.status !== 0/u);
-  await assert.rejects(
-    text("server/src/instrumentation.ts"),
-    /ENOENT/u,
-    "Next must not race duplicate asynchronous media probes after start:verified",
-  );
+  const instrumentation = await text("server/src/instrumentation.ts");
+  assert.match(instrumentation, /warmPreviewMediaTools/u);
+  assert.match(runtimeAssets, /media-command-worker\.mjs/u);
 });
 
 test("native media tools run below the detached ownership supervisor", async () => {

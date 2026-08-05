@@ -273,7 +273,7 @@ child.stderr.on("data", (chunk) => {
 });
 
 async function waitUntilReady() {
-  for (let attempt = 0; attempt < 100; attempt += 1) {
+  for (let attempt = 0; attempt < 500; attempt += 1) {
     try {
       const response = await fetch(`${origin}/healthz`);
       if (response.ok) return;

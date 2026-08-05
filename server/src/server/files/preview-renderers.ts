@@ -632,6 +632,52 @@ function mediaEnvironment(): NodeJS.ProcessEnv {
   return environment;
 }
 
+export async function warmPreviewMediaTools(): Promise<void> {
+  const fixture = path.resolve(process.cwd(), "runtime/media-preflight.mp4");
+  for (const selector of ["ffprobe", "ffmpeg"] as const) {
+    const arguments_ =
+      selector === "ffprobe"
+        ? [
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration",
+            "-of",
+            "json",
+            fixture,
+          ]
+        : [
+            "-v",
+            "error",
+            "-nostdin",
+            "-i",
+            fixture,
+            "-frames:v",
+            "1",
+            "-f",
+            "image2pipe",
+            "-vcodec",
+            "png",
+            "pipe:1",
+          ];
+    await runKillableProcess(
+      process.execPath,
+      [
+        "--max-old-space-size=64",
+        path.resolve(process.cwd(), "runtime/media-command-worker.mjs"),
+        selector,
+        ...arguments_,
+      ],
+      {
+        timeoutMs: 20_000,
+        maxOutputBytes: 256 * 1024,
+        env: mediaEnvironment(),
+        allowSandboxForks: true,
+      },
+    );
+  }
+}
+
 async function documentExcerpt(input: RendererInput): Promise<string[]> {
   const source = await readFullVerifiedSource(input);
   if (!source) return [];

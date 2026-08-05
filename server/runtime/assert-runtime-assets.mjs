@@ -10,6 +10,7 @@ const required = [
   "pdf-page-worker.mjs",
   "docx-text-worker.mjs",
   "media-command-worker.mjs",
+  "media-preflight.mp4",
   "fonts/fonts.conf",
   "fonts/Inter.ttf",
   "fonts/Inter-OFL.txt",

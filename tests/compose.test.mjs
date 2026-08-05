@@ -30,6 +30,7 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
     "runtime/pdf-page-worker.mjs",
     "runtime/docx-text-worker.mjs",
     "runtime/media-command-worker.mjs",
+    "runtime/media-preflight.mp4",
     "runtime/fonts/fonts.conf",
     "runtime/fonts/Inter.ttf",
     "runtime/fonts/Inter-OFL.txt",
