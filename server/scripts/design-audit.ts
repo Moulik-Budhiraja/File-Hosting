@@ -307,6 +307,7 @@ const audioArtworkMutation = await readFile(
 );
 const topBrand = { left: 48, top: 42, width: 230, height: 38 };
 const bottomBrand = { left: 900, top: 548, width: 258, height: 42 };
+process.stderr.write("[design-audit] fixtures prepared; constructing cases\n");
 const cases: AuditCase[] = [
   {
     id: "01-image-landscape",
@@ -521,6 +522,7 @@ const cases: AuditCase[] = [
     minimumPrimaryInk: 0.03,
   },
 ];
+process.stderr.write(`[design-audit] ${cases.length} cases constructed\n`);
 
 // The direct review specifically supersedes title-glyph edge treatment across
 // every card. Keep Paper geometry, but admit the corrected production-font
@@ -1181,7 +1183,13 @@ const blank = await sharp({
 const mutationProofs: Record<string, unknown> = {};
 try {
   for (const item of cases) {
+    process.stderr.write(
+      `[design-audit] ${item.id}: production render start\n`,
+    );
     const produced = await productionCard(item.name, item.mimeType, item.bytes);
+    process.stderr.write(
+      `[design-audit] ${item.id}: production render complete\n`,
+    );
     assert.equal(produced.model.kind, item.expectedKind);
     assert.equal(visualKind(produced.direct.visual), item.expectedVisual);
     const repeated = await productionCard(item.name, item.mimeType, item.bytes);
