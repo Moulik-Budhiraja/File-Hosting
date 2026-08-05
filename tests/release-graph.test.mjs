@@ -282,10 +282,10 @@ test("PDF raster worker forces Linux Helvetica through a packaged canvas font", 
     /standardPdfFontFamily/u,
     "the canvas font setter must map standard PDF families explicitly",
   );
-  assert.doesNotMatch(
+  assert.match(
     worker,
-    /context\.fillText\s*=/u,
-    "the packaged font must retain the frozen PDF baseline instead of shifting text",
+    /mappedStandardFont[\s\S]*context\.fillText[\s\S]*x \+ 0\.25/u,
+    "Linux Skia must receive the frozen quarter-pixel standard-font antialias compensation",
   );
   assert.match(runtimeAssets, /fonts\/NotoSansCJKjp-Regular\.otf/u);
 });

@@ -94,6 +94,7 @@ try {
     if (!fontDescriptor?.get || !fontDescriptor.set) {
       throw new Error("canvas font contract unavailable");
     }
+    let mappedStandardFont = false;
     Object.defineProperty(context, "font", {
       configurable: true,
       get() {
@@ -102,9 +103,23 @@ try {
       set(value) {
         const requested = String(value);
         const mapped = standardPdfFontFamily(requested);
+        mappedStandardFont = mapped !== requested;
         fontDescriptor.set.call(context, mapped);
       },
     });
+    const nativeFillText = context.fillText.bind(context);
+    context.fillText = (text, x, y, maxWidth) => {
+      if (maxWidth === undefined) {
+        nativeFillText(text, x, y);
+        return mappedStandardFont
+          ? nativeFillText(text, x + 0.25, y)
+          : undefined;
+      }
+      nativeFillText(text, x, y, maxWidth);
+      return mappedStandardFont
+        ? nativeFillText(text, x + 0.25, y, maxWidth)
+        : undefined;
+    };
   }
   await page.render({ canvasContext: context, viewport }).promise;
   const image = context.getImageData(0, 0, canvas.width, canvas.height);
