@@ -160,6 +160,8 @@ await mkdir(dataRoot, { recursive: true });
 
 const launchRoot = mode === "standalone" ? appRoot : serverRoot;
 if (mode === "standalone") {
+  await video();
+  const mediaFixture = path.join(e2eRoot, "fixture.mp4");
   for (const [selector, executable] of [
     [
       "ffprobe",
@@ -186,6 +188,40 @@ if (mode === "standalone") {
     });
     assert.equal(probe.status, 0, probe.stderr || probe.error?.message);
     if (process.platform === "darwin") {
+      const mediaArguments =
+        selector === "ffprobe"
+          ? [
+              "-v",
+              "error",
+              "-protocol_whitelist",
+              "file,pipe",
+              "-show_entries",
+              "format=duration:stream=codec_type,width,height",
+              "-of",
+              "json",
+              mediaFixture,
+            ]
+          : [
+              "-v",
+              "error",
+              "-nostdin",
+              "-protocol_whitelist",
+              "file,pipe",
+              "-i",
+              mediaFixture,
+              "-frames:v",
+              "1",
+              "-vf",
+              "scale=1200:630:force_original_aspect_ratio=increase,crop=1200:630",
+              "-an",
+              "-sn",
+              "-dn",
+              "-f",
+              "image2pipe",
+              "-vcodec",
+              "png",
+              "pipe:1",
+            ];
       const sandboxedProbe = spawnSync(
         "/usr/bin/sandbox-exec",
         [
@@ -194,14 +230,14 @@ if (mode === "standalone") {
           process.execPath,
           path.join(launchRoot, "runtime/media-command-worker.mjs"),
           selector,
-          "-version",
+          ...mediaArguments,
         ],
-        { encoding: "utf8", timeout: 20_000 },
+        { encoding: null, maxBuffer: 8 * 1024 * 1024, timeout: 20_000 },
       );
       assert.equal(
         sandboxedProbe.status,
         0,
-        sandboxedProbe.stderr || sandboxedProbe.error?.message,
+        `${selector}: ${sandboxedProbe.stderr?.toString() || sandboxedProbe.error?.message || "failed"}`,
       );
     }
   }
