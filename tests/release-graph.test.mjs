@@ -332,6 +332,14 @@ test("Linux media tools run below the detached ownership supervisor", async () =
   );
 });
 
+test("production image uses glibc for the frozen packaged media binaries", async () => {
+  const dockerfile = await text("server/Dockerfile");
+  assert.match(dockerfile, /^FROM node:22-bookworm-slim AS dependencies/mu);
+  assert.match(dockerfile, /^FROM node:22-bookworm-slim AS builder/mu);
+  assert.match(dockerfile, /^FROM node:22-bookworm-slim AS runner/mu);
+  assert.doesNotMatch(dockerfile, /node:22-alpine|gcompat/u);
+});
+
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {
   const runtime = await text("scripts/compose-runtime-check.sh");
   assert.match(runtime, /docker compose build/u);
