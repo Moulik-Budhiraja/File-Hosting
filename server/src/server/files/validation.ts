@@ -1,8 +1,6 @@
 import { AppError } from "./errors";
+import { hasUnsafeDisplayText } from "./text-safety";
 import { BASE62_ID_PATTERN, type ArchiveType, type Visibility } from "./types";
-
-const CONTROL_CHARACTER = /[\u0000-\u001f\u007f]/u;
-
 export function validateId(id: string): string {
   if (!BASE62_ID_PATTERN.test(id)) {
     throw new AppError(
@@ -32,8 +30,15 @@ export function validateFilename(name: string | null): string {
       "File name cannot exceed 255 UTF-8 bytes",
     );
   }
+  if (value.includes("\uFFFD") || /\p{Noncharacter_Code_Point}/u.test(value)) {
+    throw new AppError(
+      400,
+      "invalid_name",
+      "File name contains invalid Unicode scalar values",
+    );
+  }
   if (
-    CONTROL_CHARACTER.test(value) ||
+    hasUnsafeDisplayText(value) ||
     value.includes("/") ||
     value.includes("\\")
   ) {
@@ -59,7 +64,7 @@ export function validateTags(input: readonly unknown[]): string[] {
     if (
       !tag ||
       Buffer.byteLength(tag, "utf8") > 64 ||
-      CONTROL_CHARACTER.test(tag) ||
+      hasUnsafeDisplayText(tag) ||
       tag.includes(",")
     ) {
       throw new AppError(

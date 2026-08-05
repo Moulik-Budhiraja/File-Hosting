@@ -1,9 +1,18 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, readFile, rm, stat, writeFile } from "node:fs/promises";
+import {
+  mkdtemp,
+  readFile,
+  readdir,
+  rm,
+  stat,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { after, before, describe, it } from "node:test";
+
+import { PDFDocument } from "pdf-lib";
 
 import {
   DELETE as deleteFile,
@@ -50,6 +59,14 @@ describe("pure file helpers", () => {
     assert.equal(parseArchive("tar.gz"), "tar.gz");
     assert.equal(parseArchive(null), null);
     assert.throws(() => validateFilename("../secret"), /path separators/u);
+    assert.throws(() => validateFilename("replacement-\uFFFD.txt"), /Unicode/u);
+    assert.throws(
+      () => validateFilename("noncharacter-\uFFFF.txt"),
+      /Unicode/u,
+    );
+    assert.throws(() => validateFilename("c1-\u0085.txt"), /control/u);
+    assert.throws(() => validateFilename("line-\u2028.txt"), /control/u);
+    assert.throws(() => validateFilename("bidi-\u202Egpj.txt"), /control/u);
     assert.throws(() => validateTags(["bad,tag"]), /cannot contain commas/u);
     assert.throws(() => parseArchive("zip"), /tar\.gz/u);
   });
@@ -142,6 +159,31 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       "hello world",
     );
     assert.equal(service.toMetadata(file).archive, null);
+    const artifacts = await readdir(
+      path.join(service.config.storageDir, ".unfurl-artifacts"),
+    );
+    assert.deepEqual(artifacts, [
+      `${file.id}-${file.sha256}-og-v2-881d043.json`,
+    ]);
+    const artifact = JSON.parse(
+      await readFile(
+        path.join(
+          service.config.storageDir,
+          ".unfurl-artifacts",
+          artifacts[0]!,
+        ),
+        "utf8",
+      ),
+    ) as {
+      revision: string;
+      sha256: string;
+      preview: Record<string, unknown>;
+      cardBase64?: string;
+    };
+    assert.equal(artifact.revision, "og-v2-881d043");
+    assert.equal(artifact.sha256, file.sha256);
+    assert.ok(Object.keys(artifact.preview).length > 0);
+    assert.equal(artifact.cardBase64, undefined);
   });
 
   it("filters by query, glob, AND tags, visibility, and cursor", async () => {
@@ -374,6 +416,36 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.doesNotMatch(html, /<script>alert/u);
   });
 
+  it("permits the inline PDF raster in CSP while forbidding obsolete frames", async () => {
+    const document = await PDFDocument.create();
+    document.addPage([612, 792]);
+    const bytes = await document.save({ useObjectStreams: false });
+    async function* pdfBytes(): AsyncGenerator<Uint8Array> {
+      yield bytes;
+    }
+    const pdf = await service.upload(pdfBytes(), {
+      name: "responsive-report.pdf",
+      tags: ["responsive"],
+      visibility: "public",
+      archive: null,
+      mimeType: "application/pdf",
+      contentLength: bytes.length,
+    });
+    const response = await previewFile(
+      new Request(`http://localhost/${pdf.id}`),
+      routeContext(pdf.id),
+    );
+    assert.equal(response.status, 200);
+    const csp = response.headers.get("content-security-policy") ?? "";
+    assert.match(csp, /img-src 'self' data:/u);
+    assert.doesNotMatch(csp, /frame-src/u);
+    const html = await response.text();
+    assert.match(
+      html,
+      /class="pdf-page-preview"[^>]+src="data:image\/png;base64,/u,
+    );
+  });
+
   it("serves raw bytes, byte ranges, HEAD, security headers, and no-store caching", async () => {
     const full = await rawFile(
       new Request(`http://localhost/raw/${uploadedId}`),
@@ -470,9 +542,30 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       new Request("http://localhost/0000000"),
       routeContext("0000000"),
     );
-    assert.equal(hiddenPreview.status, 404);
-    assert.equal(missingPreview.status, 404);
-    assert.deepEqual(await hiddenPreview.json(), await missingPreview.json());
+    assert.equal(hiddenPreview.status, 200);
+    assert.equal(missingPreview.status, 200);
+    assert.deepEqual(
+      Object.fromEntries(hiddenPreview.headers),
+      Object.fromEntries(missingPreview.headers),
+    );
+    const hiddenPreviewBytes = Buffer.from(await hiddenPreview.arrayBuffer());
+    const missingPreviewBytes = Buffer.from(await missingPreview.arrayBuffer());
+    assert.deepEqual(hiddenPreviewBytes, missingPreviewBytes);
+    assert.equal(
+      hiddenPreview.headers.get("content-length"),
+      String(hiddenPreviewBytes.length),
+    );
+    assert.match(
+      hiddenPreview.headers.get("content-type") ?? "",
+      /^text\/html;/u,
+    );
+    const unavailableHtml = hiddenPreviewBytes.toString("utf8");
+    assert.match(unavailableHtml, /File unavailable/u);
+    assert.match(unavailableHtml, /Preview unavailable/u);
+    assert.doesNotMatch(
+      unavailableHtml,
+      new RegExp(`${uploadedId}|secret|text/plain`, "iu"),
+    );
 
     const authenticated = await rawFile(
       new Request(`http://localhost/raw/${uploadedId}`, {

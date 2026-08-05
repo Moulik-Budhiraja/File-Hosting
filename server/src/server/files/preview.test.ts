@@ -1,12 +1,15 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
 
+import { PDFDocument } from "pdf-lib";
+
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
-import { renderPreview } from "./preview";
+import { readPngDimensions, renderPreview } from "./preview";
 
 const temporaryDirectories: string[] = [];
 
@@ -59,6 +62,19 @@ afterEach(async () => {
 });
 
 describe("Markdown preview rendering", () => {
+  it("sanitizes and isolates hostile legacy filenames in every HTML sink", async () => {
+    const html = await render("plain body", {
+      name: "A\u0085B\u2028C\u202Egpj\u202C.bin",
+      mimeType: "text/plain",
+    });
+    assert.match(html, /<title>AB Cgpj\.bin<\/title>/u);
+    assert.match(html, /<h1 class="file-title" dir="auto">AB Cgpj\.bin<\/h1>/u);
+    assert.doesNotMatch(
+      html,
+      /[\u0080-\u009F\u061C\u200E\u200F\u2028\u2029\u202A-\u202E\u2066-\u2069]/u,
+    );
+  });
+
   it("renders core and GFM document semantics instead of source markers", async () => {
     const html = await render(`# Heading one
 
@@ -233,6 +249,79 @@ const value = "safe";
     assert.match(html, /@media\s*\(forced-colors:\s*active\)/u);
     assert.match(html, /:focus-visible/u);
     assert.match(html, /overflow-x:\s*clip/u);
+  });
+
+  it("renders a bounded first-page PDF raster instead of a mobile-overflowing native frame", async () => {
+    const document = await PDFDocument.create();
+    document.addPage([612, 792]);
+    const pdf = Buffer.from(await document.save({ useObjectStreams: false }));
+    const html = await render(pdf, {
+      name: `${"long-研究-".repeat(25)}report.pdf`,
+      mimeType: "application/pdf",
+      tags: ["portable", "x".repeat(160)],
+      sha256: createHash("sha256").update(pdf).digest("hex"),
+    });
+
+    assert.doesNotMatch(html, /<(?:iframe|object|embed)\b/iu);
+    assert.match(html, /class="pdf-page-shell"/u);
+    assert.match(html, /class="pdf-page-preview"/u);
+    assert.match(
+      html,
+      /\.pdf-page-preview\s*\{[^}]*display:\s*block;[^}]*height:\s*auto;[^}]*max-width:\s*100%;[^}]*object-fit:\s*contain;[^}]*width:\s*100%;/u,
+    );
+    assert.match(
+      html,
+      /\.pdf-page-shell\s*\{[^}]*margin:\s*0 auto;[^}]*max-width:[^;}]+;[^}]*min-width:\s*0;[^}]*width:\s*100%;/u,
+    );
+    assert.match(
+      html,
+      /\.metadata-break\s*\{[^}]*overflow-wrap:\s*anywhere;[^}]*word-break:\s*break-word;/u,
+    );
+    assert.match(
+      html,
+      /<meta name="viewport" content="width=device-width, initial-scale=1">/u,
+    );
+  });
+
+  it("rejects malformed PNG headers before trusting intrinsic dimensions", () => {
+    const fake = Buffer.alloc(24);
+    fake.writeUInt32BE(1200, 16);
+    fake.writeUInt32BE(630, 20);
+    assert.equal(readPngDimensions(fake), null);
+
+    const truncatedIhdr = Buffer.alloc(24);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(truncatedIhdr);
+    truncatedIhdr.writeUInt32BE(13, 8);
+    truncatedIhdr.write("IHDR", 12, "ascii");
+    truncatedIhdr.writeUInt32BE(1200, 16);
+    truncatedIhdr.writeUInt32BE(630, 20);
+    assert.equal(readPngDimensions(truncatedIhdr), null);
+
+    const invalidChunk = Buffer.alloc(33);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(invalidChunk);
+    invalidChunk.writeUInt32BE(12, 8);
+    invalidChunk.write("IHDR", 12, "ascii");
+    invalidChunk.writeUInt32BE(1200, 16);
+    invalidChunk.writeUInt32BE(630, 20);
+    assert.equal(readPngDimensions(invalidChunk), null);
+
+    const badCrc = Buffer.alloc(33);
+    Buffer.from("89504e470d0a1a0a", "hex").copy(badCrc);
+    badCrc.writeUInt32BE(13, 8);
+    badCrc.write("IHDR", 12, "ascii");
+    badCrc.writeUInt32BE(1200, 16);
+    badCrc.writeUInt32BE(630, 20);
+    assert.equal(readPngDimensions(badCrc), null);
+  });
+
+  it("keeps PDF metadata and download access when first-page extraction fails", async () => {
+    const html = await render(Buffer.from("%PDF-malformed"), {
+      name: "still-downloadable.pdf",
+      mimeType: "application/pdf",
+    });
+    assert.match(html, /No browser preview is available for this PDF\./u);
+    assert.match(html, /Open raw file/u);
+    assert.match(html, /still-downloadable\.pdf/u);
   });
 
   it("retains a visible truncation disclosure at the 256 KiB read cap", async () => {

@@ -77,7 +77,11 @@ const upload = await fetch(
   },
 );
 const uploadBody = await upload.text();
-assert.equal(upload.status, 201, `upload failed: ${upload.status} ${uploadBody}`);
+assert.equal(
+  upload.status,
+  201,
+  `upload failed: ${upload.status} ${uploadBody}`,
+);
 const file = JSON.parse(uploadBody);
 assert.match(file.id, /^[A-Za-z0-9]{7}$/u);
 
@@ -111,26 +115,58 @@ try {
     assert.equal(headers["cache-control"], "no-store");
     assert.equal(headers["x-content-type-options"], "nosniff");
     assert.equal(headers["referrer-policy"], "no-referrer");
-    assert.match(headers["content-security-policy"] ?? "", /default-src 'none'/u);
-    assert.match(headers["content-security-policy"] ?? "", /frame-ancestors 'none'/u);
+    assert.match(
+      headers["content-security-policy"] ?? "",
+      /default-src 'none'/u,
+    );
+    assert.match(
+      headers["content-security-policy"] ?? "",
+      /frame-ancestors 'none'/u,
+    );
 
-    assert.equal(await page.locator("article.markdown-body h1").textContent(), "Production Markdown probe");
+    assert.equal(
+      await page.locator("article.markdown-body h1").textContent(),
+      "Production Markdown probe",
+    );
     assert.equal(await page.locator("article.markdown-body strong").count(), 2);
     assert.equal(await page.locator("article.markdown-body table").count(), 1);
-    assert.equal(await page.locator("article.markdown-body input[type=checkbox]").count(), 2);
     assert.equal(
-      await page.locator("article.markdown-body").getByText("[x] top-level marker remains", { exact: true }).count(),
+      await page.locator("article.markdown-body input[type=checkbox]").count(),
+      2,
+    );
+    assert.equal(
+      await page
+        .locator("article.markdown-body")
+        .getByText("[x] top-level marker remains", { exact: true })
+        .count(),
       1,
     );
     assert.equal(
-      await page.locator("article.markdown-body strong").getByText("[x]", { exact: true }).count(),
+      await page
+        .locator("article.markdown-body strong")
+        .getByText("[x]", { exact: true })
+        .count(),
       1,
     );
     assert.equal(await page.locator("article.markdown-body img").count(), 0);
     assert.equal(await page.locator("script").count(), 0);
-    assert.equal(await page.evaluate(() => globalThis.markdownProbePwned), undefined);
-    assert.equal(await page.locator('article.markdown-body a[href^="javascript:"]').count(), 0);
-    assert.equal(await page.locator("article.markdown-body").getByText("# Production Markdown probe", { exact: true }).count(), 0);
+    assert.equal(
+      await page.evaluate(() => globalThis.markdownProbePwned),
+      undefined,
+    );
+    assert.equal(
+      await page
+        .locator('article.markdown-body a[href^="javascript:"]')
+        .count(),
+      0,
+    );
+    assert.equal(
+      await page
+        .locator("article.markdown-body")
+        .getByText("# Production Markdown probe", { exact: true })
+        .count(),
+      0,
+    );
 
     const raw = page.locator("a.raw-action");
     await raw.focus();
@@ -158,8 +194,9 @@ try {
         tableScrollWidth: tableScroller?.scrollWidth ?? 0,
         tableMaxRowHeight: Math.max(
           0,
-          ...Array.from(document.querySelectorAll("article.markdown-body tr"), (row) =>
-            row.getBoundingClientRect().height,
+          ...Array.from(
+            document.querySelectorAll("article.markdown-body tr"),
+            (row) => row.getBoundingClientRect().height,
           ),
         ),
       };
@@ -167,7 +204,10 @@ try {
     assert.equal(layout.bodyScrollWidth, layout.bodyClientWidth);
     assert(layout.tableScrollWidth >= layout.tableClientWidth);
     assert(layout.codeScrollWidth >= layout.codeClientWidth);
-    assert(layout.tableMaxRowHeight <= 80, `table row is ${layout.tableMaxRowHeight}px tall`);
+    assert(
+      layout.tableMaxRowHeight <= 80,
+      `table row is ${layout.tableMaxRowHeight}px tall`,
+    );
     if (viewport.width <= 430) {
       assert(layout.tableScrollWidth > layout.tableClientWidth);
       assert(layout.codeScrollWidth > layout.codeClientWidth);
@@ -179,7 +219,10 @@ try {
     await page.emulateMedia({ colorScheme: "dark", forcedColors: "active" });
     const forcedColorFocus = await raw.evaluate((element) => {
       const style = getComputedStyle(element);
-      return { outlineStyle: style.outlineStyle, outlineWidth: Number.parseFloat(style.outlineWidth) };
+      return {
+        outlineStyle: style.outlineStyle,
+        outlineWidth: Number.parseFloat(style.outlineWidth),
+      };
     });
     assert.notEqual(forcedColorFocus.outlineStyle, "none");
     assert(forcedColorFocus.outlineWidth >= 2);

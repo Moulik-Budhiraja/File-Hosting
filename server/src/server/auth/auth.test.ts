@@ -70,6 +70,26 @@ describe("password security", () => {
       /bootstrap.*together/iu,
     );
   });
+
+  it("accepts only a credential-free canonical origin for FS_PUBLIC_URL", () => {
+    const base = { FS_TOKEN: "legacy-token", NODE_ENV: "test" as const };
+    assert.equal(
+      loadConfig({ ...base, FS_PUBLIC_URL: "https://EXAMPLE.test:443/" })
+        .publicUrl,
+      "https://example.test",
+    );
+    for (const publicUrl of [
+      "https://embedded-user@example.test",
+      "https://example.test/subpath",
+      "https://example.test/?query=secret",
+      "https://example.test/#fragment",
+    ]) {
+      assert.throws(
+        () => loadConfig({ ...base, FS_PUBLIC_URL: publicUrl }),
+        /canonical origin/iu,
+      );
+    }
+  });
 });
 
 describe("user repository", () => {

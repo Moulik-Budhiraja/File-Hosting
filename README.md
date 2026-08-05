@@ -33,15 +33,15 @@ cp .env.example .env
 
 The server accepts the following environment variables:
 
-| Variable | Default in Compose | Purpose |
-| --- | --- | --- |
-| `FS_TOKEN` | required | Shared bearer token for authenticated operations |
-| `DATABASE_URL` | `file:/data/sqlite/files.db` | SQLite connection URL |
-| `FS_STORAGE_DIR` | `/data/files` | Object-storage directory |
-| `FS_PUBLIC_URL` | `https://files.moulik.dev` | Base URL placed in API responses |
-| `FS_MAX_UPLOAD_BYTES` | `10737418240` | Server upload limit (10 GiB) |
-| `FS_MIN_FREE_BYTES` | `1073741824` | Free space reserved before accepting an upload (1 GiB) |
-| `FS_PORT` | `37641` | Loopback-only host port for local diagnostics |
+| Variable              | Default in Compose           | Purpose                                                |
+| --------------------- | ---------------------------- | ------------------------------------------------------ |
+| `FS_TOKEN`            | required                     | Shared bearer token for authenticated operations       |
+| `DATABASE_URL`        | `file:/data/sqlite/files.db` | SQLite connection URL                                  |
+| `FS_STORAGE_DIR`      | `/data/files`                | Object-storage directory                               |
+| `FS_PUBLIC_URL`       | `https://files.moulik.dev`   | Base URL placed in API responses                       |
+| `FS_MAX_UPLOAD_BYTES` | `10737418240`                | Server upload limit (10 GiB)                           |
+| `FS_MIN_FREE_BYTES`   | `1073741824`                 | Free space reserved before accepting an upload (1 GiB) |
+| `FS_PORT`             | `37641`                      | Loopback-only host port for local diagnostics          |
 
 The token is sent as `Authorization: Bearer <token>`. Do not put it in URLs,
 commit it, or include it in logs.
@@ -81,21 +81,65 @@ cp .env.example .env
 npm run dev
 ```
 
-Run every automated check from the project root:
+Run the canonical release gate from the project root:
 
 ```sh
-npm --prefix server run build
-npm --prefix server run check
-npm --prefix cli run typecheck
-npm --prefix cli test
-npm --prefix cli run build
-node --test tests/e2e.test.mjs
+./scripts/release-check.sh
 ```
+
+It installs locked server and CLI dependencies, runs formatting, lint, typechecks,
+full tests, package/runtime assertions, compiled and extracted-standalone semantic
+checks, frozen-design checks, production and development dependency audits, root
+E2E and Compose checks, and a guarded local rich-link visual probe. It also runs
+the real Docker Compose image when Docker is available; CI sets
+`REQUIRE_DOCKER=1`, so container execution cannot be waived there.
 
 The end-to-end suite starts real compiled server and CLI processes against
 temporary SQLite and object storage, tests a restart, and removes its state.
 See `tests/README.md` for details and `cli/README.md` for CLI installation and
 usage.
+
+Preview extraction and rasterization use fixed concurrency/queue limits and bounded
+input, output, memory, and wall-clock budgets. The extraction deadline starts when
+work is enqueued; trusted strategies receive the absolute `deadlineAt` and must
+propagate it to subprocesses. If a strategy misses that deadline, the request fails
+closed but its slot remains occupied until the strategy settles, so timed-out work
+cannot escape pool accounting.
+
+Generated social-card rendering runs in a bounded child process. Node's permission
+model limits worker reads to declared worker/module/input paths and writes to the
+isolated font cache; the environment excludes application credentials. Network and
+process containment come from the platform sandbox: Darwin sandbox profiles deny
+network access and disallowed forks, while Linux production requires `/usr/bin/bwrap`
+with no network, `/data`, or process metadata, a read-only application mount, and
+writable `/tmp` only.
+The container drops every ordinary capability from its non-root server process and
+retains in the bounding set only Bubblewrap 0.8's required `SETGID`, `SETUID`,
+`NET_ADMIN`, `SYS_CHROOT`, `SYS_PTRACE`, and `SYS_ADMIN` capabilities for the sole
+setuid binary, `/usr/bin/bwrap`; every other setuid/setgid bit is removed during
+image construction. Docker's outer AppArmor and seccomp profiles are disabled
+because they deny the mount and pivot-root namespace operations Bubblewrap needs;
+the server remains non-root with zero effective capabilities, and Bubblewrap
+supplies the inner no-network, read-only application sandbox.
+Sandbox startup failure is fail-closed. Native media tools receive a private, mode-0600 snapshot
+path inside that restricted filesystem, fixed arguments, and
+FFmpeg's `file,pipe` protocol whitelist; its executable must match a tracked SHA-256
+for macOS arm64/x64, Linux arm64/x64, or Windows x64 before startup. Snapshots are
+checksum-bound before and after derivation and are removed at settlement. Public
+sources larger than the bounded parser limit use a deterministic metadata-only card
+from the upload-time digest, filename, and size instead of rereading the complete
+object inside the preview deadline.
+
+Explicitly trusted test harnesses may opt out to exercise ordinary
+launcher/child/grandchild process-group cleanup. On other non-production POSIX
+hosts, deadline and output-limit handling kills the live launcher's process group,
+but the server does not claim containment for a descendant that deliberately
+creates a new session. The server never signals a stored process-group number after
+the launcher exit event, avoiding stale-PGID reuse signalling. Every platform has a
+hard promise-settlement bound and destroys inherited pipes before releasing pool
+accounting. Windows uses the native `taskkill /T /F` tree operation before releasing
+accounting, and its release check exercises a real worker/child deadline. Extracted
+standalone tests exercise the production renderer path.
 
 ## API overview
 
@@ -103,16 +147,16 @@ Authenticated API requests use the bearer token. Public preview and raw links
 need no token; private entries require authentication and otherwise behave as
 not found.
 
-| Method and route | Purpose |
-| --- | --- |
-| `GET /healthz` | Health check |
-| `POST /api/files` | Stream a new upload with metadata and tags |
-| `GET /api/files` | List or search entries |
-| `GET /api/files/{id}` | Read one entry's metadata |
-| `PATCH /api/files/{id}` | Change tags or visibility |
-| `DELETE /api/files/{id}` | Delete an entry and its stored object |
-| `GET /{id}` | Browser metadata and safe preview page |
-| `GET /raw/{id}` | Raw file bytes |
+| Method and route         | Purpose                                    |
+| ------------------------ | ------------------------------------------ |
+| `GET /healthz`           | Health check                               |
+| `POST /api/files`        | Stream a new upload with metadata and tags |
+| `GET /api/files`         | List or search entries                     |
+| `GET /api/files/{id}`    | Read one entry's metadata                  |
+| `PATCH /api/files/{id}`  | Change tags or visibility                  |
+| `DELETE /api/files/{id}` | Delete an entry and its stored object      |
+| `GET /{id}`              | Browser metadata and safe preview page     |
+| `GET /raw/{id}`          | Raw file bytes                             |
 
 HTML and SVG content is shown as escaped source on the preview page rather than
 executed. Other unsupported preview types are presented as downloads.
@@ -153,17 +197,19 @@ data goes to stdout while progress and diagnostics go to stderr. See
 
 ## Production release
 
-1. Push a tested commit to `main`.
-2. In `~/hosting/file-hosting`, run `git pull --ff-only` and verify the desired
+1. Run `./scripts/release-check.sh` on the exact candidate commit and require the
+   `Release gate` GitHub check, including its mandatory Docker Compose runtime.
+2. Push the tested commit to `main`.
+3. In `~/hosting/file-hosting`, run `git pull --ff-only` and verify the desired
    commit with `git rev-parse HEAD`.
-3. Run `docker compose up --build -d`, wait for the health check, and inspect
+4. Run `docker compose up --build -d`, wait for the health check, and inspect
    `docker compose ps` plus `docker compose logs --tail=100 server`.
-4. In Cloudflare DNS, keep `files.moulik.dev` as a DNS-only `A` record pointing
+5. In Cloudflare DNS, keep `files.moulik.dev` as a DNS-only `A` record pointing
    to the host. DNS-only mode avoids Cloudflare proxy upload-size constraints
    for explicitly approved uploads over 1 GiB.
-5. In Nginx Proxy Manager, proxy `files.moulik.dev` over HTTP to
+6. In Nginx Proxy Manager, proxy `files.moulik.dev` over HTTP to
    `file-hosting-server:3000`.
-6. Add this in the Proxy Host's **Advanced** configuration so large requests
+7. Add this in the Proxy Host's **Advanced** configuration so large requests
    stream to the application instead of being buffered:
 
    ```nginx
@@ -174,9 +220,9 @@ data goes to stdout while progress and diagnostics go to stderr. See
    send_timeout 3600s;
    ```
 
-7. In NPM's SSL tab, request a Let's Encrypt certificate for
+8. In NPM's SSL tab, request a Let's Encrypt certificate for
    `files.moulik.dev`, enable Force SSL, and accept the Let's Encrypt terms.
-8. Verify the public health route, a small authenticated upload, preview and raw
+9. Verify the public health route, a small authenticated upload, preview and raw
    downloads, a private-file denial without authentication, and deletion before
    relying on the service.
 

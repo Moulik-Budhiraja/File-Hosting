@@ -2,8 +2,18 @@ import { open } from "node:fs/promises";
 
 import MarkdownIt from "markdown-it";
 
+import {
+  derivePreview,
+  PreviewBusyError,
+  PreviewSourceUnavailableError,
+  type PreviewExtraction,
+} from "./preview-renderers";
 import type { FileService } from "./service";
+import { sanitizePublicText } from "./text-safety";
 import type { StoredFile } from "./types";
+
+export const PREVIEW_CONTENT_SECURITY_POLICY =
+  "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const MAX_TEXT_PREVIEW_BYTES = 256 * 1024;
 const ALLOWED_URL_SCHEMES = new Set(["http", "https", "mailto"]);
@@ -215,11 +225,86 @@ function metadataRow(label: string, value: string, breakable = false): string {
   return `<div class="metadata-row"><dt>${label}</dt><dd class="metadata-value${breakable ? " metadata-break" : ""}">${value}</dd></div>`;
 }
 
+const PDF_PREVIEW_NOTICE =
+  '<p class="notice">No browser preview is available for this PDF.</p>';
+const PNG_SIGNATURE = Buffer.from("89504e470d0a1a0a", "hex");
+
+function crc32(bytes: Buffer): number {
+  let crc = 0xffffffff;
+  for (const byte of bytes) {
+    crc ^= byte;
+    for (let bit = 0; bit < 8; bit += 1)
+      crc = (crc >>> 1) ^ (crc & 1 ? 0xedb88320 : 0);
+  }
+  return (crc ^ 0xffffffff) >>> 0;
+}
+
+export function readPngDimensions(
+  raster: Buffer,
+): { width: number; height: number } | null {
+  if (
+    raster.length < 33 ||
+    !raster.subarray(0, PNG_SIGNATURE.length).equals(PNG_SIGNATURE) ||
+    raster.readUInt32BE(8) !== 13 ||
+    raster.toString("ascii", 12, 16) !== "IHDR" ||
+    crc32(raster.subarray(12, 29)) !== raster.readUInt32BE(29)
+  ) {
+    return null;
+  }
+  const width = raster.readUInt32BE(16);
+  const height = raster.readUInt32BE(20);
+  if (
+    width < 1 ||
+    height < 1 ||
+    width > 1200 ||
+    height > 1200 ||
+    width * height > 40_000_000
+  ) {
+    return null;
+  }
+  return { width, height };
+}
+
+async function renderPdfFirstPage(
+  service: FileService,
+  file: StoredFile,
+  escapedName: string,
+  preparedPreview?: PreviewExtraction,
+): Promise<string> {
+  let preview = preparedPreview;
+  try {
+    preview ??= await derivePreview({
+      trustedMime: file.mimeType,
+      name: file.name,
+      size: file.size,
+      sha256: file.sha256,
+      sourcePath: service.storagePath(file),
+    });
+  } catch (error) {
+    if (
+      error instanceof PreviewBusyError ||
+      error instanceof PreviewSourceUnavailableError
+    ) {
+      return PDF_PREVIEW_NOTICE;
+    }
+    throw error;
+  }
+  if (preview.visual.kind !== "page") return PDF_PREVIEW_NOTICE;
+  const raster = preview.visual.raster;
+  const dimensions = readPngDimensions(raster);
+  if (!dimensions) return PDF_PREVIEW_NOTICE;
+  return `<div class="pdf-page-shell"><img class="pdf-page-preview" src="data:image/png;base64,${raster.toString("base64")}" alt="First page of ${escapedName}" width="${dimensions.width}" height="${dimensions.height}"></div>`;
+}
+
 export async function renderPreview(
   service: FileService,
   file: StoredFile,
+  unfurlHead = "",
+  preparedPreview?: PreviewExtraction,
 ): Promise<string> {
   const rawUrl = `/raw/${encodeURIComponent(file.id)}`;
+  const displayName = sanitizePublicText(file.name, 300) || "Untitled file";
+  const escapedName = escapeHtml(displayName);
   let preview: string;
   if (isTextPreview(file)) {
     const text = await readTextPreview(service, file);
@@ -229,13 +314,18 @@ export async function renderPreview(
       preview = `<pre class="text-preview">${escapeHtml(text.content)}</pre>${renderTruncationNotice(text.truncated)}`;
     }
   } else if (file.mimeType.startsWith("image/")) {
-    preview = `<img src="${rawUrl}" alt="${escapeHtml(file.name)}">`;
+    preview = `<img src="${rawUrl}" alt="${escapedName}">`;
   } else if (file.mimeType.startsWith("audio/")) {
     preview = `<audio src="${rawUrl}" controls></audio>`;
   } else if (file.mimeType.startsWith("video/")) {
     preview = `<video src="${rawUrl}" controls></video>`;
   } else if (file.mimeType === "application/pdf") {
-    preview = `<iframe src="${rawUrl}" title="${escapeHtml(file.name)}"></iframe>`;
+    preview = await renderPdfFirstPage(
+      service,
+      file,
+      escapedName,
+      preparedPreview,
+    );
   } else {
     preview =
       '<p class="notice">No browser preview is available for this file type.</p>';
@@ -257,7 +347,9 @@ export async function renderPreview(
   <head>
     <meta charset="utf-8">
     <meta name="viewport" content="width=device-width, initial-scale=1">
-    <title>${escapeHtml(file.name)}</title>
+    <meta name="robots" content="${file.visibility === "public" ? "index,follow,max-image-preview:large" : "noindex,nofollow,noarchive"}">
+    ${unfurlHead}
+    <title>${escapedName}</title>
     <style>
       :root {
         color-scheme: light dark;
@@ -284,14 +376,15 @@ export async function renderPreview(
         }
       }
       * { box-sizing: border-box; }
-      html, body { margin: 0; max-width: 100%; overflow-x: clip; }
+      html, body { margin: 0; max-width: 100%; overflow-x: clip; width: 100%; }
       body {
         background: var(--background);
         color: var(--text);
         line-height: 1.55;
+        min-width: 0;
         padding: clamp(1rem, 4vw, 2.25rem);
       }
-      .page { margin: 0 auto; max-width: 72rem; min-width: 0; }
+      .page { margin: 0 auto; max-width: 72rem; min-width: 0; width: 100%; }
       .file-header {
         border-bottom: 1px solid var(--border);
         margin-bottom: clamp(1.25rem, 3vw, 2rem);
@@ -303,6 +396,7 @@ export async function renderPreview(
         line-height: 1.2;
         margin: 0 0 .85rem;
         overflow-wrap: anywhere;
+        unicode-bidi: isolate;
       }
       .metadata {
         display: grid;
@@ -329,7 +423,9 @@ export async function renderPreview(
       a { color: var(--accent); overflow-wrap: anywhere; text-decoration-thickness: .08em; text-underline-offset: .18em; }
       a:hover { text-decoration-thickness: .14em; }
       :focus-visible { outline: 3px solid var(--accent); outline-offset: 3px; }
-      main { min-width: 0; }
+      main { max-width: 100%; min-width: 0; width: 100%; }
+      .pdf-page-shell { margin: 0 auto; max-width: 56rem; min-width: 0; width: 100%; }
+      .pdf-page-preview { display: block; height: auto; max-width: 100%; object-fit: contain; width: 100%; }
       .markdown-shell { margin: 0 auto; max-width: 70ch; min-width: 0; }
       .markdown-body { font-size: clamp(1rem, 1.4vw, 1.075rem); overflow-wrap: anywhere; word-break: break-word; }
       .markdown-body > :first-child { margin-top: 0; }
@@ -390,9 +486,9 @@ export async function renderPreview(
         white-space: pre-wrap;
         word-break: break-word;
       }
-      img, video, iframe { border: 1px solid var(--border); display: block; max-width: 100%; width: 100%; }
+      img, video { border: 1px solid var(--border); display: block; max-width: 100%; width: 100%; }
       img { height: auto; object-fit: contain; }
-      video, iframe { min-height: 60vh; }
+      video { min-height: 60vh; }
       audio { width: 100%; }
       .notice { background: var(--code); border-left: .25rem solid var(--border); padding: .75rem 1rem; }
       .truncation-notice { margin: 1rem auto 0; max-width: 70ch; }
@@ -421,11 +517,11 @@ export async function renderPreview(
   <body>
     <div class="page">
       <header class="file-header">
-        <h1 class="file-title">${escapeHtml(file.name)}</h1>
+        <h1 class="file-title" dir="auto">${escapedName}</h1>
         <dl class="metadata">
           ${metadata}
         </dl>
-        <a class="raw-action" href="${rawUrl}" download="${escapeHtml(file.name)}">Open raw file</a>
+        <a class="raw-action" href="${rawUrl}" download="${escapedName}">Open raw file</a>
       </header>
       <main>${preview}</main>
     </div>

@@ -1,23 +1,32 @@
-FROM node:22-alpine AS dependencies
+FROM node:22-bookworm-slim AS dependencies
 WORKDIR /app
 COPY package.json package-lock.json ./
 RUN npm ci
 
-FROM node:22-alpine AS builder
+FROM node:22-bookworm-slim AS builder
 WORKDIR /app
 ENV NEXT_TELEMETRY_DISABLED=1
 COPY --from=dependencies /app/node_modules ./node_modules
 COPY . .
+RUN npm run assert:runtime
 RUN npm run build
 
-FROM node:22-alpine AS runner
+FROM node:22-bookworm-slim AS runner
 WORKDIR /app
 ENV NODE_ENV=production \
     NEXT_TELEMETRY_DISABLED=1 \
     HOSTNAME=0.0.0.0 \
     PORT=3000
-RUN addgroup --system --gid 1001 nodejs \
-    && adduser --system --uid 1001 --ingroup nodejs nextjs \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        bubblewrap \
+        fonts-noto-cjk \
+        fonts-noto-core \
+    && chmod 4755 /usr/bin/bwrap \
+    && find /usr/bin /usr/sbin /bin /sbin -xdev -type f -perm /6000 ! -path /usr/bin/bwrap -exec chmod a-s {} + \
+    && rm -rf /var/lib/apt/lists/*
+RUN groupadd --gid 1001 nodejs \
+    && useradd --uid 1001 --gid nodejs --create-home --shell /usr/sbin/nologin nextjs \
     && mkdir -p /data/objects \
     && chown -R nextjs:nodejs /data /app
 COPY --from=builder --chown=nextjs:nodejs /app/public ./public
@@ -27,4 +36,4 @@ COPY --from=builder --chown=nextjs:nodejs /app/.next/static ./.next/static
 COPY --from=dependencies --chown=nextjs:nodejs /app/node_modules/@libsql ./node_modules/@libsql
 USER nextjs
 EXPOSE 3000
-CMD ["node", "server.js"]
+CMD ["npm", "run", "start:verified"]

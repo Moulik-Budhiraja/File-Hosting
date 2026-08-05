@@ -1,0 +1,74 @@
+name: Release gate
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    env:
+      REQUIRE_DOCKER: "1"
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: |
+            server/package-lock.json
+            cli/package-lock.json
+      - name: Verify Docker Compose
+        run: docker compose version
+      - name: Install Chromium and the Linux process sandbox
+        run: sudo apt-get update && sudo apt-get install -y chromium bubblewrap
+      - name: Enable and verify the Linux process sandbox
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+          node server/runtime/verify-linux-sandbox.js
+      - name: Run canonical release gate
+        id: canonical_release
+        continue-on-error: true
+        run: ./scripts/release-check.sh
+      - name: Upload design failure diagnostics
+        if: ${{ always() && steps.canonical_release.outcome == 'failure' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: og-design-failure-${{ github.run_id }}
+          path: |
+            /tmp/file-hosting-design-audit-release/diagnostic-*
+          if-no-files-found: error
+          retention-days: 7
+      - name: Fail a rejected canonical release
+        if: ${{ always() && steps.canonical_release.outcome == 'failure' }}
+        run: exit 1
+
+  windows-process-ownership:
+    runs-on: windows-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: server
+    steps:
+      - uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: server/package-lock.json
+      - run: npm ci
+      - name: Verify Windows worker-tree settlement
+        run: npx tsx --test --test-concurrency=1 src/server/files/process-tree.test.ts

@@ -7,6 +7,18 @@ services:
     restart: unless-stopped
     stop_grace_period: 30s
     init: true
+    cap_drop:
+      - ALL
+    cap_add:
+      - SETGID
+      - SETUID
+      - NET_ADMIN
+      - SYS_CHROOT
+      - SYS_PTRACE
+      - SYS_ADMIN
+    security_opt:
+      - apparmor=unconfined
+      - seccomp=unconfined
     environment:
       FS_TOKEN: ${FS_TOKEN:?Set FS_TOKEN in .env before starting the service}
       DATABASE_URL: ${DATABASE_URL:-file:/data/sqlite/files.db}
@@ -17,8 +29,8 @@ services:
       FS_BOOTSTRAP_USERNAME: ${FS_BOOTSTRAP_USERNAME:-}
       FS_BOOTSTRAP_PASSWORD: ${FS_BOOTSTRAP_PASSWORD:-}
     volumes:
-      - ./runtime/files:/data/files
-      - ./runtime/sqlite:/data/sqlite
+      - ${FS_FILES_DIR:-./runtime/files}:/data/files
+      - ${FS_SQLITE_DIR:-./runtime/sqlite}:/data/sqlite
     expose:
       - "3000"
     ports:

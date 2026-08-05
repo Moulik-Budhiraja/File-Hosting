@@ -20,6 +20,11 @@ import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
+import {
+  PREVIEW_ARTIFACT_MAX_BYTES,
+  prepareUnfurlArtifact,
+  removePreviewArtifact,
+} from "./preview-artifact";
 import type {
   FileMetadata,
   ListFilesOptions,
@@ -245,10 +250,19 @@ export class FileService {
         createdAt: now,
         updatedAt: now,
       };
+      const candidate: StoredFile = {
+        ...file,
+        tags: options.tags ?? [],
+      };
       try {
         await options.authorizeFinalize?.();
+        if (candidate.visibility === "public") {
+          await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
+          await prepareUnfurlArtifact(this, candidate);
+        }
         return await this.repository.insert(file, options.tags);
       } catch (cause) {
+        await removePreviewArtifact(this, candidate).catch(() => undefined);
         await unlink(finalPath).catch(() => undefined);
         if (cause instanceof AppError) throw cause;
         throw new AppError(
@@ -279,17 +293,42 @@ export class FileService {
       tags?: { operation: TagOperation; values: string[] };
     },
   ): Promise<StoredFile | null> {
-    return this.repository.update(id, input);
+    const current = await this.repository.get(id);
+    if (!current) return null;
+    const becomingPublic =
+      input.visibility === "public" && current.visibility !== "public";
+    const candidate = becomingPublic
+      ? { ...current, visibility: "public" as const }
+      : current;
+    if (becomingPublic) {
+      await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
+      await prepareUnfurlArtifact(this, candidate);
+    }
+    let updated: StoredFile | null;
+    try {
+      updated = await this.repository.update(id, input);
+    } catch (error) {
+      if (becomingPublic)
+        await removePreviewArtifact(this, candidate).catch(() => undefined);
+      throw error;
+    }
+    if (!updated && becomingPublic)
+      await removePreviewArtifact(this, candidate).catch(() => undefined);
+    if (updated?.visibility !== "public")
+      await removePreviewArtifact(this, current).catch(() => undefined);
+    return updated;
   }
 
   async delete(id: string): Promise<StoredFile | null> {
     const file = await this.repository.delete(id);
-    if (file)
+    if (file) {
+      await removePreviewArtifact(this, file);
       await unlink(this.storagePath(file)).catch(
         (error: NodeJS.ErrnoException) => {
           if (error.code !== "ENOENT") throw error;
         },
       );
+    }
     return file;
   }
 

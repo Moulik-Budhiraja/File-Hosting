@@ -1,4 +1,6 @@
 .env
 .DS_Store
 data/
-runtime/
+/runtime/
+!server/runtime/
+!server/runtime/**
