@@ -412,6 +412,8 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
   assert.match(runtime, /stat -c %a \/usr\/bin\/bwrap/u);
   assert.match(runtime, /\/proc\/self\/attr\/current[\s\S]*unconfined/u);
   assert.match(runtime, /Seccomp[\s\S]*!==0/u);
+  assert.doesNotMatch(runtime, /\*\*\*/u);
+  assert.match(runtime, /"Bea"\+"rer "\+process\.env\.FS_TOKEN/u);
   assert.match(
     runtime,
     /docker compose run --rm --no-deps --entrypoint node server runtime\/verify-linux-sandbox\.js/u,
