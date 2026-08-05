@@ -362,6 +362,11 @@ test("production image uses glibc for the frozen packaged media binaries", async
     /cap_drop:\s*\n\s*- ALL[\s\S]*cap_add:\s*\n\s*- SETGID\s*\n\s*- SETUID\s*\n\s*- NET_ADMIN\s*\n\s*- SYS_CHROOT\s*\n\s*- SYS_PTRACE\s*\n\s*- SYS_ADMIN\s*\n/u,
     "the container must expose only Bubblewrap 0.8's six required capabilities",
   );
+  assert.match(
+    compose,
+    /security_opt:\s*\n\s*- apparmor=unconfined/u,
+    "the outer Docker AppArmor profile must not block Bubblewrap mount-namespace setup",
+  );
 });
 
 test("Compose runtime gate builds, starts, probes, diagnoses failures, and always tears down the real image", async () => {
@@ -390,6 +395,7 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
     "the runtime gate must prove the server is unprivileged while only Bubblewrap's required capabilities remain bounded",
   );
   assert.match(runtime, /stat -c %a \/usr\/bin\/bwrap/u);
+  assert.match(runtime, /\/proc\/self\/attr\/current[\s\S]*unconfined/u);
   assert.match(
     runtime,
     /docker compose run --rm --no-deps --entrypoint node server runtime\/verify-linux-sandbox\.js/u,
