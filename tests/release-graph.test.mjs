@@ -386,6 +386,11 @@ test("Compose runtime gate builds, starts, probes, diagnoses failures, and alway
     "the runtime gate must prove the server is unprivileged while only SYS_ADMIN remains bounded for setuid Bubblewrap",
   );
   assert.match(runtime, /stat -c %a \/usr\/bin\/bwrap/u);
+  assert.match(
+    runtime,
+    /docker compose run --rm --no-deps --entrypoint node server runtime\/verify-linux-sandbox\.js/u,
+    "the Compose gate must expose nested-sandbox startup errors before launching the restart loop",
+  );
 });
 
 test("non-production rich-link runner has a production guard and generates visual contexts", async () => {

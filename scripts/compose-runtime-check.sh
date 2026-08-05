@@ -29,6 +29,7 @@ if ! docker network inspect nginx-proxy_default >/dev/null 2>&1; then
   created_proxy_network=1
 fi
 docker compose build
+docker compose run --rm --no-deps --entrypoint node server runtime/verify-linux-sandbox.js
 docker compose up -d
 
 for _ in $(seq 1 90); do
