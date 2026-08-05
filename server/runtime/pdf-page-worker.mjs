@@ -31,34 +31,44 @@ const standardFontRoot = new URL(
   "../node_modules/pdfjs-dist/standard_fonts/",
   import.meta.url,
 );
-const standardFontRegistrations = [
+const standardFontRegistrations = new Map([
   [
-    new URL("./fonts/NotoSansCJKjp-Regular.otf", import.meta.url),
     STANDARD_HELVETICA_FAMILY,
+    [new URL("./fonts/NotoSansCJKjp-Regular.otf", import.meta.url)],
   ],
-  [new URL("FoxitSerif.pfb", standardFontRoot), STANDARD_TIMES_FAMILY],
-  [new URL("FoxitSerifBold.pfb", standardFontRoot), STANDARD_TIMES_FAMILY],
-  [new URL("FoxitSerifItalic.pfb", standardFontRoot), STANDARD_TIMES_FAMILY],
   [
-    new URL("FoxitSerifBoldItalic.pfb", standardFontRoot),
     STANDARD_TIMES_FAMILY,
+    [
+      "FoxitSerif.pfb",
+      "FoxitSerifBold.pfb",
+      "FoxitSerifItalic.pfb",
+      "FoxitSerifBoldItalic.pfb",
+    ].map((name) => new URL(name, standardFontRoot)),
   ],
-  [new URL("FoxitFixed.pfb", standardFontRoot), STANDARD_COURIER_FAMILY],
-  [new URL("FoxitFixedBold.pfb", standardFontRoot), STANDARD_COURIER_FAMILY],
-  [new URL("FoxitFixedItalic.pfb", standardFontRoot), STANDARD_COURIER_FAMILY],
   [
-    new URL("FoxitFixedBoldItalic.pfb", standardFontRoot),
     STANDARD_COURIER_FAMILY,
+    [
+      "FoxitFixed.pfb",
+      "FoxitFixedBold.pfb",
+      "FoxitFixedItalic.pfb",
+      "FoxitFixedBoldItalic.pfb",
+    ].map((name) => new URL(name, standardFontRoot)),
   ],
-  [new URL("FoxitSymbol.pfb", standardFontRoot), STANDARD_SYMBOL_FAMILY],
-  [new URL("FoxitDingbats.pfb", standardFontRoot), STANDARD_DINGBATS_FAMILY],
-];
-if (USE_PACKAGED_STANDARD_FONT) {
-  for (const [fontUrl, family] of standardFontRegistrations) {
+  [STANDARD_SYMBOL_FAMILY, [new URL("FoxitSymbol.pfb", standardFontRoot)]],
+  [STANDARD_DINGBATS_FAMILY, [new URL("FoxitDingbats.pfb", standardFontRoot)]],
+]);
+const registeredStandardFamilies = new Set();
+
+function registerStandardFontFamily(family) {
+  if (registeredStandardFamilies.has(family)) return;
+  const fontUrls = standardFontRegistrations.get(family);
+  if (!fontUrls) throw new Error("unsupported standard PDF font family");
+  for (const fontUrl of fontUrls) {
     if (!GlobalFonts.registerFromPath(fileURLToPath(fontUrl), family)) {
       throw new Error("standard PDF font registration failed");
     }
   }
+  registeredStandardFamilies.add(family);
 }
 
 function standardPdfFontFamily(value) {
@@ -138,6 +148,12 @@ try {
       set(value) {
         const requested = String(value);
         const mapped = standardPdfFontFamily(requested);
+        for (const family of standardFontRegistrations.keys()) {
+          if (mapped !== requested && mapped.includes(family)) {
+            registerStandardFontFamily(family);
+            break;
+          }
+        }
         mappedHelveticaFont =
           mapped !== requested && mapped.includes(STANDARD_HELVETICA_FAMILY);
         fontDescriptor.set.call(context, mapped);

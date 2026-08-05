@@ -292,6 +292,11 @@ test("PDF raster worker binds all standard families and preserves frozen Linux H
   );
   assert.match(
     worker,
+    /set\(value\)[\s\S]*registerStandardFontFamily\(family\)/u,
+    "standard families must register lazily at the exact unembedded-font request",
+  );
+  assert.match(
+    worker,
     /mappedHelveticaFont[\s\S]*context\.fillText[\s\S]*x \+ 0\.25/u,
     "Linux Skia must receive the frozen quarter-pixel standard-font antialias compensation",
   );
