@@ -25,7 +25,7 @@ import type { StoredFile } from "./types";
 import { buildUnfurlModel } from "./unfurl";
 
 const ARTIFACT_REVISION = "og-v2-881d043";
-export const PREVIEW_ARTIFACT_MAX_BYTES = 12 * 1024 * 1024;
+export const PREVIEW_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024;
 
 export interface PreparedUnfurlArtifact {
   preview: PreviewExtraction;

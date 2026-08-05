@@ -304,7 +304,14 @@ export class FileService {
       await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
       await prepareUnfurlArtifact(this, candidate);
     }
-    const updated = await this.repository.update(id, input);
+    let updated: StoredFile | null;
+    try {
+      updated = await this.repository.update(id, input);
+    } catch (error) {
+      if (becomingPublic)
+        await removePreviewArtifact(this, candidate).catch(() => undefined);
+      throw error;
+    }
     if (!updated && becomingPublic)
       await removePreviewArtifact(this, candidate).catch(() => undefined);
     if (updated?.visibility !== "public")
