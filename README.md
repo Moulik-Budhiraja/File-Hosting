@@ -111,7 +111,8 @@ model limits worker reads to declared worker/module/input paths and writes to th
 isolated font cache; the environment excludes application credentials. Network and
 process containment come from the platform sandbox: Darwin sandbox profiles deny
 network access and disallowed forks, while Linux production requires `/usr/bin/bwrap`
-with no network or `/data`, a read-only application mount, and writable `/tmp` only.
+with no network, `/data`, or process metadata, a read-only application mount, and
+writable `/tmp` only.
 The container drops every ordinary capability from its non-root server process and
 retains in the bounding set only Bubblewrap 0.8's required `SETGID`, `SETUID`,
 `NET_ADMIN`, `SYS_CHROOT`, `SYS_PTRACE`, and `SYS_ADMIN` capabilities for the sole

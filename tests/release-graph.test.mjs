@@ -212,6 +212,21 @@ test("Linux sandbox keeps nested app roots read-only and pins worker temp paths"
       arguments_[index + 2] === nestedRoot,
   );
   assert.ok(temporaryBind >= 0 && rootBind > temporaryBind);
+  const procDirectory = arguments_.findIndex(
+    (value, index) =>
+      value === "--dir" && arguments_[index + 1] === "/proc",
+  );
+  const procMode = arguments_.findIndex(
+    (value, index) =>
+      value === "--chmod" &&
+      arguments_[index + 1] === "0555" &&
+      arguments_[index + 2] === "/proc",
+  );
+  assert.ok(
+    procDirectory >= 0 && procMode > procDirectory,
+    "the PID namespace must expose an empty non-writable /proc rather than container process metadata",
+  );
+  assert.equal(arguments_.includes("--proc"), false);
   assert.match(previewRenderers, /workerTemporaryRoot\(\)/u);
   assert.match(previewRenderers, /TMPDIR: "\/tmp"/u);
   assert.match(rasterWorker, /TMPDIR: "\/tmp"/u);

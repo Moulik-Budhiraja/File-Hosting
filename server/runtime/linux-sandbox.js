@@ -33,7 +33,10 @@ export function linuxSandboxArguments(
   args.push(
     "--dev",
     "/dev",
-    "--proc",
+    "--dir",
+    "/proc",
+    "--chmod",
+    "0555",
     "/proc",
     ...["--bind", "/tmp", "/tmp"],
     "--ro-bind",
