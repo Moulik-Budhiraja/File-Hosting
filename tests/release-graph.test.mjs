@@ -241,6 +241,23 @@ test("PDF raster worker canonicalizes transparent edge colors before white compo
   assert.match(worker, /image\.data\[offset \+ 3\] = 255/u);
 });
 
+test("PDF raster worker binds packaged standard fonts instead of platform fallbacks", async () => {
+  const [worker, runtimeAssets] = await Promise.all([
+    text("server/runtime/pdf-page-worker.mjs"),
+    text("server/runtime/assert-runtime-assets.mjs"),
+  ]);
+  assert.match(
+    worker,
+    /standardFontDataUrl:\s*new URL\(\s*"\.\.\/node_modules\/pdfjs-dist\/standard_fonts\/",\s*import\.meta\.url,?\s*\)\.href/u,
+    "unembedded standard PDF fonts must resolve from pdfjs-dist rather than host fonts",
+  );
+  assert.match(
+    runtimeAssets,
+    /node_modules\/pdfjs-dist\/standard_fonts\/LiberationSans-Regular\.ttf/u,
+    "standalone startup must fail closed when the canonical Helvetica substitute is absent",
+  );
+});
+
 test("Compose runtime gate builds, starts, probes, and always tears down the real image", async () => {
   const runtime = await text("scripts/compose-runtime-check.sh");
   assert.match(runtime, /docker compose build/u);

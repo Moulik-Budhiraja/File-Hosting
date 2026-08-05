@@ -26,6 +26,10 @@ try {
   const { getDocument } = await import("pdfjs-dist/legacy/build/pdf.mjs");
   const loadingTask = getDocument({
     data: new Uint8Array(Buffer.concat(chunks)),
+    standardFontDataUrl: new URL(
+      "../node_modules/pdfjs-dist/standard_fonts/",
+      import.meta.url,
+    ).href,
     disableFontFace: true,
     disableRange: true,
     disableStream: true,
