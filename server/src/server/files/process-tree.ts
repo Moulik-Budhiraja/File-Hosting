@@ -146,6 +146,7 @@ export async function runKillableProcess(
     let deadlineExceeded = false;
     let outputExceeded = false;
     let spawnError = false;
+    let spawnErrorCode: string | undefined;
     let treeKillAttempted = false;
     let settled = false;
     let hardSettleTimer: NodeJS.Timeout | undefined;
@@ -210,13 +211,21 @@ export async function runKillableProcess(
         terminateTreeOnce();
       }
     });
-    child.once("error", () => {
+    child.once("error", (error: NodeJS.ErrnoException) => {
       spawnError = true;
+      spawnErrorCode = error.code;
     });
-    child.once("close", (code) => {
+    child.once("close", (code, signal) => {
       if (deadlineExceeded || outputExceeded) return;
       if (spawnError || code !== 0) {
-        finishReject(new ProcessExecutionError());
+        const reason = spawnError
+          ? `spawn ${spawnErrorCode ?? "error"}`
+          : typeof code === "number"
+            ? `exit ${code}`
+            : `signal ${signal ?? "unknown"}`;
+        finishReject(
+          new ProcessExecutionError(`process execution failed (${reason})`),
+        );
         return;
       }
       finishResolve({ stdout: Buffer.concat(stdout) });

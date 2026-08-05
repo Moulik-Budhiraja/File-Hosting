@@ -43,6 +43,26 @@ afterEach(async () => {
   );
 });
 
+it("reports a bounded exit reason without echoing command arguments", async () => {
+  const secretArgument = "never-log-this-argument";
+  await assert.rejects(
+    runKillableProcess(
+      process.execPath,
+      ["-e", "process.exit(7)", secretArgument],
+      {
+        timeoutMs: 2_000,
+        maxOutputBytes: 1024,
+        allowSandboxForks: true,
+      },
+    ),
+    (error: Error) => {
+      assert.match(error.message, /process execution failed \(exit 7\)/u);
+      assert.doesNotMatch(error.message, new RegExp(secretArgument, "u"));
+      return true;
+    },
+  );
+});
+
 describe(
   "hard OG render worker deadlines",
   { skip: process.platform === "win32" },
