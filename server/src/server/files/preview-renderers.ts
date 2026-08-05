@@ -649,7 +649,9 @@ export function warmPreviewMediaTools(): Promise<void> {
         });
       } catch (error) {
         const reason =
-          error instanceof ProcessExecutionError ? error.message : "unknown error";
+          error instanceof ProcessExecutionError
+            ? error.message
+            : "unknown error";
         throw new ProcessExecutionError(`${label} warmup failed: ${reason}`);
       }
     }
