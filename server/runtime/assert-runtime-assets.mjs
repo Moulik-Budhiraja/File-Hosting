@@ -1,3 +1,5 @@
+import { createHash } from "node:crypto";
+import { createReadStream } from "node:fs";
 import { access } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { createRequire } from "node:module";
@@ -36,10 +38,42 @@ for (const relative of required) {
     missing.push(relative);
   }
 }
-const mediaBinaries = [
-  require("ffmpeg-static"),
-  require("ffprobe-static").path,
-];
+const ffmpegBinary = require("ffmpeg-static");
+const mediaBinaries = [ffmpegBinary, require("ffprobe-static").path];
+const FFMPEG_SHA256 = Object.freeze({
+  "darwin-arm64":
+    "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
+  "darwin-x64":
+    "cfe20936c83ecf5d68e424b87e8cc45b24dd6be81787810123bb964a0df686f9",
+  "linux-arm64":
+    "237800b37bb65a81ad47871c6c8b7c45c0a3ca62a5b3f9d2a7a9a2dd9a338271",
+  "linux-x64":
+    "ed652b2f32e0851d1946894fb8333f5b677c1b2ce6b9d187910a67f8b99da028",
+  "win32-x64":
+    "e9fd5e711debab9d680955fc1e38a2c1160fd280b144476cc3f62bc43ef49db1",
+});
+
+async function fileSha256(filename) {
+  const digest = createHash("sha256");
+  for await (const chunk of createReadStream(filename)) digest.update(chunk);
+  return digest.digest("hex");
+}
+
+if (typeof ffmpegBinary === "string") {
+  const platform = `${process.platform}-${process.arch}`;
+  const expected = FFMPEG_SHA256[platform];
+  if (!expected) {
+    missing.push(`unsupported ffmpeg executable platform: ${platform}`);
+  } else {
+    try {
+      if ((await fileSha256(ffmpegBinary)) !== expected) {
+        missing.push("ffmpeg executable digest mismatch");
+      }
+    } catch {
+      missing.push("ffmpeg executable digest mismatch");
+    }
+  }
+}
 for (const binary of mediaBinaries) {
   if (typeof binary !== "string") {
     missing.push("packaged media binary resolution");

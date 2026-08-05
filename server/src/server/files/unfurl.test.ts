@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
-import { mkdtemp, open, rm, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, open, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -238,7 +238,7 @@ describe("public unfurl view-model", () => {
     );
   });
 
-  it("fails closed when a large public source cannot be checksum-bound", async () => {
+  it("uses a metadata-only card for large public sources without rereading bytes", async () => {
     const directory = await mkdtemp(
       path.join(os.tmpdir(), "fs-unfurl-sparse-"),
     );
@@ -249,15 +249,22 @@ describe("public unfurl view-model", () => {
     await handle.write(heading, 0, heading.length, 0);
     await handle.truncate(128 * 1024 * 1024);
     await handle.close();
+    await chmod(objectPath, 0o000);
     const service = {
       config: { publicUrl: PUBLIC_URL },
       storagePath: () => objectPath,
     } as unknown as FileService;
+    const file = storedFile({
+      name: "large-public.bin",
+      size: 128 * 1024 * 1024,
+    });
 
-    await assert.rejects(
-      buildUnfurlModel(service, storedFile({ size: 128 * 1024 * 1024 })),
-      /preview source unavailable/u,
-    );
+    const model = await buildUnfurlModel(service, file);
+    assert.equal(model.kind, "binary");
+    assert.equal(model.title, "large-public.bin");
+    assert.equal(model.description, "FILE · 128 MB");
+    assert.equal(model.preview?.sourceDigest, file.sha256);
+    assert.deepEqual(model.preview?.visual, { kind: "binary" });
   });
 
   it("uses the approved filename title and keeps Markdown headings in the excerpt", async () => {

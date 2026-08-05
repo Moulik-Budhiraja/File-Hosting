@@ -1372,6 +1372,23 @@ export async function derivePreview(
   input: RendererInput,
   registry = createDefaultPreviewRendererRegistry(),
 ): Promise<PreviewExtraction> {
+  if (input.size > MAX_SOURCE_BYTES) {
+    if (
+      !Number.isSafeInteger(input.size) ||
+      input.size < 0 ||
+      !/^[a-f0-9]{64}$/u.test(input.sha256)
+    ) {
+      throw new PreviewSourceUnavailableError();
+    }
+    return {
+      family: "binary",
+      label: "FILE",
+      title: safeTitle(input),
+      facts: [formatBytes(input.size)],
+      sourceDigest: input.sha256,
+      visual: { kind: "binary" },
+    };
+  }
   const deadlineAt = Date.now() + PREVIEW_EXTRACTION_LIMITS.wallTimeoutMs;
   const deadlineInput: RendererInput = { ...input, deadlineAt };
   try {

@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { access, readFile } from "node:fs/promises";
 import path from "node:path";
@@ -213,8 +214,7 @@ test("Linux sandbox keeps nested app roots read-only and pins worker temp paths"
   );
   assert.ok(temporaryBind >= 0 && rootBind > temporaryBind);
   const procDirectory = arguments_.findIndex(
-    (value, index) =>
-      value === "--dir" && arguments_[index + 1] === "/proc",
+    (value, index) => value === "--dir" && arguments_[index + 1] === "/proc",
   );
   const procMode = arguments_.findIndex(
     (value, index) =>
@@ -336,6 +336,31 @@ test("runtime assertion executes packaged media tools before server startup", as
   const runtimeAssets = await text("server/runtime/assert-runtime-assets.mjs");
   assert.match(runtimeAssets, /spawnSync\(binary, \["-version"\]/u);
   assert.match(runtimeAssets, /probe\.status !== 0/u);
+  assert.match(runtimeAssets, /FFMPEG_SHA256/u);
+  for (const digest of [
+    "a90e3db6a3fd35f6074b013f948b1aa45b31c6375489d39e572bea3f18336584",
+    "cfe20936c83ecf5d68e424b87e8cc45b24dd6be81787810123bb964a0df686f9",
+    "ed652b2f32e0851d1946894fb8333f5b677c1b2ce6b9d187910a67f8b99da028",
+    "237800b37bb65a81ad47871c6c8b7c45c0a3ca62a5b3f9d2a7a9a2dd9a338271",
+    "e9fd5e711debab9d680955fc1e38a2c1160fd280b144476cc3f62bc43ef49db1",
+  ]) {
+    assert.match(runtimeAssets, new RegExp(digest, "u"));
+  }
+  const rejected = spawnSync(
+    process.execPath,
+    ["runtime/assert-runtime-assets.mjs"],
+    {
+      cwd: path.join(root, "server"),
+      env: { ...process.env, FFMPEG_BIN: process.execPath },
+      encoding: "utf8",
+      timeout: 15_000,
+    },
+  );
+  assert.notEqual(rejected.status, 0);
+  assert.match(
+    `${rejected.stdout}${rejected.stderr}`,
+    /ffmpeg executable digest mismatch/u,
+  );
   const instrumentation = await text("server/src/instrumentation.ts");
   assert.match(instrumentation, /warmPreviewMediaTools/u);
   assert.match(runtimeAssets, /media-command-worker\.mjs/u);

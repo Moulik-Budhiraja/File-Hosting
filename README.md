@@ -123,8 +123,12 @@ the server remains non-root with zero effective capabilities, and Bubblewrap
 supplies the inner no-network, read-only application sandbox.
 Sandbox startup failure is fail-closed. Native media tools receive a private, mode-0600 snapshot
 path inside that restricted filesystem, fixed arguments, and
-FFmpeg's `file,pipe` protocol whitelist; snapshots are checksum-bound before and
-after derivation and are removed at settlement.
+FFmpeg's `file,pipe` protocol whitelist; its executable must match a tracked SHA-256
+for macOS arm64/x64, Linux arm64/x64, or Windows x64 before startup. Snapshots are
+checksum-bound before and after derivation and are removed at settlement. Public
+sources larger than the bounded parser limit use a deterministic metadata-only card
+from the upload-time digest, filename, and size instead of rereading the complete
+object inside the preview deadline.
 
 Explicitly trusted test harnesses may opt out to exercise ordinary
 launcher/child/grandchild process-group cleanup. On other non-production POSIX
