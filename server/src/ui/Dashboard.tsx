@@ -387,7 +387,7 @@ export function SystemStatus({ refreshMs = 30_000 }: { refreshMs?: number }) {
           value={`${info.storage.object_count.toLocaleString("en-US")} · ${info.storage.public_count.toLocaleString("en-US")} public · ${info.storage.protected_count.toLocaleString("en-US")} protected · ${info.storage.private_count.toLocaleString("en-US")} private`}
         />
         <StatusLine
-          label="Stored bytes"
+          label="Object bytes"
           value={exactSize(info.storage.object_bytes)}
         />
         <StatusLine

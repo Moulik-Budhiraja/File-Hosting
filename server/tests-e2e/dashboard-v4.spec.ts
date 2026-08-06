@@ -164,7 +164,10 @@ test("05 approved overview stale and storage-floor states", async ({
     systemCalls += 1;
     if (systemCalls === 1) {
       const response = await route.fetch();
-      const body = await response.json();
+      const body = (await response.json()) as {
+        storage: { free_bytes: number };
+        config: { min_free_bytes: number };
+      };
       body.storage.free_bytes = Math.max(1, body.config.min_free_bytes - 1);
       await route.fulfill({ response, json: body });
     } else {
