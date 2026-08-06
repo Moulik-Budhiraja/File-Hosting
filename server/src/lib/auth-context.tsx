@@ -35,7 +35,10 @@ export const USER_SCOPE_IDENTITY_KEY = "fs.user-scope-identity";
 
 const USER_SCOPED_TASK_PARAMS = [
   "q",
+  "name",
+  "tag",
   "visibility",
+  "archive",
   "scope",
   "cursor",
   "prev",

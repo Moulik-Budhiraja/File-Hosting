@@ -44,6 +44,7 @@ export interface ListFilesOptions {
   name?: string;
   tags: string[];
   visibility?: Visibility;
+  archive?: "tar.gz" | "none";
   /** Restrict to files owned by this user id — applied in SQL before
    * cursor pagination so filtered pages and empties are truthful. */
   owner?: string;

@@ -144,7 +144,14 @@ test("console pages render without console errors for an admin", async ({
   page.on("console", (message) => {
     if (message.type() === "error") problems.push(`console: ${message.text()}`);
   });
-  for (const route of ["/files", "/users", "/keys", "/account"]) {
+  for (const route of [
+    "/overview",
+    "/files",
+    "/system",
+    "/users",
+    "/keys",
+    "/account",
+  ]) {
     await page.goto(route);
     await page.waitForLoadState("networkidle");
   }

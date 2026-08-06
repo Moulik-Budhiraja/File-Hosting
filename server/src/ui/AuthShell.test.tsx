@@ -83,6 +83,7 @@ test("members never see the Users nav item; admins do", async () => {
   );
   await screen.findByRole("link", { name: "Files" });
   expect(screen.queryByRole("link", { name: "Users" })).toBeNull();
+  expect(screen.getByRole("link", { name: "More" })).toBeTruthy();
   cleanup();
 
   vi.stubGlobal(
@@ -95,6 +96,8 @@ test("members never see the Users nav item; admins do", async () => {
     </AuthProvider>,
   );
   expect(await screen.findByRole("link", { name: "Users" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "Overview" })).toBeTruthy();
+  expect(screen.getByRole("link", { name: "System" })).toBeTruthy();
 });
 
 test("AdminGate shows a truthful permission-denied state to members", async () => {
