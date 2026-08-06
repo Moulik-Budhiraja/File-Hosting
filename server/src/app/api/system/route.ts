@@ -19,6 +19,8 @@ export async function GET(request: Request): Promise<Response> {
       node: info.node,
       uptime_seconds: info.uptimeSeconds,
       storage: {
+        volume_total_bytes: info.storage.volumeTotalBytes,
+        volume_used_bytes: info.storage.volumeUsedBytes,
         free_bytes: info.storage.freeBytes,
         object_bytes: info.storage.objectBytes,
         object_count: info.storage.objectCount,

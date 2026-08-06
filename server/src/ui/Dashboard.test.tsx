@@ -1,4 +1,5 @@
 import {
+  act,
   cleanup,
   render,
   screen,
@@ -25,6 +26,8 @@ const system = {
   node: "v22.18.0",
   uptime_seconds: 98640,
   storage: {
+    volume_total_bytes: 1000 * 1024 ** 3,
+    volume_used_bytes: 500 * 1024 ** 3,
     free_bytes: 87.4 * 1024 ** 3,
     object_bytes: 412.6 * 1024 ** 3,
     object_count: 18204,
@@ -113,7 +116,7 @@ afterEach(() => {
 
 test("live operations renders real capacity, transfers, warnings, and recent files", async () => {
   renderDashboard(<LiveOperations />);
-  expect(await screen.findByText("412.6 GB")).toBeTruthy();
+  expect(await screen.findByText("500.0 GB")).toBeTruthy();
   expect(screen.getByText("87.4 GB")).toBeTruthy();
   expect(screen.getByText("18,204")).toBeTruthy();
   const transfers = screen.getByRole("region", { name: "Active transfers" });
@@ -151,13 +154,81 @@ test("live operations keeps last data but marks it frozen after refresh failure"
       <LiveOperations refreshMs={20} />
     </AuthProvider>,
   );
-  expect(await screen.findByText("412.6 GB")).toBeTruthy();
+  expect(await screen.findByText("500.0 GB")).toBeTruthy();
   await waitFor(
     () => expect(screen.getByRole("status").textContent).toMatch(/frozen/i),
     { timeout: 1000 },
   );
-  expect(screen.getByText("412.6 GB")).toBeTruthy();
+  expect(screen.getByText("500.0 GB")).toBeTruthy();
   expect(screen.queryByText("69%")).toBeNull();
+});
+
+test("live polling never overlaps a slow request", async () => {
+  let resolveSystem!: (response: Response) => void;
+  let calls = 0;
+  const pending = new Promise<Response>((resolve) => {
+    resolveSystem = resolve;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      if (input === "/api/auth/me")
+        return json({
+          user: admin,
+          role: "admin",
+          legacy_service_credential: false,
+        });
+      if (input === "/api/system") {
+        calls += 1;
+        if (calls === 1) return pending;
+        return json(system);
+      }
+      if (input.startsWith("/api/files?"))
+        return json({ items: [], next_cursor: null });
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <LiveOperations refreshMs={10} />
+    </AuthProvider>,
+  );
+  await act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 40));
+  });
+  expect(calls).toBe(1);
+  await act(async () => resolveSystem(json(system)));
+  await waitFor(() => expect(calls).toBeGreaterThan(1));
+});
+
+test("recent files distinguishes loading from a recoverable error", async () => {
+  let rejectFiles!: (cause: Error) => void;
+  const files = new Promise<Response>((_resolve, reject) => {
+    rejectFiles = reject;
+  });
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      if (input === "/api/auth/me")
+        return json({
+          user: admin,
+          role: "admin",
+          legacy_service_credential: false,
+        });
+      if (input === "/api/system") return json(system);
+      if (input.startsWith("/api/files?")) return files;
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <LiveOperations />
+    </AuthProvider>,
+  );
+  expect(await screen.findByText("Loading files…")).toBeTruthy();
+  await act(async () => rejectFiles(new Error("offline")));
+  expect(await screen.findByText("Files unavailable")).toBeTruthy();
+  expect(screen.getByRole("button", { name: "Retry files" })).toBeTruthy();
 });
 
 test("system status exposes runtime values, protected totals, and read-only limits", async () => {

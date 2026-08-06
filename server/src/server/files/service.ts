@@ -43,6 +43,14 @@ function availableBytes(stats: Awaited<ReturnType<typeof statfs>>): bigint {
   return BigInt(stats.bavail) * BigInt(stats.bsize);
 }
 
+function safeBytes(value: bigint): number {
+  return Number(
+    value > BigInt(Number.MAX_SAFE_INTEGER)
+      ? BigInt(Number.MAX_SAFE_INTEGER)
+      : value,
+  );
+}
+
 function normalizeMimeType(name: string, supplied?: string): string {
   const contentType = supplied
     ?.split(";", 1)[0]
@@ -382,6 +390,8 @@ export class FileService {
     node: string;
     uptimeSeconds: number;
     storage: {
+      volumeTotalBytes: number;
+      volumeUsedBytes: number;
       freeBytes: number;
       objectBytes: number;
       objectCount: number;
@@ -415,6 +425,8 @@ export class FileService {
       node: process.version,
       uptimeSeconds: Math.floor(process.uptime()),
       storage: {
+        volumeTotalBytes: health.totalBytes,
+        volumeUsedBytes: health.usedBytes,
         freeBytes: health.freeBytes,
         objectBytes: stats.objectBytes,
         objectCount: stats.objectCount,
@@ -434,16 +446,22 @@ export class FileService {
     };
   }
 
-  async checkHealth(): Promise<{ freeBytes: number }> {
+  async checkHealth(): Promise<{
+    freeBytes: number;
+    totalBytes: number;
+    usedBytes: number;
+  }> {
     await this.repository.ping();
     await access(this.config.storageDir, constants.R_OK | constants.W_OK);
-    const free = availableBytes(await statfs(this.config.storageDir));
+    const stats = await statfs(this.config.storageDir);
+    const free = availableBytes(stats);
+    const total = BigInt(stats.blocks) * BigInt(stats.bsize);
+    const used =
+      (BigInt(stats.blocks) - BigInt(stats.bfree)) * BigInt(stats.bsize);
     return {
-      freeBytes: Number(
-        free > BigInt(Number.MAX_SAFE_INTEGER)
-          ? BigInt(Number.MAX_SAFE_INTEGER)
-          : free,
-      ),
+      freeBytes: safeBytes(free),
+      totalBytes: safeBytes(total),
+      usedBytes: safeBytes(used),
     };
   }
 }

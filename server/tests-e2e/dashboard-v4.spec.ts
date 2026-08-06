@@ -3,6 +3,7 @@ import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 
 import { expect, test, type Page, type TestInfo } from "@playwright/test";
+import sharp from "sharp";
 
 import { LEGACY_TOKEN, signInContext, uploadFile } from "./helpers";
 
@@ -90,6 +91,92 @@ async function evidence(page: Page, testInfo: TestInfo, name: string) {
   );
   expect(bodyOverflow, `${name} body overflow`).toBeLessThanOrEqual(0);
   const bytes = await page.screenshot({ fullPage: true });
+  const reference = await readFile(path.join(referenceRoot, name));
+  const referenceMeta = await sharp(reference).metadata();
+  const viewport = page.viewportSize();
+  const comparisonBytes =
+    viewport &&
+    referenceMeta.width === viewport.width &&
+    (referenceMeta.height ?? 0) <= viewport.height
+      ? await page.screenshot({
+          clip: {
+            x: 0,
+            y: 0,
+            width: referenceMeta.width,
+            height: referenceMeta.height!,
+          },
+        })
+      : bytes;
+  const sampleSize = 96;
+  const [actualMeta, actualRaw, referenceRaw] = await Promise.all([
+    sharp(comparisonBytes).metadata(),
+    sharp(comparisonBytes)
+      .resize(sampleSize, sampleSize, { fit: "fill" })
+      .removeAlpha()
+      .raw()
+      .toBuffer(),
+    sharp(reference)
+      .resize(sampleSize, sampleSize, { fit: "fill" })
+      .removeAlpha()
+      .raw()
+      .toBuffer(),
+  ]);
+  if ((actualMeta.width ?? 0) > 1_000) {
+    expect(actualMeta.width, `${name} width`).toBe(referenceMeta.width);
+    expect(actualMeta.height, `${name} height`).toBe(referenceMeta.height);
+  }
+  let colorDifference = 0;
+  let actualEdge = 0;
+  let referenceEdge = 0;
+  let edgeDifference = 0;
+  let edgeSamples = 0;
+  for (let offset = 0; offset < actualRaw.length; offset += 1) {
+    colorDifference += Math.abs(actualRaw[offset]! - referenceRaw[offset]!);
+  }
+  for (let y = 1; y < sampleSize; y += 1) {
+    for (let x = 1; x < sampleSize; x += 1) {
+      const offset = (y * sampleSize + x) * 3;
+      const left = offset - 3;
+      const above = ((y - 1) * sampleSize + x) * 3;
+      let actualGradient = 0;
+      let referenceGradient = 0;
+      for (let channel = 0; channel < 3; channel += 1) {
+        actualGradient +=
+          Math.abs(actualRaw[offset + channel]! - actualRaw[left + channel]!) +
+          Math.abs(actualRaw[offset + channel]! - actualRaw[above + channel]!);
+        referenceGradient +=
+          Math.abs(
+            referenceRaw[offset + channel]! - referenceRaw[left + channel]!,
+          ) +
+          Math.abs(
+            referenceRaw[offset + channel]! - referenceRaw[above + channel]!,
+          );
+      }
+      actualGradient /= 6;
+      referenceGradient /= 6;
+      actualEdge += actualGradient;
+      referenceEdge += referenceGradient;
+      edgeDifference += Math.abs(actualGradient - referenceGradient);
+      edgeSamples += 1;
+    }
+  }
+  // Independent release tolerances: reject blank/missing structure and broad
+  // palette/layout drift while allowing genuine runtime text and data changes.
+  const normalizedColorDifference = colorDifference / actualRaw.length / 255;
+  const normalizedEdgeDifference = edgeDifference / edgeSamples / 255;
+  const edgeDensityRatio = actualEdge / referenceEdge;
+  expect(
+    normalizedColorDifference,
+    `${name} palette drift`,
+  ).toBeLessThanOrEqual(0.085);
+  expect(
+    normalizedEdgeDifference,
+    `${name} structure drift`,
+  ).toBeLessThanOrEqual(0.06);
+  expect(edgeDensityRatio, `${name} missing visual structure`).toBeGreaterThan(
+    0.18,
+  );
+  expect(edgeDensityRatio, `${name} excess visual noise`).toBeLessThan(2.25);
   if (process.env.DASHBOARD_EVIDENCE_DIR) {
     await mkdir(process.env.DASHBOARD_EVIDENCE_DIR, { recursive: true });
     await page.screenshot({
@@ -107,7 +194,7 @@ test("01 approved desktop overview", async ({ page, baseURL }, testInfo) => {
   await expect(
     page.getByRole("heading", { name: "Live Operations" }),
   ).toBeVisible();
-  await expect(page.getByText("Storage used")).toBeVisible();
+  await expect(page.getByText("Volume used")).toBeVisible();
   await expect(
     page.getByRole("region", { name: "Active transfers" }),
   ).toBeVisible();

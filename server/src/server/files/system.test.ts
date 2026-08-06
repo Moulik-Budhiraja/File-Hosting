@@ -75,6 +75,8 @@ describe("system info endpoint", () => {
       node: string;
       uptime_seconds: number;
       storage: {
+        volume_total_bytes: number;
+        volume_used_bytes: number;
         free_bytes: number;
         object_bytes: number;
         object_count: number;
@@ -100,6 +102,8 @@ describe("system info endpoint", () => {
     assert.equal(body.storage.private_count, 1);
     assert.equal(body.storage.temp_part_count, 1);
     assert.ok(body.storage.free_bytes > 0);
+    assert.ok(body.storage.volume_total_bytes > body.storage.free_bytes);
+    assert.ok(body.storage.volume_used_bytes > 0);
     assert.ok(body.database.db_bytes !== null && body.database.db_bytes > 0);
     assert.equal(body.config.max_upload_bytes, 2048);
     assert.equal(body.config.min_free_bytes, 0);

@@ -1,7 +1,7 @@
 "use client";
 
 import Link from "next/link";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 import { apiFetch } from "@/lib/api";
 import { formatDateTime, formatSize } from "@/lib/format";
@@ -12,6 +12,8 @@ export interface SystemSnapshot {
   node: string;
   uptime_seconds: number;
   storage: {
+    volume_total_bytes: number;
+    volume_used_bytes: number;
     free_bytes: number;
     object_bytes: number;
     object_count: number;
@@ -46,25 +48,45 @@ function useLiveData<T>(loader: () => Promise<T>, refreshMs: number) {
     kind: "loading",
     data: null,
   });
-  const [generation, setGeneration] = useState(0);
+  const inFlight = useRef(false);
+  const pending = useRef(false);
+  const mounted = useRef(false);
   const load = useCallback(async () => {
+    if (inFlight.current) {
+      pending.current = true;
+      return;
+    }
+    inFlight.current = true;
     try {
       const data = await loader();
-      setState({ kind: "ready", data });
+      if (mounted.current) setState({ kind: "ready", data });
     } catch {
-      setState((current) =>
-        current.data === null
-          ? { kind: "error", data: null }
-          : { kind: "stale", data: current.data },
-      );
+      if (mounted.current) {
+        setState((current) =>
+          current.data === null
+            ? { kind: "error", data: null }
+            : { kind: "stale", data: current.data },
+        );
+      }
+    } finally {
+      inFlight.current = false;
+      if (mounted.current && pending.current) {
+        pending.current = false;
+        queueMicrotask(() => void load());
+      }
     }
   }, [loader]);
   useEffect(() => {
+    mounted.current = true;
     void load();
     const timer = window.setInterval(() => void load(), refreshMs);
-    return () => window.clearInterval(timer);
-  }, [load, refreshMs, generation]);
-  return { state, retry: () => setGeneration((value) => value + 1) };
+    return () => {
+      mounted.current = false;
+      pending.current = false;
+      window.clearInterval(timer);
+    };
+  }, [load, refreshMs]);
+  return { state, retry: load };
 }
 
 function exactSize(bytes: number): string {
@@ -128,9 +150,10 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
     info.storage.free_bytes < info.config.min_free_bytes * 2;
   const belowFloor = info.storage.free_bytes < info.config.min_free_bytes;
   const frozen = system.state.kind === "stale";
-  const reachable = info.storage.object_bytes + info.storage.free_bytes;
   const used =
-    reachable > 0 ? (info.storage.object_bytes / reachable) * 100 : 0;
+    info.storage.volume_total_bytes > 0
+      ? (info.storage.volume_used_bytes / info.storage.volume_total_bytes) * 100
+      : 0;
 
   return (
     <div className="dashboard-view">
@@ -159,8 +182,8 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
       ) : null}
       <section className="storage-strip" aria-label="Storage">
         <div>
-          <span>Storage used</span>
-          <strong>{exactSize(info.storage.object_bytes)}</strong>
+          <span>Volume used</span>
+          <strong>{exactSize(info.storage.volume_used_bytes)}</strong>
         </div>
         <div>
           <span>Free</span>
@@ -180,7 +203,10 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
           <span>Objects</span>
           <strong>{info.storage.object_count.toLocaleString("en-US")}</strong>
         </div>
-        <small>volume /data · {used.toFixed(1)}% used</small>
+        <small>
+          object bytes {exactSize(info.storage.object_bytes)} ·{" "}
+          {used.toFixed(1)}% used
+        </small>
         <div className="capacity-line">
           <span style={{ width: `${used}%` }} />
         </div>
@@ -237,7 +263,22 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
               <h2 className="section-label">Recent files</h2>
               <Link href="/files">all files →</Link>
             </div>
-            {recent.state.data?.items.length ? (
+            {recent.state.kind === "loading" ? (
+              <p className="dashboard-empty" role="status">
+                Loading files…
+              </p>
+            ) : recent.state.kind === "error" ? (
+              <div className="dashboard-empty" role="alert">
+                Files unavailable{" "}
+                <button
+                  type="button"
+                  className="button button-small"
+                  onClick={recent.retry}
+                >
+                  Retry files
+                </button>
+              </div>
+            ) : recent.state.data.items.length ? (
               <table className="data-table">
                 <thead>
                   <tr>
@@ -273,7 +314,9 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
                 </tbody>
               </table>
             ) : (
-              <p className="dashboard-empty">No files</p>
+              <p className="dashboard-empty">
+                {recent.state.kind === "stale" ? "Files frozen" : "No files"}
+              </p>
             )}
           </section>
         </div>
@@ -355,7 +398,7 @@ export function SystemStatus({ refreshMs = 30_000 }: { refreshMs?: number }) {
         <span className="page-header-note">config read-only</span>
       </div>
       {load.state.kind === "stale" ? (
-        <div className="dashboard-statebar">
+        <div className="dashboard-statebar" role="status" aria-live="polite">
           STALE · values frozen{" "}
           <button className="button button-small" onClick={load.retry}>
             Retry
