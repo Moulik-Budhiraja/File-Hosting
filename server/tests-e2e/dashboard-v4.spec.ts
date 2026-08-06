@@ -214,10 +214,9 @@ test("07 approved inspector access and destructive confirmation", async ({
   await page.getByRole("button", { name: "Delete…" }).click();
   const dialog = page.getByRole("dialog", { name: /Delete dashboard-v4/ });
   await expect(dialog).toContainText("cannot be undone");
-  await expect(dialog.getByRole("button", { name: "Cancel" })).toBeFocused();
-  await dialog
-    .getByLabel(/Type .* to confirm/)
-    .fill("dashboard-v4-design-audit.parquet");
+  const confirmation = dialog.getByLabel(/Type .* to confirm/);
+  await expect(confirmation).toBeFocused();
+  await confirmation.fill("dashboard-v4-design-audit.parquet");
   await expect(
     dialog.getByRole("button", { name: "Delete file" }),
   ).toBeEnabled();

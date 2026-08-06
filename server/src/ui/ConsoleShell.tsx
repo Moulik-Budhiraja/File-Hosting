@@ -40,26 +40,34 @@ export function ConsoleNav({ active }: { active: ConsoleSection }) {
       <nav aria-label="Console">
         <ul className="nav-items">
           {NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin).map(
-            (item) => (
-              <li
-                key={item.key}
-                className={
-                  item.mobileOnly
-                    ? "nav-mobile-only"
-                    : item.mobileHidden
-                      ? "nav-mobile-hidden"
-                      : undefined
-                }
-              >
-                <Link
-                  href={item.href}
-                  className={`nav-item${item.key === active ? " nav-item-active" : ""}`}
-                  aria-current={item.key === active ? "page" : undefined}
+            (item) => {
+              const isActive =
+                item.key === active ||
+                (item.key === "more" &&
+                  (active === "users" ||
+                    active === "keys" ||
+                    active === "account"));
+              return (
+                <li
+                  key={item.key}
+                  className={
+                    item.mobileOnly
+                      ? "nav-mobile-only"
+                      : item.mobileHidden
+                        ? "nav-mobile-hidden"
+                        : undefined
+                  }
                 >
-                  {item.label}
-                </Link>
-              </li>
-            ),
+                  <Link
+                    href={item.href}
+                    className={`nav-item${isActive ? " nav-item-active" : ""}`}
+                    aria-current={isActive ? "page" : undefined}
+                  >
+                    {item.label}
+                  </Link>
+                </li>
+              );
+            },
           )}
         </ul>
       </nav>
