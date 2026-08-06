@@ -271,6 +271,7 @@ test("a busy delete dialog resists Escape until the real request completes", asy
 
   await page.getByRole("button", { name: /busy-delete\.txt/ }).click();
   await page.getByRole("button", { name: "Delete…" }).click();
+  await page.getByLabel(/Type .* to confirm/).fill("busy-delete.txt");
   await page.getByRole("button", { name: "Delete file" }).click();
   await page.keyboard.press("Escape");
   await expect(page.getByRole("dialog")).toBeVisible();
