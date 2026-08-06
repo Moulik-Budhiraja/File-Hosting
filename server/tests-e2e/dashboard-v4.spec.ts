@@ -50,13 +50,9 @@ const references = [
   ],
 ] as const;
 
-const referenceRoot = path.join(
+const referenceRoot =
   process.env.DASHBOARD_REFERENCE_DIR ??
-    path.join(
-      process.env.HOME ?? "",
-      "Library/Caches/Hermes/Scratch/20260803-file-hosting-design-review/minimal-copy-v2/dashboard-v4",
-    ),
-);
+  path.resolve(process.cwd(), "test-fixtures/dashboard-v4-design");
 
 let seededId = "";
 
