@@ -18,7 +18,7 @@ import {
 import { runKillableProcess } from "./process-tree";
 import type { FileService } from "./service";
 import type { StoredFile } from "./types";
-import { buildUnfurlModel } from "./unfurl";
+import { buildUnfurlModel, type PublicUnfurlModel } from "./unfurl";
 
 const temporaryDirectories: string[] = [];
 
@@ -120,6 +120,409 @@ afterEach(async () => {
 });
 
 describe("OG Social Cards V2 byte-derived rendering", () => {
+  it("omits the site-label lockup from every generated card family", async () => {
+    const raster = await sharp({
+      create: { width: 927, height: 1200, channels: 3, background: "#f6f5f1" },
+    })
+      .png()
+      .toBuffer();
+    const landscapeRaster = await sharp({
+      create: { width: 1200, height: 630, channels: 3, background: "#063b52" },
+    })
+      .png()
+      .toBuffer();
+    const base = {
+      title: "release-proof.ext",
+      description: "Type · 1 KB · 00:06",
+      ogType: "website" as const,
+      twitterCard: "summary_large_image" as const,
+      canonicalUrl: "https://example.test/release-proof",
+      imageUrl: "https://example.test/og/release-proof.png",
+      imageAlt: "release proof",
+    };
+    const cases: Array<[string, PublicUnfurlModel]> = [
+      [
+        "image-portrait",
+        {
+          ...base,
+          kind: "image",
+          preview: {
+            family: "image",
+            label: "JPEG",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "1".repeat(64),
+            visual: { kind: "image", raster },
+          },
+        },
+      ],
+      [
+        "image-landscape",
+        {
+          ...base,
+          kind: "image",
+          preview: {
+            family: "image",
+            label: "JPEG",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "1".repeat(64),
+            visual: { kind: "image", raster: landscapeRaster },
+          },
+        },
+      ],
+      [
+        "video",
+        {
+          ...base,
+          kind: "video",
+          preview: {
+            family: "video",
+            label: "MP4",
+            title: base.title,
+            facts: ["1 KB", "00:06"],
+            sourceDigest: "2".repeat(64),
+            visual: { kind: "poster", raster },
+          },
+        },
+      ],
+      [
+        "video-fallback",
+        {
+          ...base,
+          kind: "video",
+          preview: {
+            family: "video",
+            label: "MOV",
+            title: base.title,
+            facts: ["1 KB", "00:06"],
+            sourceDigest: "2".repeat(64),
+            visual: { kind: "binary", hex: "00 01 02 03" },
+          },
+        },
+      ],
+      [
+        "pdf-portrait",
+        {
+          ...base,
+          kind: "pdf",
+          preview: {
+            family: "pdf",
+            label: "PDF",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "3".repeat(64),
+            visual: { kind: "page", raster },
+          },
+        },
+      ],
+      [
+        "pdf-landscape",
+        {
+          ...base,
+          kind: "pdf",
+          preview: {
+            family: "pdf",
+            label: "PDF",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "3".repeat(64),
+            visual: { kind: "page", raster: landscapeRaster },
+          },
+        },
+      ],
+      [
+        "document",
+        {
+          ...base,
+          kind: "document",
+          preview: {
+            family: "document",
+            label: "Document",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "4".repeat(64),
+            visual: { kind: "text", lines: ["Release heading", "Body"] },
+          },
+        },
+      ],
+      [
+        "text",
+        {
+          ...base,
+          kind: "text",
+          preview: {
+            family: "text",
+            label: "Text",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "5".repeat(64),
+            visual: { kind: "text", lines: ["Release heading", "Body"] },
+          },
+        },
+      ],
+      [
+        "markdown",
+        {
+          ...base,
+          kind: "markdown",
+          preview: {
+            family: "markdown",
+            label: "Markdown",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "6".repeat(64),
+            visual: { kind: "markdown", lines: ["# Release heading", "Body"] },
+          },
+        },
+      ],
+      [
+        "code",
+        {
+          ...base,
+          kind: "code",
+          preview: {
+            family: "code",
+            label: "Code",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "7".repeat(64),
+            visual: { kind: "code", lines: ["const release = true;"] },
+          },
+        },
+      ],
+      [
+        "code-two-line",
+        {
+          ...base,
+          title: "this-is-a-deliberately-long-code-file-name-that-wraps.ts",
+          kind: "code",
+          preview: {
+            family: "code",
+            label: "Code",
+            title: "this-is-a-deliberately-long-code-file-name-that-wraps.ts",
+            facts: ["1 KB"],
+            sourceDigest: "7".repeat(64),
+            visual: { kind: "code", lines: ["const release = true;"] },
+          },
+        },
+      ],
+      [
+        "audio-waveform",
+        {
+          ...base,
+          kind: "audio",
+          preview: {
+            family: "audio",
+            label: "Audio",
+            title: base.title,
+            facts: ["1 KB", "00:06"],
+            sourceDigest: "8".repeat(64),
+            visual: { kind: "waveform", samples: [0.1, 0.8, 0.3] },
+          },
+        },
+      ],
+      [
+        "audio-artwork",
+        {
+          ...base,
+          kind: "audio",
+          preview: {
+            family: "audio",
+            label: "Audio",
+            title: base.title,
+            facts: ["1 KB", "00:06"],
+            sourceDigest: "9".repeat(64),
+            visual: { kind: "artwork", raster },
+          },
+        },
+      ],
+      [
+        "archive",
+        {
+          ...base,
+          kind: "archive",
+          preview: {
+            family: "archive",
+            label: "TAR.GZ",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "a".repeat(64),
+            visual: { kind: "archive", entries: ["readme.txt"] },
+          },
+        },
+      ],
+      [
+        "svg-source",
+        {
+          ...base,
+          kind: "image",
+          preview: {
+            family: "image",
+            label: "SVG",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "a".repeat(64),
+            visual: {
+              kind: "svg-source",
+              digest: "a".repeat(64),
+              hex: "3c 73 76 67",
+            },
+          },
+        },
+      ],
+      [
+        "generic-binary",
+        {
+          ...base,
+          kind: "binary",
+          preview: {
+            family: "binary",
+            label: "Binary",
+            title: base.title,
+            facts: ["1 KB"],
+            sourceDigest: "b".repeat(64),
+            visual: { kind: "binary", hex: "00 01 02 03" },
+          },
+        },
+      ],
+      ["generic-fallback", { ...base, kind: "image" }],
+    ];
+    for (const [family, model] of cases) {
+      const composed = composeOgCardSvg(model);
+      const svg = composed.toString("utf8");
+      assert.doesNotMatch(
+        svg,
+        /files\.moulik\.dev/u,
+        `${family} retained the site label`,
+      );
+      assert.doesNotMatch(
+        svg,
+        /<rect[^>]+width="9" height="9" rx="2" fill="#e3a44f"/u,
+        `${family} retained the adjacent site marker`,
+      );
+      const rendered = await sharp(composed).png().toBuffer();
+      const metadata = await sharp(rendered).metadata();
+      assert.equal(
+        metadata.width,
+        1200,
+        `${family} rendered at the wrong width`,
+      );
+      assert.equal(
+        metadata.height,
+        630,
+        `${family} rendered at the wrong height`,
+      );
+      const labelZone =
+        family === "audio-artwork"
+          ? { left: 678, top: 42, width: 230, height: 38 }
+          : family === "document"
+            ? { left: 895, top: 540, width: 255, height: 38 }
+            : family === "markdown"
+              ? { left: 895, top: 568, width: 255, height: 38 }
+              : family === "code"
+                ? { left: 895, top: 556, width: 255, height: 38 }
+                : family === "code-two-line"
+                  ? { left: 895, top: 584, width: 255, height: 38 }
+                  : { left: 48, top: 42, width: 230, height: 38 };
+      const { data } = await sharp(rendered)
+        .extract(labelZone)
+        .removeAlpha()
+        .raw()
+        .toBuffer({ resolveWithObject: true });
+      let markerPixels = 0;
+      for (let offset = 0; offset < data.length; offset += 3) {
+        const red = data[offset] ?? 0;
+        const green = data[offset + 1] ?? 0;
+        const blue = data[offset + 2] ?? 0;
+        if (red >= 180 && green >= 105 && green <= 205 && blue <= 120)
+          markerPixels += 1;
+      }
+      assert.equal(markerPixels, 0, `${family} rendered the site-label marker`);
+    }
+  });
+
+  it("keeps a crisp hard boundary between the dark PDF panel and page", async () => {
+    const raster = await sharp({
+      create: { width: 927, height: 1200, channels: 3, background: "#f6f5f1" },
+    })
+      .png()
+      .toBuffer();
+    const png = await renderSvgInWorker(
+      composeOgCardSvg({
+        title: "field-report.pdf",
+        description: "PDF · 1 KB",
+        ogType: "website",
+        twitterCard: "summary_large_image",
+        canonicalUrl: "https://example.test/pdf",
+        imageUrl: "https://example.test/og/pdf.png",
+        imageAlt: "pdf",
+        kind: "pdf",
+        preview: {
+          family: "pdf",
+          label: "PDF",
+          title: "field-report.pdf",
+          facts: ["1 KB"],
+          sourceDigest: "c".repeat(64),
+          visual: { kind: "page", raster },
+        },
+      }),
+    );
+    const { data, info } = await sharp(png)
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    const pixel = (x: number, y: number) => {
+      const offset = (y * info.width + x) * info.channels;
+      return [data[offset] ?? 0, data[offset + 1] ?? 0, data[offset + 2] ?? 0];
+    };
+    const reference = pixel(470, 315);
+    for (let x = 401; x < 460; x += 1) {
+      assert.ok(
+        Math.max(
+          ...pixel(x, 315).map((channel, index) =>
+            Math.abs(channel - (reference[index] ?? 0)),
+          ),
+        ) <= 2,
+        `PDF page column ${x} retained a gray transition`,
+      );
+    }
+    assert.ok(
+      Math.max(
+        ...pixel(399, 315).map((channel, index) =>
+          Math.abs(channel - (reference[index] ?? 0)),
+        ),
+      ) >= 120,
+      "PDF boundary must remain a hard dark-to-page transition",
+    );
+  });
+
+  it("omits the site-label lockup from the privacy-safe unavailable card", async () => {
+    const unavailable = await sharp(
+      path.resolve("runtime/assets/unavailable.png"),
+    )
+      .removeAlpha()
+      .raw()
+      .toBuffer();
+    let changed = 0;
+    for (let y = 245; y < 290; y += 1) {
+      for (let x = 440; x < 770; x += 1) {
+        const offset = (y * 1200 + x) * 3;
+        if (
+          (unavailable[offset] ?? 0) !== 13 ||
+          (unavailable[offset + 1] ?? 0) !== 14 ||
+          (unavailable[offset + 2] ?? 0) !== 16
+        )
+          changed += 1;
+      }
+    }
+    assert.equal(
+      changed,
+      0,
+      "unavailable card retained the site label or marker",
+    );
+  });
+
   it("matches the second iMessage review geometry and effective type scale", async () => {
     const raster = await sharp({
       create: { width: 1600, height: 900, channels: 3, background: "#b64f45" },
@@ -217,8 +620,11 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
     assert.match(markdown, /font-size="58"[^>]+font-weight="700"/u);
     assert.match(markdown, /font-size="30"[^>]+data-max-width/u);
     assert.doesNotMatch(markdown, /This sixth dense line must not render/u);
-    assert.match(markdown, /<rect x="901" y="576" width="9" height="9"/u);
-    assert.match(markdown, /<text x="1144" y="588"[^>]+text-anchor="end"/u);
+    assert.doesNotMatch(markdown, /files\.moulik\.dev/u);
+    assert.doesNotMatch(
+      markdown,
+      /<rect x="901" y="576" width="9" height="9"/u,
+    );
   });
 
   it("keeps low-amplitude audio structure and unavailable hierarchy visible at iMessage scale", async () => {
@@ -300,8 +706,8 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
       "unavailable Paper composition must not regain a generic centered artwork stack",
     );
     assert.ok(
-      changedIn(124, 68, 83, 14) >= 150,
-      "unavailable brand must remain legible at 332px",
+      changedIn(124, 68, 83, 14) <= 4,
+      "unavailable card must not retain the site-label lockup",
     );
     assert.ok(
       changedIn(113, 83, 105, 24) >= 500,

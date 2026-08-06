@@ -350,8 +350,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   const portraitRaster = dimensions
     ? Number(dimensions[2]) > Number(dimensions[1])
     : false;
-  const brand = (x = 56, y = 64, anchor = "start") =>
-    `<rect x="${anchor === "end" ? x - 243 : x}" y="${y - 12}" width="9" height="9" rx="2" fill="#e3a44f"/><text x="${anchor === "end" ? x : x + 20}" y="${y}" fill="#9fa3a9" font-family="${MONO}" font-size="20" font-weight="500" letter-spacing="2"${anchor === "end" ? ' text-anchor="end"' : ""}>files.moulik.dev</text>`;
+
   const titleText = (
     x: number,
     y: number,
@@ -378,13 +377,13 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
   if (model.kind === "image" && raster) {
     const portraitTitleLines = layoutOgTitle(safeTitle, 20, 2);
     body = portraitRaster
-      ? `${brand()}<image href="${raster}" x="590" y="0" width="440" height="630" preserveAspectRatio="xMidYMid slice"/>${titleText(56, portraitTitleLines.length > 1 ? 462 : 522, 58, 20)}${facts(56, 575)}`
-      : `<image href="${raster}" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/><rect width="1200" height="630" fill="url(#shade)"/>${brand()}${titleText(56, twoLineTitle ? 480 : 526, 58, 30)}${facts()}`;
+      ? `<image href="${raster}" x="590" y="0" width="440" height="630" preserveAspectRatio="xMidYMid slice"/>${titleText(56, portraitTitleLines.length > 1 ? 462 : 522, 58, 20)}${facts(56, 575)}`
+      : `<image href="${raster}" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/><rect width="1200" height="630" fill="url(#shade)"/>${titleText(56, twoLineTitle ? 480 : 526, 58, 30)}${facts()}`;
   } else if (model.kind === "video" && raster) {
-    body = `<image href="${raster}" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/><rect width="1200" height="630" fill="url(#videoShade)"/>${brand()}${titleText(56, twoLineTitle ? 440 : 520, 72, 28)}${facts(56, 596)}${play(1104, 528)}`;
+    body = `<image href="${raster}" x="0" y="0" width="1200" height="630" preserveAspectRatio="xMidYMid slice"/><rect width="1200" height="630" fill="url(#videoShade)"/>${titleText(56, twoLineTitle ? 440 : 520, 72, 28)}${facts(56, 596)}${play(1104, 528)}`;
   } else if (model.kind === "video") {
     const timeline = `<line x1="56" y1="320" x2="1143" y2="320" stroke="#30343a" stroke-width="2"/><path d="M56 310v20M193 314v12M329 310v20M465 314v12M601 310v20M737 314v12M873 310v20M1009 314v12M1143 310v20" stroke="#44484f" stroke-width="2"/>`;
-    body = `${brand()}${play(84, 224)}${timeline}${titleText(56, twoLineTitle ? 466 : 526, 60, 40)}${facts(56, 575)}`;
+    body = `${play(84, 224)}${timeline}${titleText(56, twoLineTitle ? 466 : 526, 60, 40)}${facts(56, 575)}`;
   } else if (model.kind === "pdf" && visual?.kind === "page") {
     const pageDimensions =
       raster && visual.raster ? pngDimensions(visual.raster) : null;
@@ -418,8 +417,8 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       landscapePage ? 2 : 3,
     );
     body = landscapePage
-      ? `${page}<rect x="0" y="330" width="1200" height="300" fill="url(#pdfShade)"/>${brand()}${titleText(56, pdfTitleLines.length > 1 ? 442 : 526, 68, 27)}${facts(56, 596)}`
-      : `${brand()}${page}<rect x="350" y="0" width="110" height="630" fill="url(#pageFade)"/>${titleText(56, pdfTitleLines.length > 2 ? 335 : pdfTitleLines.length > 1 ? 415 : 510, 56, 12, 3)}${facts(56, 594)}`;
+      ? `${page}<rect x="0" y="330" width="1200" height="300" fill="url(#pdfShade)"/>${titleText(56, pdfTitleLines.length > 1 ? 442 : 526, 68, 27)}${facts(56, 596)}`
+      : `${page}${titleText(56, pdfTitleLines.length > 2 ? 335 : pdfTitleLines.length > 1 ? 415 : 510, 56, 12, 3)}${facts(56, 594)}`;
   } else if (model.kind === "document" && visual?.kind !== "binary") {
     const documentHeading = layoutOgTitle(contentLines[0] ?? safeTitle, 26, 2)
       .map((line, index) =>
@@ -446,7 +445,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
     const documentLabel = contentLines[0]
       ? `<text x="312" y="145" fill="#8b8983" font-family="${MONO}" font-size="17" letter-spacing="3">${escapeXml((model.preview?.label ?? "Document").toUpperCase())}</text>`
       : "";
-    body = `<rect x="240" y="65" width="720" height="416" fill="#f4f2ed"/>${documentLabel}${documentHeading}${documentBody}<rect x="312" y="420" width="576" height="10" fill="#d0cec8"/><rect x="312" y="440" width="576" height="10" fill="#d0cec8"/><rect x="312" y="460" width="498" height="10" fill="#d0cec8"/><rect x="0" y="481" width="1200" height="149" fill="#0d0e10"/>${titleText(56, 553, 38, 42)}${facts(56, 591)}${brand(1144, 560, "end")}`;
+    body = `<rect x="240" y="65" width="720" height="416" fill="#f4f2ed"/>${documentLabel}${documentHeading}${documentBody}<rect x="312" y="420" width="576" height="10" fill="#d0cec8"/><rect x="312" y="440" width="576" height="10" fill="#d0cec8"/><rect x="312" y="460" width="498" height="10" fill="#d0cec8"/><rect x="0" y="481" width="1200" height="149" fill="#0d0e10"/>${titleText(56, 553, 38, 42)}${facts(56, 591)}`;
   } else if (model.kind === "text" && visual && "lines" in visual) {
     const pageLines = contentLines
       .slice(0, 8)
@@ -464,7 +463,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
         ),
       )
       .join("");
-    body = `${brand()}<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${pageLines}${titleText(56, titleLines.length > 1 ? 430 : 480, 48, 20)}${facts(56, 576)}`;
+    body = `<rect x="660" y="55" width="470" height="575" fill="#f6f5f1"/>${pageLines}${titleText(56, titleLines.length > 1 ? 430 : 480, 48, 20)}${facts(56, 576)}`;
   } else if (model.kind === "markdown") {
     let y = 104;
     const excerpt = contentLines
@@ -492,7 +491,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
         return markup;
       })
       .join("");
-    body = `${excerpt}<line x1="56" y1="456" x2="1144" y2="456" stroke="#30343a" stroke-width="2"/>${titleText(56, 530, 52, 34, 1)}${facts(56, 590)}${brand(1144, 588, "end")}`;
+    body = `${excerpt}<line x1="56" y1="456" x2="1144" y2="456" stroke="#30343a" stroke-width="2"/>${titleText(56, 530, 52, 34, 1)}${facts(56, 590)}`;
   } else if (model.kind === "code") {
     const excerpt = contentLines
       .map((line, index) => {
@@ -510,7 +509,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
         );
       })
       .join("");
-    body = `${excerpt}<line x1="56" y1="478" x2="1144" y2="478" stroke="#26292e"/>${titleText(56, twoLineTitle ? 518 : 540, 38, 42)}${facts(56, twoLineTitle ? 606 : 578)}${brand(1144, twoLineTitle ? 604 : 576, "end")}`;
+    body = `${excerpt}<line x1="56" y1="478" x2="1144" y2="478" stroke="#26292e"/>${titleText(56, twoLineTitle ? 518 : 540, 38, 42)}${facts(56, twoLineTitle ? 606 : 578)}`;
   } else if (visual?.kind === "waveform") {
     const duration =
       model.preview?.facts.find((fact) => fact.includes(":")) ?? "";
@@ -528,12 +527,12 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
         return `<rect x="${x.toFixed(1)}" y="${260 - height / 2}" width="12" height="${height}" rx="6" fill="#8b919b"/>`;
       })
       .join("");
-    body = `${brand()}<text x="1144" y="68" fill="#d8d3c8" font-family="${MONO}" font-size="30" text-anchor="end" letter-spacing="2">${escapeXml(duration)}</text>${bars}${titleText(56, twoLineTitle ? 454 : 526, 64, 30)}${facts()}`;
+    body = `<text x="1144" y="68" fill="#d8d3c8" font-family="${MONO}" font-size="30" text-anchor="end" letter-spacing="2">${escapeXml(duration)}</text>${bars}${titleText(56, twoLineTitle ? 454 : 526, 64, 30)}${facts()}`;
   } else if (model.kind === "audio" && raster) {
     const duration =
       model.preview?.facts.find((fact) => fact.includes(":")) ?? "";
     const audioTitleLines = layoutOgTitle(safeTitle, 18, 2);
-    body = `<image href="${raster}" x="0" y="0" width="630" height="630" preserveAspectRatio="xMidYMid slice"/><rect x="630" y="0" width="570" height="630" fill="#0d0e10"/>${brand(686, 64)}<text x="686" y="388" fill="#d8d3c8" font-family="${SANS}" font-size="58" font-weight="400">${escapeXml(duration)}</text>${titleText(686, audioTitleLines.length > 1 ? 468 : 520, 46, 18)}${facts(686, 576)}`;
+    body = `<image href="${raster}" x="0" y="0" width="630" height="630" preserveAspectRatio="xMidYMid slice"/><rect x="630" y="0" width="570" height="630" fill="#0d0e10"/><text x="686" y="388" fill="#d8d3c8" font-family="${SANS}" font-size="58" font-weight="400">${escapeXml(duration)}</text>${titleText(686, audioTitleLines.length > 1 ? 468 : 520, 46, 18)}${facts(686, 576)}`;
   } else if (visual?.kind === "svg-source") {
     const cells = [...visual.digest.slice(0, 32)]
       .map((nibble, index) => {
@@ -553,7 +552,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
           `<text x="56" y="${326 + index * 34}" fill="#9fa3a9" font-family="${MONO}" font-size="17" letter-spacing="1.5">${line}</text>`,
       )
       .join("");
-    body = `${brand()}<text x="56" y="112" fill="#e3a44f" font-family="${MONO}" font-size="22" letter-spacing="4">SAFE SVG SOURCE SIGNATURE</text>${cells}${digestLines}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
+    body = `<text x="56" y="112" fill="#e3a44f" font-family="${MONO}" font-size="22" letter-spacing="4">SAFE SVG SOURCE SIGNATURE</text>${cells}${digestLines}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
   } else if (model.kind === "archive") {
     const stack = `<rect x="986" y="65" width="150" height="16" rx="3" fill="#33373c"/><rect x="1016" y="91" width="120" height="16" rx="3" fill="#3b3f45"/><rect x="1046" y="117" width="90" height="16" rx="3" fill="#44484f"/>`;
     const archiveTitleLines = layoutOgTitle(safeTitle, 42, 2);
@@ -561,7 +560,7 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
       visual?.kind === "archive" && visual.entries[0]
         ? `<text x="56" y="315" fill="#777b82" font-family="${MONO}" font-size="20">${escapeXml(truncateDisplayText(visual.entries[0], 72))}</text>`
         : "";
-    body = `${brand()}${stack}<text x="56" y="259" fill="#e3a44f" font-family="${MONO}" font-size="24" letter-spacing="4">${escapeXml(`${model.preview?.label ?? "Archive"} archive`.toUpperCase())}</text>${entry}${titleText(56, archiveTitleLines.length > 1 ? 458 : 522, 64, 42)}${facts(56, 576)}`;
+    body = `${stack}<text x="56" y="259" fill="#e3a44f" font-family="${MONO}" font-size="24" letter-spacing="4">${escapeXml(`${model.preview?.label ?? "Archive"} archive`.toUpperCase())}</text>${entry}${titleText(56, archiveTitleLines.length > 1 ? 458 : 522, 64, 42)}${facts(56, 576)}`;
   } else if (visual?.kind === "binary" && visual.hex) {
     const groups = visual.hex.split(" ");
     const midpoint = Math.ceil(groups.length / 2);
@@ -575,14 +574,14 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
           `<text x="56" y="${242 + index * 48}" fill="#c7c9cd" font-family="${MONO}" font-size="23" letter-spacing="1.2">${escapeXml(line)}</text>`,
       )
       .join("");
-    body = `${brand()}<text x="56" y="168" fill="#e3a44f" font-family="${MONO}" font-size="22" letter-spacing="4">VERIFIED LEADING BYTES</text>${hexMarkup}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
+    body = `<text x="56" y="168" fill="#e3a44f" font-family="${MONO}" font-size="22" letter-spacing="4">VERIFIED LEADING BYTES</text>${hexMarkup}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
   } else {
     const stack = `<rect x="1000" y="91" width="126" height="24" rx="3" fill="#33373c"/><rect x="1030" y="141" width="96" height="24" rx="3" fill="#2b2f34"/><rect x="1060" y="191" width="66" height="24" rx="3" fill="#3b3f45"/>`;
-    body = `${brand()}${stack}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
+    body = `${stack}${titleText(56, twoLineTitle ? 476 : 535, 52, 34)}${facts()}`;
   }
 
   return Buffer.from(
-    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#090c0f" stop-opacity="0.04"/><stop offset="0.54" stop-color="#090c0f" stop-opacity="0.02"/><stop offset="1" stop-color="#090c0f" stop-opacity="0.96"/></linearGradient><linearGradient id="videoShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a0d" stop-opacity="0.08"/><stop offset="0.46" stop-color="#080a0d" stop-opacity="0.04"/><stop offset="0.72" stop-color="#080a0d" stop-opacity="0.72"/><stop offset="1" stop-color="#080a0d" stop-opacity="0.96"/></linearGradient><linearGradient id="pdfShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d0e10" stop-opacity="0"/><stop offset="0.28" stop-color="#0d0e10" stop-opacity="0.82"/><stop offset="1" stop-color="#0d0e10" stop-opacity="1"/></linearGradient><linearGradient id="pageFade" x1="0" y1="0" x2="1" y2="0"><stop offset="0" stop-color="#0d0e10" stop-opacity="1"/><stop offset="1" stop-color="#0d0e10" stop-opacity="0"/></linearGradient></defs><rect width="1200" height="630" fill="#0d0e10"/>${body}</svg>`,
+    `<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="630" viewBox="0 0 1200 630"><defs><linearGradient id="shade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#090c0f" stop-opacity="0.04"/><stop offset="0.54" stop-color="#090c0f" stop-opacity="0.02"/><stop offset="1" stop-color="#090c0f" stop-opacity="0.96"/></linearGradient><linearGradient id="videoShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#080a0d" stop-opacity="0.08"/><stop offset="0.46" stop-color="#080a0d" stop-opacity="0.04"/><stop offset="0.72" stop-color="#080a0d" stop-opacity="0.72"/><stop offset="1" stop-color="#080a0d" stop-opacity="0.96"/></linearGradient><linearGradient id="pdfShade" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#0d0e10" stop-opacity="0"/><stop offset="0.28" stop-color="#0d0e10" stop-opacity="0.82"/><stop offset="1" stop-color="#0d0e10" stop-opacity="1"/></linearGradient></defs><rect width="1200" height="630" fill="#0d0e10"/>${body}</svg>`,
   );
 }
 
