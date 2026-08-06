@@ -231,6 +231,56 @@ test("recent files distinguishes loading from a recoverable error", async () => 
   expect(screen.getByRole("button", { name: "Retry files" })).toBeTruthy();
 });
 
+test("populated recent files remain visible and clearly frozen after refresh failure", async () => {
+  let fileCalls = 0;
+  let recover = false;
+  const item = {
+    id: "recent01",
+    name: "media/keynote-2026-recording.mp4",
+    size: 902 * 1024 ** 2,
+    mime_type: "video/mp4",
+    sha256: "ab".repeat(32),
+    visibility: "public",
+    owner_id: "u-admin",
+    tags: [],
+    preview_url: "/recent01",
+    raw_url: "/raw/recent01",
+    archive: null,
+    created_at: "2026-07-31T09:38:51.000Z",
+    updated_at: "2026-07-31T09:38:51.000Z",
+  };
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(async (input: string) => {
+      if (input === "/api/auth/me")
+        return json({
+          user: admin,
+          role: "admin",
+          legacy_service_credential: false,
+        });
+      if (input === "/api/system") return json(system);
+      if (input.startsWith("/api/files?")) {
+        fileCalls += 1;
+        if (fileCalls === 1 || recover)
+          return json({ items: [item], next_cursor: null });
+        throw new TypeError("offline");
+      }
+      throw new Error(`unexpected ${input}`);
+    }),
+  );
+  render(
+    <AuthProvider onUnauthenticated={vi.fn()}>
+      <LiveOperations recentRefreshMs={20} />
+    </AuthProvider>,
+  );
+  expect(await screen.findByRole("link", { name: item.name })).toBeTruthy();
+  expect(await screen.findByText("Files frozen")).toBeTruthy();
+  expect(screen.getByRole("link", { name: item.name })).toBeTruthy();
+  recover = true;
+  await userEvent.click(screen.getByRole("button", { name: "Retry files" }));
+  await waitFor(() => expect(screen.queryByText("Files frozen")).toBeNull());
+});
+
 test("system status exposes runtime values, protected totals, and read-only limits", async () => {
   renderDashboard(<SystemStatus />);
   expect(await screen.findByText("System Health & Configuration")).toBeTruthy();

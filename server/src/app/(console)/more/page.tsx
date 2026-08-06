@@ -11,15 +11,13 @@ export default function MorePage() {
     <ConsolePage active="more" title="More">
       <nav className="more-links" aria-label="More console pages">
         {isAdmin ? (
-          <>
-            <Link className="button button-block" href="/users">
-              Users
-            </Link>
-            <Link className="button button-block" href="/keys">
-              API Keys
-            </Link>
-          </>
+          <Link className="button button-block" href="/users">
+            Users
+          </Link>
         ) : null}
+        <Link className="button button-block" href="/keys">
+          API Keys
+        </Link>
         <Link className="button button-block" href="/account">
           Account
         </Link>

@@ -47,7 +47,7 @@ test("members only see mobile destinations they can open", async () => {
   });
   expect(within(more).getByRole("link", { name: "Account" })).toBeTruthy();
   expect(within(more).queryByRole("link", { name: "Users" })).toBeNull();
-  expect(within(more).queryByRole("link", { name: "API Keys" })).toBeNull();
+  expect(within(more).getByRole("link", { name: "API Keys" })).toBeTruthy();
 });
 
 test("admins see every mobile console destination", async () => {

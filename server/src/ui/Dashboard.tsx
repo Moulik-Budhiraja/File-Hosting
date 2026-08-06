@@ -118,7 +118,13 @@ function InitialFallback({
   );
 }
 
-export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
+export function LiveOperations({
+  refreshMs = 1_000,
+  recentRefreshMs = 30_000,
+}: {
+  refreshMs?: number;
+  recentRefreshMs?: number;
+}) {
   const loadSystem = useCallback(
     () => apiFetch<SystemSnapshot>("/api/system"),
     [],
@@ -128,7 +134,7 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
     [],
   );
   const system = useLiveData(loadSystem, refreshMs);
-  const recent = useLiveData(loadRecent, 30_000);
+  const recent = useLiveData(loadRecent, recentRefreshMs);
   const info = system.state.data;
   if (!info && system.state.kind === "error") {
     return (
@@ -263,6 +269,22 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
               <h2 className="section-label">Recent files</h2>
               <Link href="/files">all files →</Link>
             </div>
+            {recent.state.kind === "stale" ? (
+              <div
+                className="dashboard-statebar"
+                role="status"
+                aria-live="polite"
+              >
+                Files frozen{" "}
+                <button
+                  type="button"
+                  className="button button-small"
+                  onClick={recent.retry}
+                >
+                  Retry files
+                </button>
+              </div>
+            ) : null}
             {recent.state.kind === "loading" ? (
               <p className="dashboard-empty" role="status">
                 Loading files…
@@ -314,9 +336,7 @@ export function LiveOperations({ refreshMs = 1_000 }: { refreshMs?: number }) {
                 </tbody>
               </table>
             ) : (
-              <p className="dashboard-empty">
-                {recent.state.kind === "stale" ? "Files frozen" : "No files"}
-              </p>
+              <p className="dashboard-empty">No files</p>
             )}
           </section>
         </div>

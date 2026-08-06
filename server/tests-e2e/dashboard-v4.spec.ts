@@ -74,6 +74,62 @@ test.beforeAll(async ({ baseURL }) => {
     "application/parquet",
   );
   seededId = seeded.id;
+
+  const overview = await readFile(path.join(referenceRoot, references[0][0]));
+  const metadata = await sharp(overview).metadata();
+  if (!metadata.width || !metadata.height)
+    throw new Error("approved overview reference has no dimensions");
+  const width = metadata.width;
+  const height = metadata.height;
+  const mutants = [
+    await sharp(overview).blur(8).png().toBuffer(),
+    await sharp(overview)
+      .composite([
+        {
+          input: {
+            create: {
+              width: Math.floor(width / 2),
+              height,
+              channels: 3,
+              background: "#0d0f10",
+            },
+          },
+          left: Math.floor(width / 2),
+          top: 0,
+        },
+      ])
+      .png()
+      .toBuffer(),
+    await sharp({
+      create: { width, height, channels: 3, background: "#0d0f10" },
+    })
+      .composite([
+        {
+          input: await sharp(overview)
+            .extract({ left: 0, top: 0, width: width - 120, height })
+            .png()
+            .toBuffer(),
+          left: 120,
+          top: 0,
+        },
+      ])
+      .png()
+      .toBuffer(),
+  ];
+  for (const [index, mutant] of mutants.entries()) {
+    const metrics = await visualMetrics(mutant, overview);
+    if (index === 2) {
+      expect(
+        metrics.leftBoundaryDelta,
+        `visual displacement control: ${JSON.stringify(metrics)}`,
+      ).toBeGreaterThan(0.05);
+    } else {
+      expect(
+        visualPasses(metrics),
+        `visual negative control ${index + 1}: ${JSON.stringify(metrics)}`,
+      ).toBe(false);
+    }
+  }
 });
 
 async function admin(page: Page, baseURL: string) {
@@ -85,59 +141,47 @@ async function admin(page: Page, baseURL: string) {
   );
 }
 
-async function evidence(page: Page, testInfo: TestInfo, name: string) {
-  const bodyOverflow = await page.evaluate(
-    () => document.body.scrollWidth - document.documentElement.clientWidth,
-  );
-  expect(bodyOverflow, `${name} body overflow`).toBeLessThanOrEqual(0);
-  const bytes = await page.screenshot({ fullPage: true });
-  const reference = await readFile(path.join(referenceRoot, name));
-  const referenceMeta = await sharp(reference).metadata();
-  const viewport = page.viewportSize();
-  const comparisonBytes =
-    viewport &&
-    referenceMeta.width === viewport.width &&
-    (referenceMeta.height ?? 0) <= viewport.height
-      ? await page.screenshot({
-          clip: {
-            x: 0,
-            y: 0,
-            width: referenceMeta.width,
-            height: referenceMeta.height!,
-          },
-        })
-      : bytes;
-  const sampleSize = 96;
-  const [actualMeta, actualRaw, referenceRaw] = await Promise.all([
-    sharp(comparisonBytes).metadata(),
-    sharp(comparisonBytes)
-      .resize(sampleSize, sampleSize, { fit: "fill" })
+async function visualMetrics(actual: Buffer, reference: Buffer) {
+  const width = 304;
+  const height = 208;
+  const [actualRaw, referenceRaw] = await Promise.all([
+    sharp(actual)
+      .resize(width, height, { fit: "fill" })
       .removeAlpha()
       .raw()
       .toBuffer(),
     sharp(reference)
-      .resize(sampleSize, sampleSize, { fit: "fill" })
+      .resize(width, height, { fit: "fill" })
       .removeAlpha()
       .raw()
       .toBuffer(),
   ]);
-  if ((actualMeta.width ?? 0) > 1_000) {
-    expect(actualMeta.width, `${name} width`).toBe(referenceMeta.width);
-    expect(actualMeta.height, `${name} height`).toBe(referenceMeta.height);
-  }
   let colorDifference = 0;
   let actualEdge = 0;
   let referenceEdge = 0;
   let edgeDifference = 0;
   let edgeSamples = 0;
+  let actualStrongEdges = 0;
+  let referenceStrongEdges = 0;
+  let overlappingStrongEdges = 0;
+  let actualEdgeX = 0;
+  let referenceEdgeX = 0;
+  let actualEdgeY = 0;
+  let referenceEdgeY = 0;
+  const actualQuadrantEdges = [0, 0, 0, 0];
+  const referenceQuadrantEdges = [0, 0, 0, 0];
+  const actualStrongMask = new Uint8Array(width * height);
+  const referenceStrongMask = new Uint8Array(width * height);
+  const actualColumnEdges = new Float64Array(width);
+  const referenceColumnEdges = new Float64Array(width);
   for (let offset = 0; offset < actualRaw.length; offset += 1) {
     colorDifference += Math.abs(actualRaw[offset]! - referenceRaw[offset]!);
   }
-  for (let y = 1; y < sampleSize; y += 1) {
-    for (let x = 1; x < sampleSize; x += 1) {
-      const offset = (y * sampleSize + x) * 3;
+  for (let y = 1; y < height; y += 1) {
+    for (let x = 1; x < width; x += 1) {
+      const offset = (y * width + x) * 3;
       const left = offset - 3;
-      const above = ((y - 1) * sampleSize + x) * 3;
+      const above = ((y - 1) * width + x) * 3;
       let actualGradient = 0;
       let referenceGradient = 0;
       for (let channel = 0; channel < 3; channel += 1) {
@@ -156,35 +200,217 @@ async function evidence(page: Page, testInfo: TestInfo, name: string) {
       referenceGradient /= 6;
       actualEdge += actualGradient;
       referenceEdge += referenceGradient;
+      actualColumnEdges[x]! += actualGradient;
+      referenceColumnEdges[x]! += referenceGradient;
+      actualEdgeX += actualGradient * x;
+      referenceEdgeX += referenceGradient * x;
+      actualEdgeY += actualGradient * y;
+      referenceEdgeY += referenceGradient * y;
       edgeDifference += Math.abs(actualGradient - referenceGradient);
+      if (actualGradient >= 20) actualStrongEdges += 1;
+      if (referenceGradient >= 20) referenceStrongEdges += 1;
+      if (actualGradient >= 20) actualStrongMask[y * width + x] = 1;
+      if (referenceGradient >= 20) referenceStrongMask[y * width + x] = 1;
+      if (actualGradient >= 20 && referenceGradient >= 20)
+        overlappingStrongEdges += 1;
+      const quadrant = (y >= height / 2 ? 2 : 0) + (x >= width / 2 ? 1 : 0);
+      actualQuadrantEdges[quadrant]! += actualGradient;
+      referenceQuadrantEdges[quadrant]! += referenceGradient;
       edgeSamples += 1;
     }
   }
-  // Independent release tolerances: reject blank/missing structure and broad
-  // palette/layout drift while allowing genuine runtime text and data changes.
-  const normalizedColorDifference = colorDifference / actualRaw.length / 255;
-  const normalizedEdgeDifference = edgeDifference / edgeSamples / 255;
-  const edgeDensityRatio = actualEdge / referenceEdge;
+  let maxTileDifference = 0;
+  const tileWidth = width / 8;
+  const tileHeight = height / 8;
+  for (let tileY = 0; tileY < 8; tileY += 1) {
+    for (let tileX = 0; tileX < 8; tileX += 1) {
+      let tileDifference = 0;
+      let samples = 0;
+      for (let y = tileY * tileHeight; y < (tileY + 1) * tileHeight; y += 1) {
+        for (let x = tileX * tileWidth; x < (tileX + 1) * tileWidth; x += 1) {
+          const offset = (y * width + x) * 3;
+          for (let channel = 0; channel < 3; channel += 1) {
+            tileDifference += Math.abs(
+              actualRaw[offset + channel]! - referenceRaw[offset + channel]!,
+            );
+            samples += 1;
+          }
+        }
+      }
+      maxTileDifference = Math.max(
+        maxTileDifference,
+        tileDifference / samples / 255,
+      );
+    }
+  }
+  let bestHorizontalShift = 0;
+  let bestHorizontalOverlap = -1;
+  for (let shift = -30; shift <= 30; shift += 1) {
+    let overlap = 0;
+    for (let y = 0; y < height; y += 1) {
+      for (let x = 0; x < width; x += 1) {
+        const shiftedX = x + shift;
+        if (
+          shiftedX >= 0 &&
+          shiftedX < width &&
+          referenceStrongMask[y * width + x] &&
+          actualStrongMask[y * width + shiftedX]
+        )
+          overlap += 1;
+      }
+    }
+    if (overlap > bestHorizontalOverlap) {
+      bestHorizontalOverlap = overlap;
+      bestHorizontalShift = shift;
+    }
+  }
+  const boundaryStart = Math.floor(width * 0.05);
+  const boundaryEnd = Math.floor(width * 0.35);
+  let actualBoundary = boundaryStart;
+  let referenceBoundary = boundaryStart;
+  for (let x = boundaryStart + 1; x < boundaryEnd; x += 1) {
+    if (actualColumnEdges[x]! > actualColumnEdges[actualBoundary]!)
+      actualBoundary = x;
+    if (referenceColumnEdges[x]! > referenceColumnEdges[referenceBoundary]!)
+      referenceBoundary = x;
+  }
+  return {
+    colorDifference: colorDifference / actualRaw.length / 255,
+    edgeDifference: edgeDifference / edgeSamples / 255,
+    edgeDensityRatio: actualEdge / referenceEdge,
+    strongEdgeRatio: actualStrongEdges / referenceStrongEdges,
+    strongEdgeOverlap: overlappingStrongEdges / referenceStrongEdges,
+    edgeCentroidXDelta: Math.abs(
+      actualEdgeX / actualEdge / width - referenceEdgeX / referenceEdge / width,
+    ),
+    edgeCentroidYDelta: Math.abs(
+      actualEdgeY / actualEdge / height -
+        referenceEdgeY / referenceEdge / height,
+    ),
+    horizontalAlignmentDelta: Math.abs(bestHorizontalShift) / width,
+    leftBoundaryDelta: Math.abs(actualBoundary - referenceBoundary) / width,
+    rightHalfEdgeRatio:
+      (actualQuadrantEdges[1]! + actualQuadrantEdges[3]!) /
+      (referenceQuadrantEdges[1]! + referenceQuadrantEdges[3]!),
+    minimumQuadrantEdgeRatio: Math.min(
+      ...actualQuadrantEdges.map(
+        (edge, index) => edge / referenceQuadrantEdges[index]!,
+      ),
+    ),
+    maxTileDifference,
+  };
+}
+
+function visualPasses(metrics: Awaited<ReturnType<typeof visualMetrics>>) {
+  return (
+    metrics.colorDifference <= 0.085 &&
+    metrics.edgeDifference <= 0.06 &&
+    metrics.edgeDensityRatio > 0.18 &&
+    metrics.edgeDensityRatio < 3 &&
+    metrics.strongEdgeRatio > 0.12 &&
+    metrics.strongEdgeRatio < 3 &&
+    metrics.horizontalAlignmentDelta < 0.1 &&
+    metrics.edgeCentroidYDelta < 0.4 &&
+    metrics.rightHalfEdgeRatio > 0.05 &&
+    metrics.maxTileDifference <= 0.26
+  );
+}
+
+async function evidence(
+  page: Page,
+  testInfo: TestInfo,
+  name: string,
+  referenceCrop?: { left: number; top: number; width: number; height: number },
+  evidenceName = name,
+) {
+  const bodyOverflow = await page.evaluate(
+    () => document.body.scrollWidth - document.documentElement.clientWidth,
+  );
+  expect(bodyOverflow, `${name} body overflow`).toBeLessThanOrEqual(0);
+  const bytes = await page.screenshot({ fullPage: true });
+  const frozenReference = await readFile(path.join(referenceRoot, name));
+  const reference = referenceCrop
+    ? await sharp(frozenReference).extract(referenceCrop).png().toBuffer()
+    : frozenReference;
+  const referenceMeta = await sharp(reference).metadata();
+  const viewport = page.viewportSize();
+  const referenceHeight = referenceMeta.height ?? 0;
+  const comparisonBytes = referenceCrop
+    ? await page.screenshot()
+    : viewport?.width === referenceMeta.width &&
+        referenceHeight <= viewport.height
+      ? await page.screenshot({
+          clip: {
+            x: 0,
+            y: 0,
+            width: referenceMeta.width ?? viewport.width,
+            height: referenceHeight,
+          },
+        })
+      : bytes;
+  const actualMeta = await sharp(comparisonBytes).metadata();
+  expect(actualMeta.width, `${evidenceName} mapped width`).toBe(
+    referenceMeta.width,
+  );
+  expect(actualMeta.height, `${evidenceName} mapped height`).toBe(
+    referenceMeta.height,
+  );
+  const metrics = await visualMetrics(comparisonBytes, reference);
   expect(
-    normalizedColorDifference,
-    `${name} palette drift`,
+    metrics.colorDifference,
+    `${evidenceName} palette drift`,
   ).toBeLessThanOrEqual(0.085);
   expect(
-    normalizedEdgeDifference,
-    `${name} structure drift`,
+    metrics.edgeDifference,
+    `${evidenceName} structure drift`,
   ).toBeLessThanOrEqual(0.06);
-  expect(edgeDensityRatio, `${name} missing visual structure`).toBeGreaterThan(
-    0.18,
+  expect(
+    metrics.edgeDensityRatio,
+    `${evidenceName} missing visual structure`,
+  ).toBeGreaterThan(0.18);
+  expect(
+    metrics.edgeDensityRatio,
+    `${evidenceName} excess visual noise`,
+  ).toBeLessThan(3);
+  expect(
+    metrics.strongEdgeRatio,
+    `${evidenceName} blurred typography`,
+  ).toBeGreaterThan(0.12);
+  expect(
+    metrics.strongEdgeRatio,
+    `${evidenceName} excess sharp noise`,
+  ).toBeLessThan(3);
+  expect(
+    metrics.horizontalAlignmentDelta,
+    `${evidenceName} horizontal displacement`,
+  ).toBeLessThan(0.1);
+
+  expect(
+    metrics.edgeCentroidYDelta,
+    `${evidenceName} vertical displacement`,
+  ).toBeLessThan(0.4);
+  expect(
+    metrics.rightHalfEdgeRatio,
+    `${evidenceName} missing right frame region`,
+  ).toBeGreaterThan(0.05);
+  expect(
+    metrics.maxTileDifference,
+    `${evidenceName} regional drift`,
+  ).toBeLessThanOrEqual(0.26);
+  expect(visualPasses(metrics), `${evidenceName} frozen-frame comparison`).toBe(
+    true,
   );
-  expect(edgeDensityRatio, `${name} excess visual noise`).toBeLessThan(2.25);
   if (process.env.DASHBOARD_EVIDENCE_DIR) {
     await mkdir(process.env.DASHBOARD_EVIDENCE_DIR, { recursive: true });
     await page.screenshot({
-      path: path.join(process.env.DASHBOARD_EVIDENCE_DIR, name),
+      path: path.join(process.env.DASHBOARD_EVIDENCE_DIR, evidenceName),
       fullPage: true,
     });
   }
-  await testInfo.attach(name, { body: bytes, contentType: "image/png" });
+  await testInfo.attach(evidenceName, {
+    body: bytes,
+    contentType: "image/png",
+  });
 }
 
 test("01 approved desktop overview", async ({ page, baseURL }, testInfo) => {
@@ -318,14 +544,10 @@ for (const [index, width] of [
     page,
     baseURL,
   }, testInfo) => {
-    await page.setViewportSize({ width, height: 924 });
+    await page.setViewportSize({ width, height: 844 });
     await admin(page, baseURL!);
-    for (const route of [
-      "/overview",
-      "/files",
-      `/files?sel=${seededId}`,
-      "/system",
-    ]) {
+    const routes = ["/overview", "/files", `/files?sel=${seededId}`, "/system"];
+    for (const [panel, route] of routes.entries()) {
       await page.goto(route);
       await page.waitForLoadState("networkidle");
       expect(
@@ -334,6 +556,18 @@ for (const [index, width] of [
             document.body.scrollWidth <= document.documentElement.clientWidth,
         ),
       ).toBe(true);
+      await evidence(
+        page,
+        testInfo,
+        references[index][0],
+        {
+          left: 40 + panel * (width + 48),
+          top: 40,
+          width,
+          height: 844,
+        },
+        `${String(index + 1).padStart(2, "0")}-mobile-${width}-panel-${panel + 1}.png`,
+      );
     }
     const mobileNav = page.getByRole("navigation", { name: "Console" });
     for (const label of ["Overview", "Files", "System", "More"]) {
@@ -342,13 +576,50 @@ for (const [index, width] of [
       const box = await link.boundingBox();
       expect(box && box.height >= 44, label).toBeTruthy();
     }
-    await evidence(page, testInfo, references[index][0]);
   });
 }
 
 test("10 approved mobile states", async ({ page, baseURL }, testInfo) => {
-  await page.setViewportSize({ width: 390, height: 924 });
+  await page.setViewportSize({ width: 390, height: 844 });
   await admin(page, baseURL!);
+
+  const captureState = async (panel: number) =>
+    evidence(
+      page,
+      testInfo,
+      references[9][0],
+      {
+        left: 40 + (panel % 3) * 438,
+        top: 40 + Math.floor(panel / 3) * 864,
+        width: 390,
+        height: 844,
+      },
+      `10-mobile-390-state-${panel + 1}.png`,
+    );
+
+  await page.route("**/api/system", () => new Promise(() => undefined));
+  await page.goto("/overview");
+  await expect(page.getByText("Loading…")).toBeVisible();
+  await captureState(0);
+  await page.unroute("**/api/system");
+
+  let calls = 0;
+  await page.route("**/api/system", async (route) => {
+    calls += 1;
+    if (calls === 1) await route.fulfill({ response: await route.fetch() });
+    else
+      await route.fulfill({
+        status: 503,
+        json: { error: { code: "offline" } },
+      });
+  });
+  await page.goto("/overview");
+  await expect(page.getByRole("status")).toContainText("frozen", {
+    timeout: 5_000,
+  });
+  await captureState(1);
+  await page.unroute("**/api/system");
+
   await page.route("**/api/files?**", (route) =>
     route.fulfill({ status: 200, json: { items: [], next_cursor: null } }),
   );
@@ -356,10 +627,38 @@ test("10 approved mobile states", async ({ page, baseURL }, testInfo) => {
   await expect(
     page.getByText("No files match the current filters"),
   ).toBeVisible();
+  await captureState(2);
+  await page.unroute("**/api/files?**");
+
+  await page.goto(`/files?sel=${seededId}`);
+  await expect(
+    page.getByRole("region", { name: /object record · access/i }),
+  ).toBeVisible();
+  await captureState(3);
+
+  await page.route("**/api/files?**", (route) =>
+    route.fulfill({ status: 503, json: { error: { code: "offline" } } }),
+  );
+  await page.goto("/files");
+  await expect(page.getByText(/Couldn.t load files/)).toBeVisible();
+  await captureState(4);
+  await page.unroute("**/api/files?**");
+
+  const long = await uploadFile(
+    baseURL!,
+    LEGACY_TOKEN,
+    "研究データ_2026年度_テレメトリー集計_управление-отчёт_τελικό-αντίγραφο_v2.parquet",
+    "private",
+    "long dashboard audit bytes",
+    "application/parquet",
+  );
+  await page.goto(`/files?sel=${long.id}`);
+  await expect(page.getByText(/研究データ/).first()).toBeVisible();
+  await captureState(5);
+
   for (const control of await page.getByRole("button").all()) {
     if (!(await control.isVisible()) || !(await control.isEnabled())) continue;
     const box = await control.boundingBox();
     expect(box && box.height >= 44, await control.innerText()).toBeTruthy();
   }
-  await evidence(page, testInfo, references[9][0]);
 });
