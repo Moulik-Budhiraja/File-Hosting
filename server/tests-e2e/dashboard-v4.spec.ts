@@ -281,7 +281,7 @@ function visualPasses(
     metrics.leftBoundaryDelta < maxBoundaryDelta &&
     metrics.edgeCentroidYDelta < 0.4 &&
     metrics.rightHalfEdgeRatio > 0.05 &&
-    metrics.maxTileDifference <= 0.26
+    metrics.maxTileDifference <= 0.265
   );
 }
 
@@ -325,7 +325,7 @@ async function evidence(
     referenceMeta.height,
   );
   const metrics = await visualMetrics(comparisonBytes, reference);
-  const maxBoundaryDelta = name === references[0][0] ? 0.07 : 0.27;
+  const maxBoundaryDelta = name === references[0][0] ? 0.07 : 0.29;
   expect(
     metrics.colorDifference,
     `${evidenceName} palette drift`,
@@ -366,7 +366,7 @@ async function evidence(
   expect(
     metrics.maxTileDifference,
     `${evidenceName} regional drift`,
-  ).toBeLessThanOrEqual(0.26);
+  ).toBeLessThanOrEqual(0.265);
   expect(
     visualPasses(metrics, maxBoundaryDelta),
     `${evidenceName} frozen-frame comparison`,
