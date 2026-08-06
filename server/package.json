@@ -7,7 +7,7 @@
     "assert:runtime": "node runtime/assert-runtime-assets.mjs",
     "build": "npm run assert:runtime && next build && node scripts/prepare-standalone.mjs",
     "check": "npm run lint && npm run typecheck && npm test && npm run test:ui",
-    "design:audit": "tsx scripts/design-audit.ts",
+    "design:audit": "node --expose-gc --import tsx scripts/design-audit.ts",
     "dev": "next dev --turbo",
     "format:check": "prettier --check \"**/*.{ts,tsx,js,jsx,mjs,cjs,md,json}\" \"../tests/**/*.{mjs,cjs}\" --cache",
     "format:write": "prettier --write \"**/*.{ts,tsx,js,jsx,mjs,cjs,md,json}\" \"../tests/**/*.{mjs,cjs}\" --cache",

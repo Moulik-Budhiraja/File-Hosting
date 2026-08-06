@@ -553,7 +553,9 @@ test("design audit covers all stress states, every content-zone mutant, and real
   assert.match(audit, /stress-06-mobile-crop/u);
   assert.match(audit, /stress-07-unavailable/u);
   assert.match(audit, /stressCount: Object\.keys\(stressMetrics\)\.length/u);
-  assert.match(audit, /brandRemovalMutant/u);
+  assert.match(audit, /siteLabelAdditionMutant/u);
+  assert.match(audit, /siteLabelReturn: siteLabelAddition\.reasons/u);
+  assert.match(audit, /posterContentMutants/u);
   assert.match(audit, /factsRemovalMutant/u);
   assert.match(audit, /brandZoneRejected: cases\.length/u);
   assert.match(audit, /factsZoneRejected: cases\.length/u);
