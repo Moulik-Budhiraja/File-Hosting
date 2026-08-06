@@ -29,6 +29,7 @@ type ListState =
   | { kind: "ready"; items: FileMetadata[]; nextCursor: string | null };
 
 type VisibilityFilter = "all" | Visibility;
+type ArchiveFilter = "all" | "tar.gz" | "none";
 
 const PAGE_LIMIT = 50;
 
@@ -45,13 +46,23 @@ function initialVisibility(): VisibilityFilter {
     : "all";
 }
 
+function initialArchive(): ArchiveFilter {
+  const value = readTaskParam("archive");
+  return value === "tar.gz" || value === "none" ? value : "all";
+}
+
 export function FilesBrowser() {
   const { user, isAdmin } = useAuth();
   const [state, setState] = useState<ListState>({ kind: "loading" });
   const [search, setSearch] = useState(() => readTaskParam("q") ?? "");
   const [query, setQuery] = useState(() => readTaskParam("q") ?? "");
+  const [nameFilter, setNameFilter] = useState(
+    () => readTaskParam("name") ?? "",
+  );
+  const [tagFilter, setTagFilter] = useState(() => readTaskParam("tag") ?? "");
   const [visibility, setVisibility] =
     useState<VisibilityFilter>(initialVisibility);
+  const [archive, setArchive] = useState<ArchiveFilter>(initialArchive);
   // Paper board IA-07: members default to Mine; admins default to
   // Everyone. An explicit URL value wins either way.
   const [scope, setScope] = useState<"everyone" | "mine">(() => {
@@ -84,10 +95,14 @@ export function FilesBrowser() {
   const [editorOpen, setEditorOpen] = useState(false);
   const [editorValue, setEditorValue] = useState<Visibility>("public");
   const [editorError, setEditorError] = useState<string | null>(null);
+  const [tagsOpen, setTagsOpen] = useState(false);
+  const [tagsValue, setTagsValue] = useState("");
+  const [tagsError, setTagsError] = useState<string | null>(null);
   const [ownerOpen, setOwnerOpen] = useState(false);
   const [ownerValue, setOwnerValue] = useState("");
   const [ownerError, setOwnerError] = useState<string | null>(null);
   const [deleteOpen, setDeleteOpen] = useState(false);
+  const [deleteConfirm, setDeleteConfirm] = useState("");
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const fileId = useId();
@@ -101,7 +116,10 @@ export function FilesBrowser() {
     setState({ kind: "loading" });
     const params = new URLSearchParams();
     if (query) params.set("q", query);
+    if (nameFilter) params.set("name", nameFilter);
+    if (tagFilter) params.set("tag", tagFilter);
     if (visibility !== "all") params.set("visibility", visibility);
+    if (archive !== "all") params.set("archive", archive);
     // Owner scoping happens in SQL before pagination — "Mine" is truthful
     // across every page, not a per-page client filter.
     if (scope === "mine") params.set("owner", "me");
@@ -129,7 +147,7 @@ export function FilesBrowser() {
       }
       setState({ kind: "error" });
     }
-  }, [begin, query, visibility, scope, cursor]);
+  }, [begin, query, nameFilter, tagFilter, visibility, archive, scope, cursor]);
 
   useEffect(() => {
     void load();
@@ -154,7 +172,10 @@ export function FilesBrowser() {
       else params.delete(name);
     };
     setOrDelete("q", query || null);
+    setOrDelete("name", nameFilter || null);
+    setOrDelete("tag", tagFilter || null);
     setOrDelete("visibility", visibility === "all" ? null : visibility);
+    setOrDelete("archive", archive === "all" ? null : archive);
     // Only persist the role-relative non-default scope (admin Mine, member
     // Everyone). The default is omitted so a fresh post-scrub mount never
     // recreates a scrubbed old-account parameter with a default write.
@@ -170,7 +191,18 @@ export function FilesBrowser() {
     if (target !== `${window.location.pathname}${window.location.search}`) {
       window.history.replaceState(null, "", target);
     }
-  }, [query, visibility, isAdmin, scope, cursor, prevCursors, selectedId]);
+  }, [
+    query,
+    nameFilter,
+    tagFilter,
+    visibility,
+    archive,
+    isAdmin,
+    scope,
+    cursor,
+    prevCursors,
+    selectedId,
+  ]);
 
   useEffect(() => {
     if (!isAdmin) return;
@@ -328,6 +360,45 @@ export function FilesBrowser() {
     }
   }
 
+  async function saveTags() {
+    if (!selected || busy) return;
+    const values = [
+      ...new Set(
+        tagsValue
+          .split(",")
+          .map((value) => value.trim())
+          .filter(Boolean),
+      ),
+    ];
+    setBusy(true);
+    setTagsError(null);
+    try {
+      const updated = await apiFetch<FileMetadata>(
+        `/api/files/${encodeURIComponent(selected.id)}`,
+        { method: "PATCH", body: { tags: { operation: "set", values } } },
+      );
+      setTagsOpen(false);
+      setState((current) =>
+        current.kind === "ready"
+          ? {
+              ...current,
+              items: current.items.map((file) =>
+                file.id === updated.id ? updated : file,
+              ),
+            }
+          : current,
+      );
+    } catch (error) {
+      setTagsError(
+        isApiError(error) && error.status < 500
+          ? sentence(error.message)
+          : "Save outcome unknown. Reload to check.",
+      );
+    } finally {
+      setBusy(false);
+    }
+  }
+
   async function saveOwner() {
     if (!selected || !ownerValue || busy) return;
     setBusy(true);
@@ -444,6 +515,26 @@ export function FilesBrowser() {
             value={search}
             onChange={(event) => setSearch(event.target.value)}
           />
+          <input
+            className="toolbar-search"
+            placeholder="Glob name"
+            aria-label="Name glob"
+            value={nameFilter}
+            onChange={(event) => {
+              resetPaging();
+              setNameFilter(event.target.value);
+            }}
+          />
+          <input
+            className="toolbar-search"
+            placeholder="Exact tag"
+            aria-label="Exact tag"
+            value={tagFilter}
+            onChange={(event) => {
+              resetPaging();
+              setTagFilter(event.target.value);
+            }}
+          />
         </form>
         <div className="segment" role="group" aria-label="Visibility filter">
           {(["all", "public", "protected", "private"] as const).map((value) => (
@@ -476,6 +567,26 @@ export function FilesBrowser() {
               }}
             >
               {value === "everyone" ? "Everyone" : "Mine"}
+            </button>
+          ))}
+        </div>
+        <div className="segment" role="group" aria-label="Archive filter">
+          {(["all", "tar.gz", "none"] as const).map((value) => (
+            <button
+              key={value}
+              type="button"
+              className={`segment-item${archive === value ? " segment-item-active" : ""}`}
+              aria-pressed={archive === value}
+              onClick={() => {
+                resetPaging();
+                setArchive(value);
+              }}
+            >
+              {value === "all"
+                ? "Any archive"
+                : value === "tar.gz"
+                  ? "Archived"
+                  : "Not archived"}
             </button>
           ))}
         </div>
@@ -525,13 +636,19 @@ export function FilesBrowser() {
         <div className="table-fallback">
           <p className="empty-title">
             {query ||
+            nameFilter ||
+            tagFilter ||
             visibility !== "all" ||
+            archive !== "all" ||
             scope !== (isAdmin ? "everyone" : "mine")
               ? "No files match the current filters"
               : "No files"}
           </p>
           {query ||
+          nameFilter ||
+          tagFilter ||
           visibility !== "all" ||
+          archive !== "all" ||
           scope !== (isAdmin ? "everyone" : "mine") ? (
             <button
               type="button"
@@ -539,7 +656,10 @@ export function FilesBrowser() {
               onClick={() => {
                 setSearch("");
                 setQuery("");
+                setNameFilter("");
+                setTagFilter("");
                 setVisibility("all");
+                setArchive("all");
                 setScope(isAdmin ? "everyone" : "mine");
                 resetPaging();
               }}
@@ -658,6 +778,20 @@ export function FilesBrowser() {
           <div className="detail-facts">
             <h2 className="detail-title">{selected.name}</h2>
             <dl className="fact-list">
+              <div className="fact-row">
+                <dt>id</dt>
+                <dd className="cell-mono">{selected.id}</dd>
+              </div>
+              <div className="fact-row">
+                <dt>sha-256</dt>
+                <dd className="cell-mono cell-token" title={selected.sha256}>
+                  {selected.sha256}
+                </dd>
+              </div>
+              <div className="fact-row">
+                <dt>archive</dt>
+                <dd>{selected.archive ?? "not archived"}</dd>
+              </div>
               {selected.owner_id ? (
                 <div className="fact-row">
                   <dt>owner</dt>
@@ -704,12 +838,10 @@ export function FilesBrowser() {
                   {formatSize(selected.size)} · {selected.mime_type}
                 </dd>
               </div>
-              {selected.tags.length > 0 ? (
-                <div className="fact-row">
-                  <dt>tags</dt>
-                  <dd>{selected.tags.join(" · ")}</dd>
-                </div>
-              ) : null}
+              <div className="fact-row">
+                <dt>tags</dt>
+                <dd>{selected.tags.length ? selected.tags.join(", ") : "—"}</dd>
+              </div>
               <div className="fact-row">
                 <dt>links</dt>
                 <dd>
@@ -739,9 +871,28 @@ export function FilesBrowser() {
               </button>
               <button
                 type="button"
+                className="button button-block"
+                onClick={() => {
+                  setTagsError(null);
+                  setTagsValue(selected.tags.join(", "));
+                  setTagsOpen(true);
+                }}
+              >
+                Edit tags…
+              </button>
+              <a
+                className="button button-block"
+                href={selected.raw_url}
+                download
+              >
+                Download
+              </a>
+              <button
+                type="button"
                 className="button button-block button-danger-outline"
                 onClick={() => {
                   setDeleteError(null);
+                  setDeleteConfirm("");
                   setDeleteOpen(true);
                 }}
               >
@@ -848,6 +999,43 @@ export function FilesBrowser() {
         </Dialog>
       ) : null}
 
+      {tagsOpen && selected ? (
+        <Dialog title="Tags" busy={busy} onClose={() => setTagsOpen(false)}>
+          <div className="field">
+            <label htmlFor={`${nameId}-tags`}>Comma-separated tags</label>
+            <input
+              id={`${nameId}-tags`}
+              value={tagsValue}
+              onChange={(event) => setTagsValue(event.target.value)}
+              autoFocus
+            />
+          </div>
+          {tagsError ? (
+            <p className="field-error" role="alert">
+              {tagsError}
+            </p>
+          ) : null}
+          <div className="dialog-actions">
+            <button
+              type="button"
+              className="button"
+              disabled={busy}
+              onClick={() => setTagsOpen(false)}
+            >
+              Cancel
+            </button>
+            <button
+              type="button"
+              className="button button-primary"
+              disabled={busy}
+              onClick={() => void saveTags()}
+            >
+              {busy ? "Saving…" : "Save tags"}
+            </button>
+          </div>
+        </Dialog>
+      ) : null}
+
       {ownerOpen && selected ? (
         <Dialog
           title="Transfer ownership"
@@ -906,6 +1094,17 @@ export function FilesBrowser() {
             The file is removed immediately. Existing links stop working. This
             cannot be undone.
           </p>
+          <div className="field">
+            <label htmlFor={`${nameId}-delete-confirm`}>
+              Type {selected.name} to confirm
+            </label>
+            <input
+              id={`${nameId}-delete-confirm`}
+              value={deleteConfirm}
+              onChange={(event) => setDeleteConfirm(event.target.value)}
+              autoComplete="off"
+            />
+          </div>
           {deleteError ? (
             <p className="field-error" role="alert">
               {deleteError}
@@ -923,7 +1122,7 @@ export function FilesBrowser() {
             <button
               type="button"
               className="button button-danger"
-              disabled={busy}
+              disabled={busy || deleteConfirm !== selected.name}
               onClick={() => void confirmDelete()}
             >
               {busy ? "Deleting…" : "Delete file"}

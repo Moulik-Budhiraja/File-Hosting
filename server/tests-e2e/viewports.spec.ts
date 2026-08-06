@@ -68,7 +68,7 @@ test("active console navigation is fully visible at 390px", async ({
   await page.setViewportSize({ width: 390, height: 844 });
   for (const route of ["/files", "/users", "/keys", "/account"]) {
     await page.goto(route);
-    const box = await page.locator(".nav-item-active").boundingBox();
+    const box = await page.locator(".nav-item-active:visible").boundingBox();
     expect(
       box!.x,
       `${route} active nav starts in viewport`,

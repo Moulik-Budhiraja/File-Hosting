@@ -4,18 +4,30 @@ import Link from "next/link";
 
 import { useAuth } from "@/lib/auth-context";
 
-export type ConsoleSection = "files" | "users" | "keys" | "account";
+export type ConsoleSection =
+  "overview" | "files" | "system" | "users" | "keys" | "account" | "more";
 
 const NAV_ITEMS: Array<{
   key: ConsoleSection;
   label: string;
   href: string;
   adminOnly?: boolean;
+  mobileOnly?: boolean;
+  mobileHidden?: boolean;
 }> = [
+  { key: "overview", label: "Overview", href: "/overview", adminOnly: true },
   { key: "files", label: "Files", href: "/files" },
-  { key: "users", label: "Users", href: "/users", adminOnly: true },
-  { key: "keys", label: "API Keys", href: "/keys" },
-  { key: "account", label: "Account", href: "/account" },
+  { key: "system", label: "System", href: "/system", adminOnly: true },
+  {
+    key: "users",
+    label: "Users",
+    href: "/users",
+    adminOnly: true,
+    mobileHidden: true,
+  },
+  { key: "keys", label: "API Keys", href: "/keys", mobileHidden: true },
+  { key: "account", label: "Account", href: "/account", mobileHidden: true },
+  { key: "more", label: "More", href: "/more", mobileOnly: true },
 ];
 
 export function ConsoleNav({ active }: { active: ConsoleSection }) {
@@ -28,17 +40,34 @@ export function ConsoleNav({ active }: { active: ConsoleSection }) {
       <nav aria-label="Console">
         <ul className="nav-items">
           {NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin).map(
-            (item) => (
-              <li key={item.key}>
-                <Link
-                  href={item.href}
-                  className={`nav-item${item.key === active ? " nav-item-active" : ""}`}
-                  aria-current={item.key === active ? "page" : undefined}
+            (item) => {
+              const isActive =
+                item.key === active ||
+                (item.key === "more" &&
+                  (active === "users" ||
+                    active === "keys" ||
+                    active === "account"));
+              return (
+                <li
+                  key={item.key}
+                  className={
+                    item.mobileOnly
+                      ? "nav-mobile-only"
+                      : item.mobileHidden
+                        ? "nav-mobile-hidden"
+                        : undefined
+                  }
                 >
-                  {item.label}
-                </Link>
-              </li>
-            ),
+                  <Link
+                    href={item.href}
+                    className={`nav-item${isActive ? " nav-item-active" : ""}`}
+                    aria-current={isActive ? "page" : undefined}
+                  >
+                    {item.label}
+                  </Link>
+                </li>
+              );
+            },
           )}
         </ul>
       </nav>
@@ -70,6 +99,7 @@ interface ConsolePageProps {
   title: string;
   actions?: React.ReactNode;
   children: React.ReactNode;
+  embeddedHeader?: boolean;
 }
 
 export function ConsolePage({
@@ -77,17 +107,20 @@ export function ConsolePage({
   title,
   actions,
   children,
+  embeddedHeader = false,
 }: ConsolePageProps) {
   return (
     <div className="console">
       <ConsoleNav active={active} />
       <main className="console-main">
-        <header className="page-header">
-          <div className="page-header-text">
-            <h1 className="page-title">{title}</h1>
-          </div>
-          <div className="page-header-side">{actions}</div>
-        </header>
+        {embeddedHeader ? null : (
+          <header className="page-header">
+            <div className="page-header-text">
+              <h1 className="page-title">{title}</h1>
+            </div>
+            <div className="page-header-side">{actions}</div>
+          </header>
+        )}
         {children}
       </main>
     </div>

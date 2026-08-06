@@ -336,6 +336,14 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       mimeType: "application/pdf",
       contentLength: 3,
     });
+    await service.upload(chunks("archive"), {
+      name: "release.tar.gz",
+      tags: ["release"],
+      visibility: "protected",
+      archive: "tar.gz",
+      mimeType: "application/gzip",
+      contentLength: 7,
+    });
 
     const byGlob = await service.list({
       name: "report-*.pdf",
@@ -369,6 +377,21 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       privateOnly.files.map((file) => file.name),
       ["report-two.pdf"],
     );
+    const archivedOnly = await service.list({
+      tags: [],
+      archive: "tar.gz",
+      limit: 100,
+    });
+    assert.deepEqual(
+      archivedOnly.files.map((file) => file.name),
+      ["release.tar.gz"],
+    );
+    const notArchived = await service.list({
+      tags: [],
+      archive: "none",
+      limit: 100,
+    });
+    assert.ok(notArchived.files.every((file) => file.archive === null));
 
     const firstPage = await service.list({ tags: [], limit: 1 });
     assert.equal(firstPage.files.length, 1);

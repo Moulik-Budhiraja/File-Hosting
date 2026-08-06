@@ -78,6 +78,18 @@ export async function GET(request: Request): Promise<Response> {
     const visibility = visibilityValue
       ? parseVisibility(visibilityValue)
       : undefined;
+    const archiveValue = params.get("archive");
+    if (
+      archiveValue !== null &&
+      archiveValue !== "tar.gz" &&
+      archiveValue !== "none"
+    ) {
+      throw new AppError(
+        400,
+        "invalid_archive",
+        "archive must be tar.gz or none",
+      );
+    }
     // Backward-compatible owner scope: only the literal "me" is accepted,
     // resolved server-side so the filter runs in SQL before pagination.
     const ownerValue = params.get("owner");
@@ -100,6 +112,7 @@ export async function GET(request: Request): Promise<Response> {
       name: params.get("name") ?? undefined,
       tags: validateTags(params.getAll("tag")),
       visibility,
+      archive: archiveValue ?? undefined,
       owner,
       access: { role: principal.role, userId: principal.userId },
       limit: parseLimit(params.get("limit")),

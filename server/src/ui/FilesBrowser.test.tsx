@@ -118,6 +118,7 @@ function routes(
         file({
           visibility: body.visibility ?? "private",
           owner_id: body.owner_id ?? "u-sam",
+          tags: body.tags?.values ?? ["datasets"],
         }),
       );
     }
@@ -186,6 +187,36 @@ test("admins transfer ownership to an active user through the inspector", async 
   ).toBeNull();
 });
 
+test("owners replace tags through the inspector", async () => {
+  window.history.replaceState(null, "", "/files");
+  const record: Recorded[] = [];
+  vi.stubGlobal("fetch", vi.fn(routes({ record })));
+  renderFiles();
+  await userEvent.click(
+    await screen.findByRole("button", {
+      name: /telemetry-batch-0412\.parquet/,
+    }),
+  );
+  await userEvent.click(screen.getByRole("button", { name: "Edit tags…" }));
+  const dialog = screen.getByRole("dialog", { name: "Tags" });
+  const input = within(dialog).getByLabelText("Comma-separated tags");
+  await userEvent.clear(input);
+  await userEvent.type(input, "finance, 2026, finance");
+  await userEvent.click(
+    within(dialog).getByRole("button", { name: "Save tags" }),
+  );
+  await waitFor(() => {
+    expect(
+      record.some(
+        (entry) =>
+          entry.method === "PATCH" &&
+          JSON.stringify(entry.body).includes('\"operation\":\"set\"'),
+      ),
+    ).toBe(true);
+  });
+  expect(await screen.findByText("finance, 2026")).toBeTruthy();
+});
+
 test("visibility filter refetches with the visibility parameter", async () => {
   const record: Recorded[] = [];
   vi.stubGlobal("fetch", vi.fn(routes({ record })));
@@ -200,6 +231,29 @@ test("visibility filter refetches with the visibility parameter", async () => {
           entry.url.startsWith("/api/files?") &&
           entry.url.includes("visibility=private"),
       ),
+    ).toBe(true);
+  });
+  await userEvent.click(screen.getByRole("button", { name: "Archived" }));
+  await waitFor(() => {
+    expect(
+      record.some(
+        (entry) =>
+          entry.method === "GET" && entry.url.includes("archive=tar.gz"),
+      ),
+    ).toBe(true);
+  });
+  await userEvent.type(screen.getByLabelText("Name glob"), "report-*.pdf");
+  await userEvent.type(screen.getByLabelText("Exact tag"), "finance");
+  await waitFor(() => {
+    expect(
+      record.some((entry) => {
+        const params = new URL(entry.url, "http://localhost").searchParams;
+        return (
+          entry.method === "GET" &&
+          params.get("name") === "report-*.pdf" &&
+          params.get("tag") === "finance"
+        );
+      }),
     ).toBe(true);
   });
 });
@@ -558,6 +612,10 @@ test("deleting a managed file requires confirmation and reports the result", asy
     name: /Delete telemetry-batch-0412\.parquet\?/,
   });
   expect(record.filter((entry) => entry.method === "DELETE")).toHaveLength(0);
+  await userEvent.type(
+    within(confirm).getByLabelText(/Type .* to confirm/),
+    "telemetry-batch-0412.parquet",
+  );
   await userEvent.click(
     within(confirm).getByRole("button", { name: "Delete file" }),
   );
@@ -607,6 +665,10 @@ test("a committed delete whose response is lost reconciles when the record is go
   const dialog = await screen.findByRole("dialog", {
     name: /Delete telemetry-batch-0412\.parquet\?/,
   });
+  await userEvent.type(
+    within(dialog).getByLabelText(/Type .* to confirm/),
+    "telemetry-batch-0412.parquet",
+  );
   await userEvent.click(
     within(dialog).getByRole("button", { name: "Delete file" }),
   );
@@ -642,6 +704,10 @@ test("an unverifiable delete reports an unknown outcome instead of claiming the 
   const dialog = await screen.findByRole("dialog", {
     name: /Delete telemetry-batch-0412\.parquet\?/,
   });
+  await userEvent.type(
+    within(dialog).getByLabelText(/Type .* to confirm/),
+    "telemetry-batch-0412.parquet",
+  );
   await userEvent.click(
     within(dialog).getByRole("button", { name: "Delete file" }),
   );
@@ -1099,6 +1165,10 @@ test("a busy delete dialog cannot be dismissed and keeps its outcome visible", a
     await screen.findByRole("button", { name: /telemetry/ }),
   );
   await userEvent.click(screen.getByRole("button", { name: "Delete…" }));
+  await userEvent.type(
+    screen.getByLabelText(/Type .* to confirm/),
+    "telemetry-batch-0412.parquet",
+  );
   await userEvent.click(screen.getByRole("button", { name: "Delete file" }));
 
   // The DELETE is committed and in flight: Escape and Cancel must not

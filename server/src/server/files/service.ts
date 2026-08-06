@@ -20,6 +20,7 @@ import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
+import { TransferRegistry, type ActiveTransfer } from "./transfers";
 import {
   PREVIEW_ARTIFACT_MAX_BYTES,
   prepareUnfurlArtifact,
@@ -42,6 +43,14 @@ function availableBytes(stats: Awaited<ReturnType<typeof statfs>>): bigint {
   return BigInt(stats.bavail) * BigInt(stats.bsize);
 }
 
+function safeBytes(value: bigint): number {
+  return Number(
+    value > BigInt(Number.MAX_SAFE_INTEGER)
+      ? BigInt(Number.MAX_SAFE_INTEGER)
+      : value,
+  );
+}
+
 function normalizeMimeType(name: string, supplied?: string): string {
   const contentType = supplied
     ?.split(";", 1)[0]
@@ -61,6 +70,7 @@ function normalizeMimeType(name: string, supplied?: string): string {
 
 export class FileService {
   readonly tempDir: string;
+  private readonly transfers = new TransferRegistry();
 
   private constructor(
     readonly config: FilesConfig,
@@ -174,6 +184,11 @@ export class FileService {
     let size = 0;
     let bytesAtLastCapacityCheck = 0;
     let closed = false;
+    const transferId = this.transfers.begin(
+      "upload",
+      options.name,
+      options.contentLength ?? null,
+    );
 
     try {
       for await (const rawChunk of stream) {
@@ -200,6 +215,7 @@ export class FileService {
           bytesAtLastCapacityCheck = sizeBeforeChunk;
         }
 
+        this.transfers.progress(transferId, chunk.length);
         checksum.update(chunk);
         let offset = 0;
         while (offset < chunk.length) {
@@ -273,6 +289,7 @@ export class FileService {
         );
       }
     } finally {
+      this.transfers.end(transferId);
       if (!closed) await handle.close().catch(() => undefined);
       await unlink(tempPath).catch(() => undefined);
     }
@@ -341,16 +358,110 @@ export class FileService {
     return createReadStream(this.storagePath(file), { start, end });
   }
 
-  async checkHealth(): Promise<{ freeBytes: number }> {
+  activeTransfers(): ActiveTransfer[] {
+    return this.transfers.list();
+  }
+
+  async trackedDownloadStream(
+    file: StoredFile,
+    start?: number,
+    end?: number,
+  ): Promise<AsyncIterable<Uint8Array>> {
+    const registry = this.transfers;
+    const source = this.openReadStream(file, start, end);
+    const totalBytes =
+      start !== undefined && end !== undefined ? end - start + 1 : file.size;
+    return (async function* tracked() {
+      const transferId = registry.begin("download", file.name, totalBytes);
+      try {
+        for await (const chunk of source) {
+          const bytes = chunk as Buffer;
+          registry.progress(transferId, bytes.length);
+          yield bytes;
+        }
+      } finally {
+        registry.end(transferId);
+        source.destroy();
+      }
+    })();
+  }
+
+  async systemInfo(): Promise<{
+    node: string;
+    uptimeSeconds: number;
+    storage: {
+      volumeTotalBytes: number;
+      volumeUsedBytes: number;
+      freeBytes: number;
+      objectBytes: number;
+      objectCount: number;
+      publicCount: number;
+      protectedCount: number;
+      privateCount: number;
+      tempPartCount: number;
+    };
+    database: { dbBytes: number | null };
+    config: {
+      maxUploadBytes: number;
+      minFreeBytes: number;
+      publicUrl: string;
+    };
+  }> {
+    const [stats, health, tempEntries] = await Promise.all([
+      this.repository.stats(),
+      this.checkHealth(),
+      readdir(this.tempDir, { withFileTypes: true }),
+    ]);
+    const databasePath = this.repository.databasePath();
+    let dbBytes: number | null = null;
+    if (databasePath) {
+      try {
+        dbBytes = (await stat(databasePath)).size;
+      } catch {
+        // Remote or not-yet-created database files have no measurable size.
+      }
+    }
+    return {
+      node: process.version,
+      uptimeSeconds: Math.floor(process.uptime()),
+      storage: {
+        volumeTotalBytes: health.totalBytes,
+        volumeUsedBytes: health.usedBytes,
+        freeBytes: health.freeBytes,
+        objectBytes: stats.objectBytes,
+        objectCount: stats.objectCount,
+        publicCount: stats.publicCount,
+        protectedCount: stats.protectedCount,
+        privateCount: stats.privateCount,
+        tempPartCount: tempEntries.filter(
+          (entry) => entry.isFile() && entry.name.endsWith(".part"),
+        ).length,
+      },
+      database: { dbBytes },
+      config: {
+        maxUploadBytes: this.config.maxUploadBytes,
+        minFreeBytes: this.config.minFreeBytes,
+        publicUrl: this.config.publicUrl,
+      },
+    };
+  }
+
+  async checkHealth(): Promise<{
+    freeBytes: number;
+    totalBytes: number;
+    usedBytes: number;
+  }> {
     await this.repository.ping();
     await access(this.config.storageDir, constants.R_OK | constants.W_OK);
-    const free = availableBytes(await statfs(this.config.storageDir));
+    const stats = await statfs(this.config.storageDir);
+    const free = availableBytes(stats);
+    const total = BigInt(stats.blocks) * BigInt(stats.bsize);
+    const used =
+      (BigInt(stats.blocks) - BigInt(stats.bfree)) * BigInt(stats.bsize);
     return {
-      freeBytes: Number(
-        free > BigInt(Number.MAX_SAFE_INTEGER)
-          ? BigInt(Number.MAX_SAFE_INTEGER)
-          : free,
-      ),
+      freeBytes: safeBytes(free),
+      totalBytes: safeBytes(total),
+      usedBytes: safeBytes(used),
     };
   }
 }
