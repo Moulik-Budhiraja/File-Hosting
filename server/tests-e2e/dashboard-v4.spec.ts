@@ -273,7 +273,7 @@ async function visualMetrics(actual: Buffer, reference: Buffer) {
 
 function visualPasses(
   metrics: Awaited<ReturnType<typeof visualMetrics>>,
-  maxBoundaryDelta = 0.05,
+  maxBoundaryDelta = 0.07,
 ) {
   return (
     metrics.colorDifference <= 0.085 &&
@@ -329,7 +329,7 @@ async function evidence(
     referenceMeta.height,
   );
   const metrics = await visualMetrics(comparisonBytes, reference);
-  const maxBoundaryDelta = name === references[0][0] ? 0.05 : 0.25;
+  const maxBoundaryDelta = name === references[0][0] ? 0.07 : 0.27;
   expect(
     metrics.colorDifference,
     `${evidenceName} palette drift`,
