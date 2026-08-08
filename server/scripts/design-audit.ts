@@ -1203,7 +1203,11 @@ async function productionCard(name: string, mimeType: string, bytes: Buffer) {
     `${name}: durable unfurl artifact must become ready before visual audit`,
   );
   const artifact = await readUnfurlArtifact(service, file);
-  assert(artifact, `${name}: committed unfurl artifact must be readable`);
+  const job = await service.repository.getUnfurlArtifactJob(file.id);
+  assert(
+    artifact,
+    `${name}: committed unfurl artifact must be readable (${job?.status ?? "missing job"}: ${job?.lastError ?? "no error"})`,
+  );
   const direct = artifact.preview;
   const model = await buildUnfurlModel(service, file);
   assert.equal(model.preview?.sourceDigest, direct.sourceDigest);

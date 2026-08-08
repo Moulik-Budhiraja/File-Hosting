@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { lstat, readdir, readFile, writeFile } from "node:fs/promises";
+import { lstat, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import type { StoredDerivative } from "./database";
@@ -12,6 +12,8 @@ import { generateDerivativesInChild } from "./image-derivative-child";
 import {
   ensureSafeDirectory,
   FILE_ID_PATTERN,
+  readSafeSourceFile,
+  removeSafeFile,
   removeSafeTree,
 } from "./safe-storage";
 import type { FileService } from "./service";
@@ -23,6 +25,23 @@ const HEARTBEAT_MS = 20_000;
 
 function digest(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
+}
+
+type SourceIdentity = Awaited<
+  ReturnType<typeof readSafeSourceFile>
+>["identity"];
+
+function sameOpenedIdentity(
+  first: SourceIdentity,
+  current: SourceIdentity,
+): boolean {
+  return (
+    first.dev === current.dev &&
+    first.ino === current.ino &&
+    first.size === current.size &&
+    first.mtimeNs === current.mtimeNs &&
+    first.ctimeNs === current.ctimeNs
+  );
 }
 
 function sameSourceRecord(
@@ -44,25 +63,29 @@ export async function processNextDerivativeJob(
   workerId: string,
   options: {
     deadlineMs?: number;
+    deadlineAt?: number;
+    attemptId?: string;
     workerEntry?: string;
     onOutcome?: (error?: Error) => void;
   } = {},
 ): Promise<boolean> {
+  const deadlineAt =
+    options.deadlineAt ??
+    Date.now() + (options.deadlineMs ?? DERIVATIVE_JOB_DEADLINE_MS);
   const job = await service.repository.claimDerivativeJob(
     workerId,
     new Date(),
     LEASE_MS,
   );
   if (!job) return false;
-  const attemptId = randomUUID();
+  const attemptId = options.attemptId ?? randomUUID();
   const attemptSegments = [
     ".image-derivatives",
     job.fileId,
     DERIVATIVE_REVISION,
     attemptId,
   ];
-  const deadlineAt =
-    Date.now() + (options.deadlineMs ?? DERIVATIVE_JOB_DEADLINE_MS);
+
   let heartbeatError: Error | undefined;
   let outcomeError: Error | undefined;
   const heartbeat = setInterval(() => {
@@ -85,16 +108,28 @@ export async function processNextDerivativeJob(
     if (!file) throw new Error("source file unavailable");
     if (file.size > MAX_SOURCE_BYTES)
       throw new Error("image input byte limit exceeded");
-    const source = await readFile(service.storagePath(file));
+    const openedSource = await readSafeSourceFile(
+      service.config.storageDir,
+      file.storageKey,
+      MAX_SOURCE_BYTES,
+    );
+    const source = openedSource.bytes;
     if (source.length !== file.size || digest(source) !== file.sha256)
       throw new Error("source digest mismatch");
     if (Date.now() >= deadlineAt)
       throw new Error("derivative job deadline exceeded");
 
+    const directory = await ensureSafeDirectory(
+      service.config.storageDir,
+      attemptSegments,
+    );
+    const snapshotKey = path.posix.join(...attemptSegments, "source");
+    const snapshotPath = path.join(directory, "source");
+    await writeFile(snapshotPath, source, { flag: "wx", mode: 0o600 });
     const generated = options.workerEntry
       ? await generateDerivativesInChild(
           options.workerEntry,
-          service.storagePath(file),
+          snapshotPath,
           deadlineAt,
         )
       : await generateImageDerivatives(source, {
@@ -111,8 +146,14 @@ export async function processNextDerivativeJob(
     const current = await service.get(file.id);
     if (!sameSourceRecord(file, current))
       throw new Error("source row changed during render");
-    const currentBytes = await readFile(service.storagePath(file));
+    const currentSource = await readSafeSourceFile(
+      service.config.storageDir,
+      file.storageKey,
+      MAX_SOURCE_BYTES,
+    );
+    const currentBytes = currentSource.bytes;
     if (
+      !sameOpenedIdentity(openedSource.identity, currentSource.identity) ||
       currentBytes.length !== file.size ||
       digest(currentBytes) !== file.sha256 ||
       !currentBytes.equals(source)
@@ -120,10 +161,7 @@ export async function processNextDerivativeJob(
       throw new Error("source bytes changed during render");
     }
 
-    const directory = await ensureSafeDirectory(
-      service.config.storageDir,
-      attemptSegments,
-    );
+    await removeSafeFile(service.config.storageDir, snapshotKey);
     const createdAt = new Date().toISOString();
     const records: StoredDerivative[] = [];
     for (const profile of DERIVATIVE_PROFILE_NAMES) {
@@ -150,9 +188,15 @@ export async function processNextDerivativeJob(
     if (heartbeatError || Date.now() >= deadlineAt)
       throw heartbeatError ?? new Error("derivative job deadline exceeded");
     const finalFile = await service.get(file.id);
-    const finalBytes = await readFile(service.storagePath(file));
+    const finalSource = await readSafeSourceFile(
+      service.config.storageDir,
+      file.storageKey,
+      MAX_SOURCE_BYTES,
+    );
+    const finalBytes = finalSource.bytes;
     if (
       !sameSourceRecord(file, finalFile) ||
+      !sameOpenedIdentity(openedSource.identity, finalSource.identity) ||
       finalBytes.length !== file.size ||
       digest(finalBytes) !== file.sha256 ||
       !finalBytes.equals(source) ||

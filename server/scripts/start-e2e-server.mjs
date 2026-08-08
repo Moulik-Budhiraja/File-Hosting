@@ -56,6 +56,7 @@ const worker = spawn(
   [path.join(serverRoot, ".next", "standalone", "image-derivative-worker.cjs")],
   { stdio: ["ignore", "pipe", "pipe"], env: workerEnv },
 );
+let stopping = false;
 
 child.stdout?.on("data", (chunk) => {
   process.stdout.write(chunk);
@@ -75,13 +76,14 @@ worker.stderr?.on("data", (chunk) => {
 });
 child.on("exit", (code) => {
   worker.kill("SIGTERM");
-  serverLog.end(() => process.exit(code ?? 1));
+  serverLog.end(() => process.exit(stopping ? 0 : (code ?? 1)));
 });
 worker.on("exit", (code) => {
   if (code && child.exitCode === null) child.kill("SIGTERM");
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {
   process.on(signal, () => {
+    stopping = true;
     worker.kill(signal);
     child.kill(signal);
   });

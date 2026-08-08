@@ -1301,15 +1301,18 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
         ),
       );
 
-    const [inter, unknownSans, helvetica, mono, unknownMono, menlo] =
-      await Promise.all([
-        renderTextProbe("Inter", "Hamburgefonstiv 018"),
-        renderTextProbe("ZzNope,sans-serif", "Hamburgefonstiv 018"),
-        renderTextProbe("Helvetica", "Hamburgefonstiv 018"),
-        renderTextProbe("JetBrains Mono", "Hamburgefonstiv 018"),
-        renderTextProbe("ZzNope,monospace", "Hamburgefonstiv 018"),
-        renderTextProbe("Menlo", "Hamburgefonstiv 018"),
-      ]);
+    const probes = [
+      ["Inter", "Hamburgefonstiv 018"],
+      ["ZzNope,sans-serif", "Hamburgefonstiv 018"],
+      ["Helvetica", "Hamburgefonstiv 018"],
+      ["JetBrains Mono", "Hamburgefonstiv 018"],
+      ["ZzNope,monospace", "Hamburgefonstiv 018"],
+      ["Menlo", "Hamburgefonstiv 018"],
+    ] as const;
+    const rendered: Buffer[] = [];
+    for (const [family, text] of probes)
+      rendered.push(await renderTextProbe(family, text));
+    const [inter, unknownSans, helvetica, mono, unknownMono, menlo] = rendered;
 
     assert.notDeepEqual(inter, unknownSans);
     assert.notDeepEqual(inter, helvetica);

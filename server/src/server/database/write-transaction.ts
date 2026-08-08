@@ -2,8 +2,42 @@ import { AsyncLocalStorage } from "node:async_hooks";
 
 import type { Client, Transaction } from "@libsql/client";
 
-const writeQueues = new Map<string, Promise<void>>();
+interface PendingWrite {
+  start: () => void;
+  timer: NodeJS.Timeout;
+}
+
+interface WriteQueue {
+  active: boolean;
+  pending: PendingWrite[];
+}
+
+const writeQueues = new Map<string, WriteQueue>();
 const activeWriteDatabases = new AsyncLocalStorage<ReadonlySet<string>>();
+
+export const DATABASE_WRITE_MAX_PENDING = 256;
+
+export class DatabaseWriteAdmissionError extends Error {
+  constructor(public readonly reason: "overloaded" | "timeout") {
+    super(
+      reason === "overloaded"
+        ? "database write admission overloaded"
+        : "database write admission timed out",
+    );
+    this.name = "DatabaseWriteAdmissionError";
+  }
+}
+
+function releaseWrite(databaseUrl: string, queue: WriteQueue): void {
+  const next = queue.pending.shift();
+  if (next) {
+    clearTimeout(next.timer);
+    next.start();
+    return;
+  }
+  queue.active = false;
+  if (writeQueues.get(databaseUrl) === queue) writeQueues.delete(databaseUrl);
+}
 
 /**
  * Serialize same-process writers before they attempt BEGIN. The async-local
@@ -13,27 +47,53 @@ const activeWriteDatabases = new AsyncLocalStorage<ReadonlySet<string>>();
 export function runDatabaseWrite<T>(
   databaseUrl: string,
   task: () => Promise<T>,
+  options: {
+    admissionTimeoutMs?: number;
+    maxPending?: number;
+  } = {},
 ): Promise<T> {
   const active = activeWriteDatabases.getStore();
   if (active?.has(databaseUrl)) return task();
 
-  const previous = writeQueues.get(databaseUrl) ?? Promise.resolve();
-  const run = previous.then(
-    () =>
-      activeWriteDatabases.run(new Set([...(active ?? []), databaseUrl]), task),
-    () =>
-      activeWriteDatabases.run(new Set([...(active ?? []), databaseUrl]), task),
-  );
-  const settled = run.then(
-    () => undefined,
-    () => undefined,
-  );
-  writeQueues.set(databaseUrl, settled);
-  void settled.finally(() => {
-    if (writeQueues.get(databaseUrl) === settled)
-      writeQueues.delete(databaseUrl);
+  const admissionTimeoutMs =
+    options.admissionTimeoutMs ?? DATABASE_BUSY_TIMEOUT_MS;
+  const maxPending = options.maxPending ?? DATABASE_WRITE_MAX_PENDING;
+  let queue = writeQueues.get(databaseUrl);
+  if (!queue) {
+    queue = { active: false, pending: [] };
+    writeQueues.set(databaseUrl, queue);
+  }
+  if (queue.active && queue.pending.length >= maxPending) {
+    return Promise.reject(new DatabaseWriteAdmissionError("overloaded"));
+  }
+
+  return new Promise<T>((resolve, reject) => {
+    const start = () => {
+      queue.active = true;
+      void Promise.resolve()
+        .then(() =>
+          activeWriteDatabases.run(
+            new Set([...(active ?? []), databaseUrl]),
+            task,
+          ),
+        )
+        .then(resolve, reject)
+        .finally(() => releaseWrite(databaseUrl, queue));
+    };
+    if (!queue.active) {
+      start();
+      return;
+    }
+    const pending = {} as PendingWrite;
+    pending.start = start;
+    pending.timer = setTimeout(() => {
+      const index = queue.pending.indexOf(pending);
+      if (index < 0) return;
+      queue.pending.splice(index, 1);
+      reject(new DatabaseWriteAdmissionError("timeout"));
+    }, admissionTimeoutMs);
+    queue.pending.push(pending);
   });
-  return run;
 }
 
 export const DATABASE_BUSY_TIMEOUT_MS = 5_000;

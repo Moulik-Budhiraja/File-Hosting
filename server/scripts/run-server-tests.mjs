@@ -6,10 +6,15 @@ import process from "node:process";
 const root = process.cwd();
 const testDirectories = ["src/server/auth", "src/server/files"];
 const isolated = new Set([
+  "admitted-job-process.test.ts",
+  "auth.test.ts",
+  "files.test.ts",
+  "image-derivatives.test.ts",
   "og-rss.test.ts",
   "og-v2.test.ts",
   "preview-derivation.test.ts",
   "process-tree.test.ts",
+  "responsive-pdf.test.ts",
   "unfurl-route.test.ts",
 ]);
 const all = testDirectories.flatMap((directory) =>
@@ -26,6 +31,11 @@ const nativePreviewPatterns = [
 ];
 const groups = [
   { files: all.filter((filename) => !isolated.has(path.basename(filename))) },
+  { files: ["src/server/auth/auth.test.ts"] },
+  { files: ["src/server/files/files.test.ts"] },
+  { files: ["src/server/files/image-derivatives.test.ts"] },
+  { files: ["src/server/files/admitted-job-process.test.ts"] },
+  { files: ["src/server/files/responsive-pdf.test.ts"] },
   { files: ["src/server/files/og-v2.test.ts"] },
   {
     files: [previewFile],

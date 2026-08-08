@@ -1,17 +1,23 @@
-import { createHash } from "node:crypto";
-import { lstat, readdir, readFile } from "node:fs/promises";
+import { createHash, randomUUID } from "node:crypto";
+import { lstat, readdir, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import { renderOgImage } from "./og-image";
 import { generateCompleteUnfurlArtifact } from "./preview-artifact";
 import { unfurlArtifactStorageKey } from "./preview-artifact-storage";
-import { ensureSafeDirectory, removeSafeFile } from "./safe-storage";
+import {
+  ensureSafeDirectory,
+  readSafeSourceFile,
+  removeSafeFile,
+  removeSafeTree,
+} from "./safe-storage";
 import type { FileService } from "./service";
 import { buildUnfurlModel, publicUnfurlRevisionMatches } from "./unfurl";
 
 const LEASE_MS = 120_000;
 const HEARTBEAT_MS = 20_000;
 export const UNFURL_JOB_DEADLINE_MS = 75_000;
+const MAX_SOURCE_BYTES = 128 * 1024 * 1024;
 
 function digest(bytes: Buffer): string {
   return createHash("sha256").update(bytes).digest("hex");
@@ -27,9 +33,14 @@ export async function processNextUnfurlArtifactJob(
     ) => Promise<void>;
     onlyFileId?: string;
     deadlineMs?: number;
+    deadlineAt?: number;
+    attemptId?: string;
     onOutcome?: (error?: Error) => void;
   } = {},
 ): Promise<boolean> {
+  const deadlineAt =
+    options.deadlineAt ??
+    Date.now() + (options.deadlineMs ?? UNFURL_JOB_DEADLINE_MS);
   const job = await service.repository.claimUnfurlArtifactJob(
     workerId,
     new Date(),
@@ -37,14 +48,18 @@ export async function processNextUnfurlArtifactJob(
     options.onlyFileId,
   );
   if (!job) return false;
-  const deadlineAt =
-    Date.now() + (options.deadlineMs ?? UNFURL_JOB_DEADLINE_MS);
+
   const assertDeadline = () => {
     if (Date.now() >= deadlineAt)
       throw new Error("unfurl admitted-job deadline exceeded");
   };
   let heartbeatError: Error | undefined;
   let outcomeError: Error | undefined;
+  const sourceAttempt = [
+    ".unfurl-job-sources",
+    job.fileId,
+    options.attemptId ?? randomUUID(),
+  ];
   const heartbeat = setInterval(() => {
     void service.repository
       .renewUnfurlArtifactLease(job.fileId, workerId, new Date(), LEASE_MS)
@@ -64,27 +79,64 @@ export async function processNextUnfurlArtifactJob(
     const file = await service.get(job.fileId);
     if (file?.visibility !== "public")
       throw new Error("unfurl source unavailable");
-    const before = await readFile(service.storagePath(file));
+    const openedBefore = await readSafeSourceFile(
+      service.config.storageDir,
+      file.storageKey,
+      MAX_SOURCE_BYTES,
+    );
+    const before = openedBefore.bytes;
     assertDeadline();
     if (before.length !== file.size || digest(before) !== file.sha256)
       throw new Error("unfurl source digest mismatch");
-    if (options.generate) await options.generate(service, file);
+    const sourceDirectory = await ensureSafeDirectory(
+      service.config.storageDir,
+      sourceAttempt,
+    );
+    const sourceStorageKey = path.posix.join(...sourceAttempt, "source");
+    await writeFile(path.join(sourceDirectory, "source"), before, {
+      flag: "wx",
+      mode: 0o600,
+    });
+    const retainedFile = { ...file, storageKey: sourceStorageKey };
+    if (options.generate) await options.generate(service, retainedFile);
     else
-      await generateCompleteUnfurlArtifact(service, file, async (preview) => {
-        assertDeadline();
-        const model = await buildUnfurlModel(service, file, preview);
-        const image = await renderOgImage(service, file, model);
-        assertDeadline();
-        return image;
-      });
+      await generateCompleteUnfurlArtifact(
+        service,
+        file,
+        async (preview) => {
+          assertDeadline();
+          const model = await buildUnfurlModel(service, retainedFile, preview);
+          const image = await renderOgImage(service, retainedFile, model);
+          assertDeadline();
+          return image;
+        },
+        {
+          sourceFile: retainedFile,
+          sourceIdentity: openedBefore.identity,
+          deadlineAt,
+        },
+      );
     assertDeadline();
     if (heartbeatError) throw heartbeatError;
     const current = await service.get(file.id);
     if (!publicUnfurlRevisionMatches(file, current))
       throw new Error("unfurl source row changed");
-    const after = await readFile(service.storagePath(file));
+    const openedAfter = await readSafeSourceFile(
+      service.config.storageDir,
+      file.storageKey,
+      MAX_SOURCE_BYTES,
+    );
+    const after = openedAfter.bytes;
     assertDeadline();
-    if (!after.equals(before) || digest(after) !== file.sha256)
+    if (
+      openedBefore.identity.dev !== openedAfter.identity.dev ||
+      openedBefore.identity.ino !== openedAfter.identity.ino ||
+      openedBefore.identity.size !== openedAfter.identity.size ||
+      openedBefore.identity.mtimeNs !== openedAfter.identity.mtimeNs ||
+      openedBefore.identity.ctimeNs !== openedAfter.identity.ctimeNs ||
+      !after.equals(before) ||
+      digest(after) !== file.sha256
+    )
       throw new Error("unfurl source bytes changed");
     if (
       !(await service.repository.completeUnfurlArtifactJob(file.id, workerId))
@@ -100,6 +152,9 @@ export async function processNextUnfurlArtifactJob(
     );
   } finally {
     clearInterval(heartbeat);
+    await removeSafeTree(service.config.storageDir, sourceAttempt).catch(
+      () => undefined,
+    );
     try {
       options.onOutcome?.(outcomeError);
     } catch {}

@@ -224,22 +224,67 @@ describe("preview renderer strategy registry", () => {
       });
 
       const started = Date.now();
-      await assert.rejects(
-        derivePreview(candidate, registry),
-        PreviewSourceUnavailableError,
-      );
-      assert.ok(Date.now() - started < 2_700);
-      assert.deepEqual(getPreviewExtractionPoolState(), {
-        active: 1,
-        queued: 0,
-      });
-      await new Promise((resolve) => setTimeout(resolve, 300));
+      const fallback = await derivePreview(candidate, registry);
+      assert.equal(fallback.visual.kind, "binary");
+      assert.equal(fallback.sourceDigest, candidate.sha256);
+      assert.ok(Date.now() - started >= 2_650);
       assert.deepEqual(getPreviewExtractionPoolState(), {
         active: 0,
         queued: 0,
       });
       const recovered = await derivePreview(candidate);
       assert.equal(recovered.sourceDigest, candidate.sha256);
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  });
+
+  it("rejects a source replaced after the renderer deadline but before settlement", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "preview-late-replace-"),
+    );
+    try {
+      const sourcePath = path.join(directory, "source.bin");
+      const source = Buffer.from("original preview source");
+      await writeFile(sourcePath, source);
+      const candidate: RendererInput = {
+        trustedMime: "application/octet-stream",
+        name: "source.bin",
+        size: source.length,
+        sha256: createHash("sha256").update(source).digest("hex"),
+        sourcePath,
+      };
+      const registry = new PreviewRendererRegistry().register({
+        ...renderer("late-replacement", 1, () => true),
+        async extract(probe) {
+          await new Promise((resolve) =>
+            setTimeout(resolve, PREVIEW_EXTRACTION_LIMITS.wallTimeoutMs + 200),
+          );
+          return {
+            family: "binary",
+            label: "Binary",
+            title: probe.input.name,
+            facts: [],
+            sourceDigest: probe.input.sha256,
+            visual: { kind: "binary" },
+          };
+        },
+      });
+      const replacement = setTimeout(() => {
+        void writeFile(sourcePath, Buffer.from("replacement preview source"));
+      }, PREVIEW_EXTRACTION_LIMITS.wallTimeoutMs + 100);
+      try {
+        await assert.rejects(
+          derivePreview(candidate, registry),
+          PreviewSourceUnavailableError,
+        );
+      } finally {
+        clearTimeout(replacement);
+      }
+      assert.deepEqual(getPreviewExtractionPoolState(), {
+        active: 0,
+        queued: 0,
+      });
     } finally {
       await rm(directory, { recursive: true, force: true });
     }

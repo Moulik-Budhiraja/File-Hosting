@@ -3,11 +3,53 @@ import { spawn } from "node:child_process";
 import type { GeneratedDerivative } from "./image-derivatives";
 
 const MAX_STDOUT_BYTES = 24 * 1024 * 1024;
-const KILL_WAIT_MS = 5_000;
-const activeChildren = new Set<number>();
+const TERM_GRACE_MS = 250;
+const GROUP_DEATH_WAIT_MS = 5_000;
+const activeChildren = new Map<number, Promise<void>>();
 
-export function cancelActiveRenderChildren(): void {
-  for (const pid of activeChildren) terminateGroup(pid);
+function signalGroup(pid: number, signal: NodeJS.Signals): void {
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, signal);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ESRCH") throw error;
+  }
+}
+
+function groupAlive(pid: number): boolean {
+  try {
+    process.kill(process.platform === "win32" ? pid : -pid, 0);
+    return true;
+  } catch (error) {
+    return (error as NodeJS.ErrnoException).code !== "ESRCH";
+  }
+}
+
+async function waitForGroupDeath(
+  pid: number,
+  deadlineAt: number,
+): Promise<void> {
+  while (groupAlive(pid)) {
+    if (Date.now() >= deadlineAt)
+      throw new Error("image derivative process group did not terminate");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+}
+
+async function terminateGroupAndWait(pid: number): Promise<void> {
+  signalGroup(pid, "SIGTERM");
+  const escalationAt = Date.now() + TERM_GRACE_MS;
+  while (groupAlive(pid) && Date.now() < escalationAt)
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  if (groupAlive(pid)) signalGroup(pid, "SIGKILL");
+  await waitForGroupDeath(pid, Date.now() + GROUP_DEATH_WAIT_MS);
+}
+
+export async function cancelActiveRenderChildren(): Promise<void> {
+  await Promise.allSettled(
+    [...activeChildren.entries()].map(async ([pid, existing]) => {
+      await Promise.race([existing, terminateGroupAndWait(pid)]);
+    }),
+  );
 }
 
 export class AdmittedJobDeadlineError extends Error {
@@ -15,18 +57,6 @@ export class AdmittedJobDeadlineError extends Error {
     super("image derivative admitted-job deadline exceeded");
     this.name = "AdmittedJobDeadlineError";
   }
-}
-
-function terminateGroup(pid: number | undefined): void {
-  if (!pid) return;
-  try {
-    process.kill(process.platform === "win32" ? pid : -pid, "SIGTERM");
-  } catch {}
-  setTimeout(() => {
-    try {
-      process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL");
-    } catch {}
-  }, KILL_WAIT_MS).unref();
 }
 
 export async function generateDerivativesInChild(
@@ -41,49 +71,89 @@ export async function generateDerivativesInChild(
       process.execPath,
       ["--max-old-space-size=384", workerEntry, "--render-child"],
       {
-        detached: process.platform !== "win32",
+        detached:
+          process.platform !== "win32" &&
+          process.env.FS_ADMITTED_JOB_CHILD !== "1",
         stdio: ["pipe", "pipe", "pipe"],
       },
     );
     const chunks: Buffer[] = [];
-    if (child.pid) activeChildren.add(child.pid);
+    const pid = child.pid;
     let size = 0;
     let settled = false;
     let deadlineError: Error | undefined;
-    const finish = (
+    let termination: Promise<void> | undefined;
+    let terminationRequested = false;
+    if (pid) {
+      termination = new Promise<void>((resolveTermination) => {
+        child.once("close", () => resolveTermination());
+      }).then(async () => {
+        if (
+          !terminationRequested &&
+          process.platform !== "win32" &&
+          groupAlive(pid)
+        )
+          await terminateGroupAndWait(pid);
+      });
+      activeChildren.set(pid, termination);
+      void termination.finally(() => activeChildren.delete(pid));
+    }
+    const finish = async (
       error?: Error,
       value?: Record<string, GeneratedDerivative>,
     ) => {
       if (settled) return;
       settled = true;
       clearTimeout(timer);
+      try {
+        await termination;
+      } catch (terminationError) {
+        error =
+          terminationError instanceof Error
+            ? terminationError
+            : new Error("image derivative process group termination failed");
+      }
       if (error) reject(error);
       else resolve(value ?? {});
     };
+    const terminateThenFinish = (error: Error) => {
+      if (!pid) {
+        void finish(error);
+        return;
+      }
+      terminationRequested = true;
+      const killed = terminateGroupAndWait(pid);
+      termination = killed;
+      activeChildren.set(pid, killed);
+      void killed.then(
+        () => finish(error),
+        (terminationError: unknown) =>
+          finish(terminationError instanceof Error ? terminationError : error),
+      );
+    };
     const timer = setTimeout(() => {
       deadlineError = new AdmittedJobDeadlineError();
-      terminateGroup(child.pid);
+      terminateThenFinish(deadlineError);
     }, remaining);
     timer.unref();
     child.stdout.on("data", (chunk: Buffer) => {
       size += chunk.length;
       if (size > MAX_STDOUT_BYTES) {
-        terminateGroup(child.pid);
-        finish(new Error("image derivative child output exceeded limit"));
+        terminateThenFinish(
+          new Error("image derivative child output exceeded limit"),
+        );
         return;
       }
       chunks.push(chunk);
     });
-    child.once("error", (error) => finish(error));
+    child.once("error", (error) => void finish(error));
     child.once("exit", (code, signal) => {
-      if (child.pid) activeChildren.delete(child.pid);
       if (settled) return;
-      if (deadlineError) {
-        finish(deadlineError);
-        return;
-      }
+      if (deadlineError) return;
       if (code !== 0) {
-        finish(new Error(`image derivative child failed (${code ?? signal})`));
+        void finish(
+          new Error(`image derivative child failed (${code ?? signal})`),
+        );
         return;
       }
       try {
@@ -93,7 +163,7 @@ export async function generateDerivativesInChild(
           string,
           Omit<GeneratedDerivative, "bytes"> & { bytes: string }
         >;
-        finish(
+        void finish(
           undefined,
           Object.fromEntries(
             Object.entries(parsed).map(([profile, item]) => [
@@ -103,7 +173,9 @@ export async function generateDerivativesInChild(
           ),
         );
       } catch {
-        finish(new Error("image derivative child returned invalid output"));
+        void finish(
+          new Error("image derivative child returned invalid output"),
+        );
       }
     });
     child.stdin.end(JSON.stringify({ sourcePath, deadlineAt }));

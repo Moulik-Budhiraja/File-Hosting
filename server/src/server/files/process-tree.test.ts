@@ -286,16 +286,16 @@ describe(
       const worker = path.join(directory, "worker.mjs");
       await writeFile(
         worker,
-        `const delay = Number(process.argv[2]);\nsetTimeout(() => process.exit(0), delay);\n`,
+        `const argument = process.argv[2];\nif (argument === "stall") setInterval(() => {}, 1_000);\nelse setTimeout(() => process.exit(0), Number(argument));\n`,
       );
 
       const blocker = renderSvgInWorker(Buffer.from("<svg/>"), {
         workerPath: worker,
-        workerArguments: ["300"],
+        workerArguments: ["stall"],
         timeoutMs: 1_000,
         allowSubprocesses: true,
       });
-      await new Promise((resolve) => setTimeout(resolve, 25));
+      assert.equal(getOgRenderPoolState().active, 1);
       const started = Date.now();
       await assert.rejects(
         renderSvgInWorker(Buffer.from("<svg/>"), {
@@ -309,7 +309,7 @@ describe(
         Date.now() - started < 300,
         "queued work exceeded its total deadline",
       );
-      await blocker;
+      await assert.rejects(blocker, /process deadline exceeded/u);
       assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
     });
 

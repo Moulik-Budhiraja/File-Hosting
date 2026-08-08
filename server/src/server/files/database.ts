@@ -57,6 +57,30 @@ export interface StoredDerivative {
 
 export const UNFURL_ARTIFACT_REVISION = "unfurl-artifact-v1" as const;
 
+/**
+ * Cross-process readiness contract: at least one recent worker must be ready at
+ * this schema revision and have no persisted runtime-loop error. Idle
+ * heartbeats never clear last_error; only recordWorkerHealth({ success: true })
+ * after a fully settled successful child loop may clear it. The health command calls
+ * this read-only query directly and performs no migrations or worker writes.
+ */
+export async function hasHealthyImageWorker(
+  client: Client,
+  now = new Date(),
+  maximumAgeMs = 90_000,
+): Promise<boolean> {
+  const threshold = new Date(now.getTime() - maximumAgeMs).toISOString();
+  const result = await client.execute({
+    sql: `SELECT 1 FROM image_worker_health
+      WHERE ready = 1 AND schema_revision = ? AND last_error IS NULL
+        AND last_success_at IS NOT NULL
+        AND heartbeat_at >= ?
+      ORDER BY heartbeat_at DESC LIMIT 1`,
+    args: [DERIVATIVE_REVISION, threshold],
+  });
+  return result.rows.length > 0;
+}
+
 const FILES_COLUMNS = `
   id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
   name TEXT NOT NULL,
@@ -1231,6 +1255,14 @@ export class FileRepository {
         ],
       }),
     );
+  }
+
+  async hasHealthyWorker(
+    now = new Date(),
+    maximumAgeMs = 90_000,
+  ): Promise<boolean> {
+    await this.ready;
+    return hasHealthyImageWorker(this.client, now, maximumAgeMs);
   }
 
   async list(options: ListFilesOptions): Promise<ListFilesResult> {

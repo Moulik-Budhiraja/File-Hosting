@@ -69,6 +69,107 @@ export async function openSafeStoredFile(
   return open(filename, constants.O_RDONLY | constants.O_NOFOLLOW);
 }
 
+async function safeSourceFilename(
+  storageRoot: string,
+  storageKey: string,
+): Promise<string> {
+  if (path.isAbsolute(storageKey))
+    throw new Error("absolute storage key rejected");
+  const segments = storageKey.split("/");
+  if (segments.length < 1 || segments.some((segment) => !segment))
+    throw new Error("invalid storage key");
+  for (const segment of segments) assertSegment(segment);
+  const root = await realpath(storageRoot);
+  let parent = root;
+  for (const segment of segments.slice(0, -1)) {
+    const candidate = path.join(parent, segment);
+    const details = await lstat(candidate);
+    if (!details.isDirectory() || details.isSymbolicLink())
+      throw new Error("unsafe source namespace component");
+    parent = await realpath(candidate);
+    if (!isContained(root, parent))
+      throw new Error("source storage key escaped root");
+  }
+  return path.join(parent, segments.at(-1)!);
+}
+
+/**
+ * Open an original through a validated namespace. O_NONBLOCK prevents a FIFO
+ * swapped in at the final component from blocking before fstat can reject it.
+ * Callers retain this handle while hashing/reading so a later path replacement
+ * cannot redirect the admitted job to another object.
+ */
+export async function openSafeSourceFile(
+  storageRoot: string,
+  storageKey: string,
+): Promise<FileHandle> {
+  const filename = await safeSourceFilename(storageRoot, storageKey);
+  const before = await lstat(filename);
+  if (!before.isFile() || before.isSymbolicLink())
+    throw new Error("source object is not a regular file");
+  const handle = await open(
+    filename,
+    constants.O_RDONLY |
+      (constants.O_NOFOLLOW ?? 0) |
+      (constants.O_NONBLOCK ?? 0),
+  );
+  try {
+    const opened = await handle.stat();
+    if (!opened.isFile())
+      throw new Error("source object is not a regular file");
+    return handle;
+  } catch (error) {
+    await handle.close().catch(() => undefined);
+    throw error;
+  }
+}
+
+export async function readSafeSourceFile(
+  storageRoot: string,
+  storageKey: string,
+  maximumBytes: number,
+): Promise<{
+  bytes: Buffer;
+  identity: {
+    dev: bigint;
+    ino: bigint;
+    size: bigint;
+    mtimeNs: bigint;
+    ctimeNs: bigint;
+  };
+}> {
+  const handle = await openSafeSourceFile(storageRoot, storageKey);
+  try {
+    const before = await handle.stat({ bigint: true });
+    if (before.size > BigInt(maximumBytes))
+      throw new Error("source input byte limit exceeded");
+    const bytes = await handle.readFile();
+    const after = await handle.stat({ bigint: true });
+    if (
+      before.dev !== after.dev ||
+      before.ino !== after.ino ||
+      before.size !== after.size ||
+      before.mtimeNs !== after.mtimeNs ||
+      before.ctimeNs !== after.ctimeNs ||
+      BigInt(bytes.length) !== after.size
+    ) {
+      throw new Error("source object changed while reading");
+    }
+    return {
+      bytes,
+      identity: {
+        dev: after.dev,
+        ino: after.ino,
+        size: after.size,
+        mtimeNs: after.mtimeNs,
+        ctimeNs: after.ctimeNs,
+      },
+    };
+  } finally {
+    await handle.close().catch(() => undefined);
+  }
+}
+
 export async function removeSafeTree(
   storageRoot: string,
   segments: string[],

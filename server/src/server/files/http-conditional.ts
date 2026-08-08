@@ -27,6 +27,19 @@ export function evaluatePreconditions(
     return { status: 412, allowRange: false };
   }
 
+  if (!request.headers.has("if-match")) {
+    const ifUnmodifiedSince = request.headers.get("if-unmodified-since");
+    const since = ifUnmodifiedSince
+      ? Date.parse(ifUnmodifiedSince)
+      : Number.NaN;
+    if (
+      Number.isFinite(since) &&
+      Math.floor(lastModified.getTime() / 1000) > Math.floor(since / 1000)
+    ) {
+      return { status: 412, allowRange: false };
+    }
+  }
+
   const ifNoneMatch = splitEtags(request.headers.get("if-none-match"));
   if (
     ifNoneMatch.includes("*") ||
@@ -38,7 +51,7 @@ export function evaluatePreconditions(
     };
   }
 
-  if (ifNoneMatch.length === 0) {
+  if (!request.headers.has("if-none-match")) {
     const ifModifiedSince = request.headers.get("if-modified-since");
     const since = ifModifiedSince ? Date.parse(ifModifiedSince) : Number.NaN;
     if (

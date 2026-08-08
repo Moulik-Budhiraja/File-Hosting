@@ -7,6 +7,7 @@ import {
   readFile,
   rm,
   symlink,
+  unlink,
   writeFile,
 } from "node:fs/promises";
 import os from "node:os";
@@ -216,7 +217,7 @@ describe("stored image derivative profiles", () => {
       const pidFile = path.join(fixtureDir, "descendant.pid");
       await writeFile(
         childScript,
-        `const {spawn}=require("node:child_process");const fs=require("node:fs");const child=spawn(process.execPath,["-e","setInterval(()=>{},1000)"],{stdio:"ignore"});fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));setInterval(()=>{},1000);`,
+        `const {spawn}=require("node:child_process");const fs=require("node:fs");const child=spawn(process.execPath,["-e","process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:"ignore"});fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));setInterval(()=>{},1000);`,
       );
       await assert.rejects(
         () =>
@@ -234,6 +235,41 @@ describe("stored image derivative profiles", () => {
         /ESRCH|no such process/i,
       );
     } finally {
+      await rm(fixtureDir, { recursive: true, force: true });
+    }
+  });
+
+  it("reaps a stubborn descendant when the native launcher exits early", async () => {
+    const fixtureDir = await mkdtemp(
+      path.join(os.tmpdir(), "derivative-early-exit-"),
+    );
+    const childScript = path.join(fixtureDir, "early-exit.cjs");
+    const pidFile = path.join(fixtureDir, "descendant.pid");
+    let descendantPid = 0;
+    try {
+      await writeFile(
+        childScript,
+        `const {spawn}=require("node:child_process");const fs=require("node:fs");const child=spawn(process.execPath,["-e","process.on('SIGTERM',()=>{});setInterval(()=>{},1000)"],{stdio:"ignore",detached:false});child.unref();fs.writeFileSync(${JSON.stringify(pidFile)},String(child.pid));`,
+      );
+      await assert.rejects(
+        () =>
+          generateDerivativesInChild(
+            childScript,
+            path.join(fixtureDir, "unused"),
+            Date.now() + 10_000,
+          ),
+        /invalid output/u,
+      );
+      descendantPid = Number(await readFile(pidFile, "utf8"));
+      assert.throws(
+        () => process.kill(descendantPid, 0),
+        /ESRCH|no such process/i,
+      );
+    } finally {
+      if (descendantPid > 0)
+        try {
+          process.kill(descendantPid, "SIGKILL");
+        } catch {}
       await rm(fixtureDir, { recursive: true, force: true });
     }
   });
@@ -481,6 +517,39 @@ describe("durable derivative upload boundary", { concurrency: false }, () => {
     assert.equal(await service.getDerivative(safe.id, "small"), null);
   });
 
+  it("rejects an original replaced by a byte-identical outside symlink", async () => {
+    while (await processNextDerivativeJob(service, "source-symlink-drain")) {
+      // Isolate this source-path attack from earlier jobs.
+    }
+    const source = await sharp({
+      create: { width: 20, height: 10, channels: 3, background: "purple" },
+    })
+      .png()
+      .toBuffer();
+    const uploaded = await service.upload(bytes(source), {
+      name: "outside-source.png",
+      tags: [],
+      visibility: "private",
+      archive: null,
+      mimeType: "image/png",
+      contentLength: source.length,
+    });
+    const outside = path.join(directory, "outside-source.png");
+    await writeFile(outside, source);
+    await unlink(service.storagePath(uploaded));
+    await symlink(outside, service.storagePath(uploaded));
+
+    assert.equal(
+      await processNextDerivativeJob(service, "source-symlink-worker"),
+      true,
+    );
+    assert.equal(await service.getDerivative(uploaded.id, "small"), null);
+    assert.match(
+      (await service.repository.getDerivativeJob(uploaded.id))?.lastError ?? "",
+      /symlink|regular|safe|storage/u,
+    );
+  });
+
   it("keeps immutable attempt bytes unpublished and cleans them after DB commit failure", async () => {
     while (await processNextDerivativeJob(service, "db-failure-drain")) {
       // Isolate the injected commit failure from earlier jobs.
@@ -666,6 +735,24 @@ describe("durable derivative upload boundary", { concurrency: false }, () => {
     );
     assert.equal(preconditionFailed.status, 412);
     assert.equal(await preconditionFailed.text(), "");
+    for (const method of ["GET", "HEAD"] as const) {
+      const request = new Request(
+        `https://files.example.test/raw/${uploaded.id}/small`,
+        {
+          method,
+          headers: {
+            "if-unmodified-since": "Wed, 01 Jan 2020 00:00:00 GMT",
+            range: "bytes=0-9",
+          },
+        },
+      );
+      const stale =
+        method === "HEAD"
+          ? await headDerivativeRoute(request, context)
+          : await getDerivativeRoute(request, context);
+      assert.equal(stale.status, 412);
+      assert.equal(await stale.text(), "");
+    }
     const modifiedSince = await getDerivativeRoute(
       new Request(`https://files.example.test/raw/${uploaded.id}/small`, {
         headers: { "if-modified-since": "Wed, 31 Dec 2099 23:59:59 GMT" },

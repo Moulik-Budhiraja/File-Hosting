@@ -452,8 +452,17 @@ test("non-production rich-link runner has a production guard and generates visua
   assert.match(runner, /rich-link-preview-probe\.mjs/u);
   assert.match(runner, /FS_PROBE_SCREENSHOTS/u);
   assert.match(runner, /NODE_ENV: "production"/u);
+  assert.match(runner, /timeout: 5_000/u);
+  assert.match(runner, /await stopChild\(probe\)/u);
   assert.match(runner, /SIGTERM/u);
   assert.match(runner, /SIGKILL/u);
+});
+
+test("Playwright standalone lifecycle exits cleanly after intentional shutdown", async () => {
+  const runner = await text("server/scripts/start-e2e-server.mjs");
+  assert.match(runner, /let stopping = false/u);
+  assert.match(runner, /stopping = true/u);
+  assert.match(runner, /process\.exit\(stopping \? 0 : \(code \?\? 1\)\)/u);
 });
 
 test("canonical freeze and manifest are source-pinned without a fixture update command", async () => {

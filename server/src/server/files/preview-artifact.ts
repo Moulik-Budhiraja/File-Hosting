@@ -175,15 +175,23 @@ export async function generateCompleteUnfurlArtifact(
   service: FileService,
   file: StoredFile,
   renderCard: (preview: PreviewExtraction) => Promise<Buffer>,
+  options: {
+    sourceFile?: StoredFile;
+    sourceIdentity?: SourceIdentity;
+    deadlineAt?: number;
+  } = {},
 ): Promise<PreparedUnfurlArtifact> {
-  const sourceIdentity = await captureSourceIdentity(service, file);
+  const sourceFile = options.sourceFile ?? file;
+  const sourceIdentity =
+    options.sourceIdentity ?? (await captureSourceIdentity(service, file));
   if (!sourceIdentity) throw new Error("preview source unavailable");
   const preview = await derivePreview({
-    trustedMime: file.mimeType,
-    name: file.name,
-    size: file.size,
-    sha256: file.sha256,
-    sourcePath: service.storagePath(file),
+    trustedMime: sourceFile.mimeType,
+    name: sourceFile.name,
+    size: sourceFile.size,
+    sha256: sourceFile.sha256,
+    sourcePath: service.storagePath(sourceFile),
+    deadlineAt: options.deadlineAt,
   });
   const card = await renderCard(preview);
   if (!(await sourceIdentityMatches(service, file, sourceIdentity)))
