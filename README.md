@@ -19,7 +19,7 @@ the Git commit currently checked out there.
 - SQLite stores file metadata, tags, visibility, hashes, object locations, and
   durable image-derivative jobs; file bytes are not stored in the database.
 - Stored image derivatives live under the namespaced sibling layout
-  `.image-derivatives/{id}/image-derivatives-v1/{profile}.webp` on the same
+  `.image-derivatives/{id}/image-derivatives-v1/{attempt}/{profile}.webp` on the same
   storage volume. Originals remain byte-identical at their existing paths.
 
 Uploads and downloads are streamed. Incoming files are written to temporary
@@ -83,7 +83,7 @@ network under the alias `file-hosting-server`, where NPM reaches the container
 directly on port 3000.
 
 Compose also runs `image-derivative-worker` against the same database and file
-mounts. `docker compose stop` gives it 30 seconds to finish its current bounded
+mounts. `docker compose stop` gives it 90 seconds to finish its current bounded
 job and close the database; interrupted leases are recovered automatically.
 
 ## Local development and tests
@@ -183,8 +183,8 @@ executed. Other unsupported preview types are presented as downloads.
 ## Stored image derivative contract
 
 `image-derivatives-v1` is the single versioned profile source. Thumbnail is
-WebP at quality 68 and maximum width 320px (256 KiB cap); small is WebP at
-quality 80 and maximum width exactly 768px (1 MiB cap); standard starts at WebP
+WebP at quality 78 and maximum width 320px (256 KiB cap); small is WebP at
+quality 82 and maximum width exactly 768px (1 MiB cap); standard starts at WebP
 quality 88 and maximum width 1920px with a hard 2 MiB encoded cap. Standard uses
 a deterministic bounded quality ladder followed by bounded dimension reduction.
 No profile upscales. Raster inputs only are accepted; SVG and HTML never enter

@@ -24,17 +24,23 @@ test("compose forwards bootstrap credentials into the server container", async (
 });
 
 test("compose packages a bounded durable derivative worker with shared storage", async () => {
-  const [compose, packageJson, dockerfile] = await Promise.all([
+  const [compose, packageJson, dockerfile, readme] = await Promise.all([
     readFile(path.join(rootDir, "compose.yaml"), "utf8"),
     readFile(path.join(rootDir, "server", "package.json"), "utf8"),
     readFile(path.join(rootDir, "server", "Dockerfile"), "utf8"),
+    readFile(path.join(rootDir, "README.md"), "utf8"),
   ]);
   assert.match(compose, /^\s{2}image-derivative-worker:/mu);
-  assert.match(compose, /command: \["node", "image-derivative-worker\.mjs"\]/u);
+  assert.match(compose, /command: \["node", "image-derivative-worker\.cjs"\]/u);
   assert.match(
     compose,
     /image-derivative-worker:[\s\S]*stop_grace_period: 90s/u,
   );
+  assert.match(compose, /healthcheck:[\s\S]*--healthcheck/u);
+  assert.match(compose, /mem_limit:\s*768m/u);
+  assert.match(compose, /condition:\s*service_started/u);
+  assert.match(readme, /docker compose stop[^\n]*90 seconds/u);
+  assert.doesNotMatch(readme, /docker compose stop[^\n]*30 seconds/u);
   assert.match(
     compose,
     /image-derivative-worker:[\s\S]*FS_STORAGE_DIR:[\s\S]*DATABASE_URL:/u,
@@ -42,11 +48,11 @@ test("compose packages a bounded durable derivative worker with shared storage",
   const parsedPackage = JSON.parse(packageJson);
   assert.equal(
     parsedPackage.scripts["worker:image-derivatives"],
-    "node .next/standalone/image-derivative-worker.mjs",
+    "node .next/standalone/image-derivative-worker.cjs",
   );
   assert.match(
     parsedPackage.scripts["build:worker"],
-    /image-derivative-worker\.mjs/u,
+    /image-derivative-worker\.cjs/u,
   );
   assert.match(dockerfile, /\/app\/\.next\/standalone \.\//u);
   assert.doesNotMatch(

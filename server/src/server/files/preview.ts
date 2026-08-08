@@ -270,9 +270,11 @@ async function renderPdfFirstPage(
   file: StoredFile,
   escapedName: string,
   preparedPreview?: PreviewExtraction,
+  allowDerivation = true,
 ): Promise<string> {
   let preview = preparedPreview;
   try {
+    if (!preview && !allowDerivation) return PDF_PREVIEW_NOTICE;
     preview ??= await derivePreview({
       trustedMime: file.mimeType,
       name: file.name,
@@ -301,6 +303,7 @@ export async function renderPreview(
   file: StoredFile,
   unfurlHead = "",
   preparedPreview?: PreviewExtraction,
+  allowDerivation = true,
 ): Promise<string> {
   const rawUrl = `/raw/${encodeURIComponent(file.id)}`;
   const displayName = sanitizePublicText(file.name, 300) || "Untitled file";
@@ -325,6 +328,7 @@ export async function renderPreview(
       file,
       escapedName,
       preparedPreview,
+      allowDerivation,
     );
   } else {
     preview =

@@ -14,6 +14,8 @@ import {
 } from "../../app/og/[filename]/route";
 import { layoutOgTitle, OG_RENDER_LIMITS, renderOgImage } from "./og-image";
 import { PreviewBusyError } from "./preview-renderers";
+import { unfurlArtifactStorageKey } from "./preview-artifact-storage";
+import { processNextUnfurlArtifactJob } from "./unfurl-artifact-worker";
 import { FileService } from "./service";
 import { setFileServiceForTests } from "./singleton";
 import type { PublicUnfurlModel } from "./unfurl";
@@ -201,6 +203,29 @@ describe("OG image title layout", () => {
 describe("rich unfurl routes", { concurrency: false }, () => {
   let directory: string;
   let service: FileService;
+  let workerSequence = 0;
+
+  async function uploadReady(
+    ...args: Parameters<FileService["upload"]>
+  ): Promise<StoredFile> {
+    const file = await service.upload(...args);
+    if (file.visibility === "public") {
+      assert.equal(
+        await processNextUnfurlArtifactJob(
+          service,
+          `unfurl-test-worker-${workerSequence++}`,
+          { onlyFileId: file.id },
+        ),
+        true,
+      );
+      assert.equal(
+        (await service.repository.getUnfurlArtifactJob(file.id))?.status,
+        "complete",
+        `${file.name}: ${(await service.repository.getUnfurlArtifactJob(file.id))?.lastError ?? "no error"}`,
+      );
+    }
+    return file;
+  }
 
   before(async () => {
     directory = await mkdtemp(path.join(os.tmpdir(), "fs-rich-unfurl-route-"));
@@ -222,7 +247,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("emits complete initial metadata from configured origin despite spoofed hosts", async () => {
-    const file = await service.upload(
+    const file = await uploadReady(
       bytes("# Canonical title\n\nNever quote this hostile body."),
       {
         name: "fallback.md",
@@ -276,7 +301,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("serves stable precomputed metadata across a transient artifact read failure", async () => {
-    const file = await service.upload(bytes("busy source bytes"), {
+    const file = await uploadReady(bytes("busy source bytes"), {
       name: "busy-public.txt",
       tags: [],
       visibility: "public",
@@ -355,16 +380,13 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       "twitter:title",
     ];
     for (const [name, mimeType, label, ogType] of cases) {
-      const file = await service.upload(
-        bytes("synthetic body never described"),
-        {
-          name,
-          tags: ["forbidden-exact-tag"],
-          visibility: "public",
-          archive: null,
-          mimeType,
-        },
-      );
+      const file = await uploadReady(bytes("synthetic body never described"), {
+        name,
+        tags: ["forbidden-exact-tag"],
+        visibility: "public",
+        archive: null,
+        mimeType,
+      });
       const response = await getPreview(
         new Request(`https://spoofed.invalid/${file.id}`),
         routeContext(file.id),
@@ -389,7 +411,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("fails closed when the file revision disappears during metadata rendering", async () => {
-    const file = await service.upload(bytes("# Race-safe title"), {
+    const file = await uploadReady(bytes("# Race-safe title"), {
       name: "race-safe.md",
       tags: [],
       visibility: "public",
@@ -418,7 +440,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("fails closed when source bytes disappear after the initial lookup", async () => {
-    const file = await service.upload(bytes("# Source race"), {
+    const file = await uploadReady(bytes("# Source race"), {
       name: "source-race.md",
       tags: [],
       visibility: "public",
@@ -476,7 +498,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         Buffer.byteLength(originalBytes),
         Buffer.byteLength(replacementBytes),
       );
-      const file = await service.upload(bytes(originalBytes), {
+      const file = await uploadReady(bytes(originalBytes), {
         name: `${target}-same-size.md`,
         tags: [],
         visibility: "public",
@@ -514,7 +536,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("serves GET and HEAD consistently without a body for HEAD", async () => {
-    const file = await service.upload(bytes("binary"), {
+    const file = await uploadReady(bytes("binary"), {
       name: "archive.bin",
       tags: [],
       visibility: "public",
@@ -535,24 +557,21 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("keeps private, protected, unauthorized, missing, and deleted byte-identical", async () => {
-    const privateFile = await service.upload(bytes("private secret bytes"), {
+    const privateFile = await uploadReady(bytes("private secret bytes"), {
       name: "private-secret.txt",
       tags: ["private-tag"],
       visibility: "private",
       archive: null,
       mimeType: "text/plain",
     });
-    const protectedFile = await service.upload(
-      bytes("protected secret bytes"),
-      {
-        name: "protected-secret.txt",
-        tags: ["protected-tag"],
-        visibility: "protected",
-        archive: null,
-        mimeType: "text/plain",
-      },
-    );
-    const deletedFile = await service.upload(bytes("deleted secret bytes"), {
+    const protectedFile = await uploadReady(bytes("protected secret bytes"), {
+      name: "protected-secret.txt",
+      tags: ["protected-tag"],
+      visibility: "protected",
+      archive: null,
+      mimeType: "text/plain",
+    });
+    const deletedFile = await uploadReady(bytes("deleted secret bytes"), {
       name: "deleted-secret.txt",
       tags: [],
       visibility: "public",
@@ -560,16 +579,13 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       mimeType: "text/plain",
     });
     await service.delete(deletedFile.id);
-    const unreadableFile = await service.upload(
-      bytes("unreadable secret bytes"),
-      {
-        name: "unreadable-secret.txt",
-        tags: [],
-        visibility: "public",
-        archive: null,
-        mimeType: "text/plain",
-      },
-    );
+    const unreadableFile = await uploadReady(bytes("unreadable secret bytes"), {
+      name: "unreadable-secret.txt",
+      tags: [],
+      visibility: "public",
+      archive: null,
+      mimeType: "text/plain",
+    });
     await chmod(service.storagePath(unreadableFile), 0);
 
     const ids = [
@@ -683,7 +699,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
 
   it("omits social metadata for authenticated private and protected page views", async () => {
     for (const visibility of ["private", "protected"] as const) {
-      const file = await service.upload(bytes("authorized secret bytes"), {
+      const file = await uploadReady(bytes("authorized secret bytes"), {
         name: `${visibility}-authorized-secret.txt`,
         tags: ["authorized-secret-tag"],
         visibility,
@@ -719,7 +735,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("rechecks public visibility and deletion on every no-store image request", async () => {
-    const file = await service.upload(bytes("public bytes"), {
+    const file = await uploadReady(bytes("public bytes"), {
       name: "transition.bin",
       tags: [],
       visibility: "public",
@@ -765,7 +781,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("fails closed when the file revision disappears during image generation", async () => {
-    const file = await service.upload(bytes("race-safe public bytes"), {
+    const file = await uploadReady(bytes("race-safe public bytes"), {
       name: "race-safe.bin",
       tags: [],
       visibility: "public",
@@ -794,7 +810,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
   });
 
   it("returns a deterministic 1200 by 630 PNG with defensive GET and HEAD headers", async () => {
-    const file = await service.upload(bytes("card"), {
+    const file = await uploadReady(bytes("card"), {
       name: "typography-card.bin",
       tags: ["not-in-pixels"],
       visibility: "public",
@@ -833,11 +849,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     assert.deepEqual(firstBytes, secondBytes);
     const persisted = JSON.parse(
       await readFile(
-        path.join(
-          service.config.storageDir,
-          ".unfurl-artifacts",
-          `${file.id}-${file.sha256}-og-v2-881d043.json`,
-        ),
+        path.join(service.config.storageDir, unfurlArtifactStorageKey(file)),
         "utf8",
       ),
     ) as { cardBase64?: string };
@@ -893,7 +905,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
         sourcePipeline = sourcePipeline.webp({ quality: 90 });
       }
       const source = await sourcePipeline.toBuffer();
-      const file = await service.upload(binaryBytes(source), {
+      const file = await uploadReady(binaryBytes(source), {
         name,
         tags: ["forbidden-raster-tag"],
         visibility: "public",
@@ -964,7 +976,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       .jpeg()
       .withMetadata({ orientation: 6 })
       .toBuffer();
-    const file = await service.upload(binaryBytes(oriented), {
+    const file = await uploadReady(binaryBytes(oriented), {
       name: "portrait.jpg",
       tags: [],
       visibility: "public",
@@ -1019,7 +1031,7 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       },
     ];
     for (const fixture of cases) {
-      const file = await service.upload(binaryBytes(fixture.source), {
+      const file = await uploadReady(binaryBytes(fixture.source), {
         name: fixture.name,
         tags: ["fallback-forbidden-tag"],
         visibility: "public",

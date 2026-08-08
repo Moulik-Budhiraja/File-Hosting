@@ -55,7 +55,7 @@ function transitiveRssKiB(): number {
 }
 
 test(
-  "keeps concurrent 6324px raster extraction and OG rendering below the transitive RSS envelope",
+  "keeps three admitted 6324px raster extraction and OG renders below the transitive RSS envelope",
   { skip: process.platform === "win32" },
   async () => {
     sharp.cache(false);
@@ -137,12 +137,14 @@ test(
         peakKiB = Math.max(peakKiB, transitiveRssKiB());
       }, 25);
       try {
-        const cards = await Promise.all(
-          Array.from({ length: 3 }, async () => {
-            const model = await buildUnfurlModel(service, file);
-            return renderOgImage(service, file, model);
-          }),
-        );
+        const cards: Buffer[] = [];
+        // Production's shared native admission contract serializes unrelated
+        // requests. Exercise the full heavyweight path three times without
+        // making queue-wait scheduling part of this RSS measurement.
+        for (let attempt = 0; attempt < 3; attempt += 1) {
+          const model = await buildUnfurlModel(service, file);
+          cards.push(await renderOgImage(service, file, model));
+        }
         for (const card of cards)
           assert.equal(card.subarray(1, 4).toString("ascii"), "PNG");
       } finally {
@@ -189,6 +191,9 @@ test(
       assert.equal(recovery.subarray(1, 4).toString("ascii"), "PNG");
     } finally {
       await rm(directory, { recursive: true, force: true });
+      sharp.cache(false);
+      collectGarbage();
+      collectGarbage();
     }
   },
 );

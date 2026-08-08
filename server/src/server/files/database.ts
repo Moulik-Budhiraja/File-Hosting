@@ -25,7 +25,7 @@ import type {
 import {
   DERIVATIVE_REVISION,
   type DerivativeProfileName,
-} from "./image-derivatives";
+} from "./image-derivative-contract";
 
 export type DerivativeJobStatus =
   "pending" | "processing" | "retry" | "complete" | "failed";
@@ -54,6 +54,8 @@ export interface StoredDerivative {
   height: number;
   createdAt: string;
 }
+
+export const UNFURL_ARTIFACT_REVISION = "unfurl-artifact-v1" as const;
 
 const FILES_COLUMNS = `
   id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
@@ -125,8 +127,40 @@ CREATE TABLE IF NOT EXISTS image_derivatives (
   PRIMARY KEY (file_id, revision, profile)
 );
 
+CREATE TABLE IF NOT EXISTS image_worker_health (
+  worker_id TEXT PRIMARY KEY,
+  schema_revision TEXT NOT NULL,
+  ready INTEGER NOT NULL CHECK(ready IN (0, 1)),
+  heartbeat_at TEXT NOT NULL,
+  last_success_at TEXT,
+  last_error TEXT
+);
+
+CREATE TABLE IF NOT EXISTS derivative_backfill_control (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  next_grant_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS unfurl_artifact_jobs (
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'retry', 'complete', 'failed')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (file_id, revision)
+);
+
 CREATE INDEX IF NOT EXISTS image_derivative_jobs_claim_idx
   ON image_derivative_jobs(status, available_at, priority DESC, created_at);
+CREATE INDEX IF NOT EXISTS unfurl_artifact_jobs_claim_idx
+  ON unfurl_artifact_jobs(status, available_at, priority DESC, created_at);
 
 ${Object.values(FILE_INDEXES)
   .map((sql) => sql.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS"))
@@ -144,6 +178,96 @@ function normalizeSchemaSql(sql: string): string {
     .replace(/\s*([(),=])\s*/gu, "$1")
     .trim()
     .toLocaleLowerCase("en-US");
+}
+
+const DERIVATIVE_SCHEMA_OBJECTS = {
+  image_derivative_jobs: `CREATE TABLE image_derivative_jobs (
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'retry', 'complete', 'failed')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (file_id, revision)
+)`,
+  image_derivatives: `CREATE TABLE image_derivatives (
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  profile TEXT NOT NULL CHECK(profile IN ('thumbnail', 'small', 'standard')),
+  storage_key TEXT NOT NULL UNIQUE,
+  size INTEGER NOT NULL CHECK(size >= 0),
+  sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+  width INTEGER NOT NULL CHECK(width > 0),
+  height INTEGER NOT NULL CHECK(height > 0),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (file_id, revision, profile)
+)`,
+  image_worker_health: `CREATE TABLE image_worker_health (
+  worker_id TEXT PRIMARY KEY,
+  schema_revision TEXT NOT NULL,
+  ready INTEGER NOT NULL CHECK(ready IN (0, 1)),
+  heartbeat_at TEXT NOT NULL,
+  last_success_at TEXT,
+  last_error TEXT
+)`,
+  derivative_backfill_control: `CREATE TABLE derivative_backfill_control (
+  singleton INTEGER PRIMARY KEY CHECK(singleton = 1),
+  next_grant_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+)`,
+  unfurl_artifact_jobs: `CREATE TABLE unfurl_artifact_jobs (
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'retry', 'complete', 'failed')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (file_id, revision)
+)`,
+  image_derivative_jobs_claim_idx:
+    "CREATE INDEX image_derivative_jobs_claim_idx ON image_derivative_jobs(status, available_at, priority DESC, created_at)",
+  unfurl_artifact_jobs_claim_idx:
+    "CREATE INDEX unfurl_artifact_jobs_claim_idx ON unfurl_artifact_jobs(status, available_at, priority DESC, created_at)",
+};
+
+async function assertCanonicalDerivativeSchema(
+  executor: Pick<Client, "execute">,
+  requireAll: boolean,
+): Promise<void> {
+  const names = Object.keys(DERIVATIVE_SCHEMA_OBJECTS);
+  const result = await executor.execute({
+    sql: `SELECT name, sql FROM sqlite_master WHERE name IN (${names.map(() => "?").join(", ")})`,
+    args: names,
+  });
+  const actual = new Map(
+    result.rows.map((row) => [
+      typeof row.name === "string" ? row.name : "",
+      typeof row.sql === "string" ? normalizeSchemaSql(row.sql) : "",
+    ]),
+  );
+  for (const [name, sql] of Object.entries(DERIVATIVE_SCHEMA_OBJECTS)) {
+    const found = actual.get(name);
+    if (
+      (!found && requireAll) ||
+      (found && found !== normalizeSchemaSql(sql))
+    ) {
+      throw new AppError(
+        500,
+        "derivative_schema_invalid",
+        `${name} schema is invalid; restore or migrate it before startup`,
+      );
+    }
+  }
 }
 
 const FILE_SCHEMA_OBJECTS = {
@@ -364,7 +488,19 @@ export class FileRepository {
     await runDatabaseWrite(this.databaseUrl, () =>
       runFileMigrationExclusive(async () => {
         await this.migrateFileSchema();
+        await assertCanonicalDerivativeSchema(this.client, false);
         await this.client.executeMultiple(SCHEMA);
+        await assertCanonicalDerivativeSchema(this.client, true);
+        const violations = await this.client.execute(
+          "PRAGMA foreign_key_check",
+        );
+        if (violations.rows.length > 0) {
+          throw new AppError(
+            500,
+            "derivative_schema_invalid",
+            "Derivative schema foreign-key validation failed",
+          );
+        }
       }),
     );
   }
@@ -439,6 +575,7 @@ export class FileRepository {
     file: Omit<StoredFile, "tags">,
     tags: string[],
     enqueueDerivatives = false,
+    enqueueUnfurlArtifact = file.visibility === "public",
   ): Promise<StoredFile> {
     await this.ready;
     return this.runWrite(async () => {
@@ -500,6 +637,20 @@ export class FileRepository {
             ],
           });
         }
+        if (enqueueUnfurlArtifact) {
+          await transaction.execute({
+            sql: `INSERT INTO unfurl_artifact_jobs
+              (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+              VALUES (?, ?, 'pending', 0, 0, ?, NULL, NULL, NULL, ?, ?)`,
+            args: [
+              file.id,
+              UNFURL_ARTIFACT_REVISION,
+              file.createdAt,
+              file.createdAt,
+              file.createdAt,
+            ],
+          });
+        }
         await transaction.commit();
         return { ...file, tags: [...tags].sort((a, b) => a.localeCompare(b)) };
       } catch (error) {
@@ -535,6 +686,190 @@ export class FileRepository {
     };
   }
 
+  async getUnfurlArtifactJob(fileId: string): Promise<DerivativeJob | null> {
+    await this.ready;
+    const result = await this.client.execute({
+      sql: "SELECT * FROM unfurl_artifact_jobs WHERE file_id = ? AND revision = ?",
+      args: [fileId, UNFURL_ARTIFACT_REVISION],
+    });
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      fileId: rowString(row, "file_id"),
+      revision: rowString(row, "revision"),
+      status: rowString(row, "status") as DerivativeJobStatus,
+      priority: rowNumber(row, "priority"),
+      attempts: rowNumber(row, "attempts"),
+      availableAt: rowString(row, "available_at"),
+      leaseOwner: typeof row.lease_owner === "string" ? row.lease_owner : null,
+      leaseExpiresAt:
+        typeof row.lease_expires_at === "string" ? row.lease_expires_at : null,
+      lastError: typeof row.last_error === "string" ? row.last_error : null,
+      createdAt: rowString(row, "created_at"),
+      updatedAt: rowString(row, "updated_at"),
+    };
+  }
+
+  async claimUnfurlArtifactJob(
+    workerId: string,
+    now = new Date(),
+    leaseMs = 120_000,
+    onlyFileId?: string,
+  ): Promise<DerivativeJob | null> {
+    await this.ready;
+    return this.runWrite(async () => {
+      const transaction = await beginWriteTransaction(this.client, {
+        retryBusy: true,
+      });
+      const nowIso = now.toISOString();
+      try {
+        const candidate = await transaction.execute({
+          sql: `SELECT file_id FROM unfurl_artifact_jobs
+            WHERE revision = ? AND available_at <= ?
+              AND (? IS NULL OR file_id = ?)
+              AND (status IN ('pending', 'retry') OR (status = 'processing' AND lease_expires_at <= ?))
+            ORDER BY priority DESC, created_at ASC LIMIT 1`,
+          args: [
+            UNFURL_ARTIFACT_REVISION,
+            nowIso,
+            onlyFileId ?? null,
+            onlyFileId ?? null,
+            nowIso,
+          ],
+        });
+        const fileId = candidate.rows[0]?.file_id;
+        if (typeof fileId !== "string") {
+          await transaction.commit();
+          return null;
+        }
+        const expires = new Date(now.getTime() + leaseMs).toISOString();
+        const updated = await transaction.execute({
+          sql: `UPDATE unfurl_artifact_jobs SET status = 'processing', attempts = attempts + 1,
+            lease_owner = ?, lease_expires_at = ?, updated_at = ?
+            WHERE file_id = ? AND revision = ?
+              AND (status IN ('pending', 'retry') OR (status = 'processing' AND lease_expires_at <= ?))`,
+          args: [
+            workerId,
+            expires,
+            nowIso,
+            fileId,
+            UNFURL_ARTIFACT_REVISION,
+            nowIso,
+          ],
+        });
+        await transaction.commit();
+        return updated.rowsAffected === 1
+          ? this.getUnfurlArtifactJob(fileId)
+          : null;
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        await closeWriteTransaction(this.client, transaction);
+      }
+    });
+  }
+
+  async requeueUnfurlArtifactJob(
+    fileId: string,
+    now = new Date(),
+  ): Promise<boolean> {
+    await this.ready;
+    return this.runWrite(async () => {
+      const result = await this.client.execute({
+        sql: `UPDATE unfurl_artifact_jobs SET status = 'pending', available_at = ?,
+          lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status IN ('pending', 'retry', 'failed')`,
+        args: [
+          now.toISOString(),
+          now.toISOString(),
+          fileId,
+          UNFURL_ARTIFACT_REVISION,
+        ],
+      });
+      return result.rowsAffected === 1;
+    });
+  }
+
+  async renewUnfurlArtifactLease(
+    fileId: string,
+    workerId: string,
+    now = new Date(),
+    leaseMs = 120_000,
+  ): Promise<boolean> {
+    await this.ready;
+    const nowIso = now.toISOString();
+    const result = await this.runWrite(() =>
+      this.client.execute({
+        sql: `UPDATE unfurl_artifact_jobs SET lease_expires_at = ?, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status = 'processing'
+            AND lease_owner = ? AND lease_expires_at > ?`,
+        args: [
+          new Date(now.getTime() + leaseMs).toISOString(),
+          nowIso,
+          fileId,
+          UNFURL_ARTIFACT_REVISION,
+          workerId,
+          nowIso,
+        ],
+      }),
+    );
+    return result.rowsAffected === 1;
+  }
+
+  async completeUnfurlArtifactJob(
+    fileId: string,
+    workerId: string,
+    now = new Date(),
+  ): Promise<boolean> {
+    await this.ready;
+    const nowIso = now.toISOString();
+    const result = await this.runWrite(() =>
+      this.client.execute({
+        sql: `UPDATE unfurl_artifact_jobs SET status = 'complete', lease_owner = NULL,
+          lease_expires_at = NULL, last_error = NULL, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status = 'processing'
+            AND lease_owner = ? AND lease_expires_at > ?`,
+        args: [nowIso, fileId, UNFURL_ARTIFACT_REVISION, workerId, nowIso],
+      }),
+    );
+    return result.rowsAffected === 1;
+  }
+
+  async failUnfurlArtifactJob(
+    fileId: string,
+    workerId: string,
+    message: string,
+    now = new Date(),
+  ): Promise<void> {
+    await this.ready;
+    const job = await this.getUnfurlArtifactJob(fileId);
+    if (job?.leaseOwner !== workerId || job.status !== "processing") return;
+    const terminal = job.attempts >= 5;
+    const delay = Math.min(
+      3_600_000,
+      5_000 * 2 ** Math.max(0, job.attempts - 1),
+    );
+    await this.runWrite(() =>
+      this.client.execute({
+        sql: `UPDATE unfurl_artifact_jobs SET status = ?, available_at = ?, lease_owner = NULL,
+          lease_expires_at = NULL, last_error = ?, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status = 'processing'
+            AND lease_owner = ? AND lease_expires_at > ?`,
+        args: [
+          terminal ? "failed" : "retry",
+          new Date(now.getTime() + delay).toISOString(),
+          message.slice(0, 500),
+          now.toISOString(),
+          fileId,
+          UNFURL_ARTIFACT_REVISION,
+          workerId,
+          now.toISOString(),
+        ],
+      }),
+    );
+  }
+
   async getDerivative(
     fileId: string,
     profile: DerivativeProfileName,
@@ -563,6 +898,7 @@ export class FileRepository {
     workerId: string,
     now = new Date(),
     leaseMs = 300_000,
+    onlyFileId?: string,
   ): Promise<DerivativeJob | null> {
     await this.ready;
     return this.runWrite(async () => {
@@ -572,12 +908,22 @@ export class FileRepository {
       const nowIso = now.toISOString();
       const leaseExpires = new Date(now.getTime() + leaseMs).toISOString();
       try {
+        const agingCutoff = new Date(now.getTime() - 5 * 60_000).toISOString();
         const candidate = await transaction.execute({
           sql: `SELECT file_id FROM image_derivative_jobs
             WHERE revision = ? AND available_at <= ?
+              AND (? IS NULL OR file_id = ?)
               AND (status IN ('pending', 'retry') OR (status = 'processing' AND lease_expires_at <= ?))
-            ORDER BY priority DESC, created_at ASC LIMIT 1`,
-          args: [DERIVATIVE_REVISION, nowIso, nowIso],
+            ORDER BY CASE WHEN priority < 0 AND created_at <= ? THEN 101 ELSE priority END DESC,
+              created_at ASC LIMIT 1`,
+          args: [
+            DERIVATIVE_REVISION,
+            nowIso,
+            onlyFileId ?? null,
+            onlyFileId ?? null,
+            nowIso,
+            agingCutoff,
+          ],
         });
         const fileId = candidate.rows[0]?.file_id;
         if (typeof fileId !== "string") {
@@ -608,6 +954,33 @@ export class FileRepository {
       } finally {
         await closeWriteTransaction(this.client, transaction);
       }
+    });
+  }
+
+  async renewDerivativeLease(
+    fileId: string,
+    workerId: string,
+    now = new Date(),
+    leaseMs = 300_000,
+  ): Promise<boolean> {
+    await this.ready;
+    return this.runWrite(async () => {
+      const nowIso = now.toISOString();
+      const result = await this.client.execute({
+        sql: `UPDATE image_derivative_jobs
+          SET lease_expires_at = ?, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status = 'processing'
+            AND lease_owner = ? AND lease_expires_at > ?`,
+        args: [
+          new Date(now.getTime() + leaseMs).toISOString(),
+          nowIso,
+          fileId,
+          DERIVATIVE_REVISION,
+          workerId,
+          nowIso,
+        ],
+      });
+      return result.rowsAffected === 1;
     });
   }
 
@@ -644,9 +1017,12 @@ export class FileRepository {
         retryBusy: true,
       });
       try {
+        const finishedAt = now.toISOString();
         const owned = await transaction.execute({
-          sql: "SELECT 1 FROM image_derivative_jobs WHERE file_id = ? AND revision = ? AND status = 'processing' AND lease_owner = ?",
-          args: [fileId, DERIVATIVE_REVISION, workerId],
+          sql: `SELECT 1 FROM image_derivative_jobs
+            WHERE file_id = ? AND revision = ? AND status = 'processing'
+              AND lease_owner = ? AND lease_expires_at > ?`,
+          args: [fileId, DERIVATIVE_REVISION, workerId, finishedAt],
         });
         if (!owned.rows[0]) {
           await transaction.rollback();
@@ -674,12 +1050,17 @@ export class FileRepository {
             ],
           });
         }
-        const finishedAt = now.toISOString();
-        await transaction.execute({
+        const completed = await transaction.execute({
           sql: `UPDATE image_derivative_jobs SET status = 'complete', lease_owner = NULL,
-            lease_expires_at = NULL, last_error = NULL, updated_at = ? WHERE file_id = ? AND revision = ?`,
-          args: [finishedAt, fileId, DERIVATIVE_REVISION],
+            lease_expires_at = NULL, last_error = NULL, updated_at = ?
+            WHERE file_id = ? AND revision = ? AND status = 'processing'
+              AND lease_owner = ? AND lease_expires_at > ?`,
+          args: [finishedAt, fileId, DERIVATIVE_REVISION, workerId, finishedAt],
         });
+        if (completed.rowsAffected !== 1) {
+          await transaction.rollback();
+          return false;
+        }
         await transaction.commit();
         return true;
       } catch (error) {
@@ -710,7 +1091,8 @@ export class FileRepository {
       await this.client.execute({
         sql: `UPDATE image_derivative_jobs SET status = ?, available_at = ?,
           lease_owner = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ?
-          WHERE file_id = ? AND revision = ? AND status = 'processing' AND lease_owner = ?`,
+          WHERE file_id = ? AND revision = ? AND status = 'processing'
+            AND lease_owner = ? AND lease_expires_at > ?`,
         args: [
           terminal ? "failed" : "retry",
           new Date(now.getTime() + delayMs).toISOString(),
@@ -719,41 +1101,136 @@ export class FileRepository {
           fileId,
           DERIVATIVE_REVISION,
           workerId,
+          now.toISOString(),
         ],
       });
     });
   }
 
   async enqueueDerivativeBackfill(
-    limit = 8,
+    limit = 4,
     now = new Date(),
   ): Promise<number> {
     await this.ready;
-    const boundedLimit = Math.max(0, Math.min(100, Math.floor(limit)));
+    const boundedLimit = Math.max(0, Math.min(4, Math.floor(limit)));
     if (boundedLimit === 0) return 0;
     return this.runWrite(async () => {
-      const timestamp = now.toISOString();
-      const result = await this.client.execute({
-        sql: `INSERT INTO image_derivative_jobs
-          (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
-          SELECT f.id, ?, 'pending', -10, 0, ?, NULL, NULL, NULL, ?, ?
-          FROM files f
-          WHERE f.mime_type IN ('image/avif', 'image/gif', 'image/heic', 'image/heif', 'image/jpeg', 'image/png', 'image/tiff', 'image/webp')
-            AND NOT EXISTS (SELECT 1 FROM image_derivative_jobs j WHERE j.file_id = f.id AND j.revision = ?)
-            AND NOT EXISTS (SELECT 1 FROM image_derivatives d WHERE d.file_id = f.id AND d.revision = ?)
-          ORDER BY f.created_at ASC, f.id ASC LIMIT ?`,
-        args: [
-          DERIVATIVE_REVISION,
-          timestamp,
-          timestamp,
-          timestamp,
-          DERIVATIVE_REVISION,
-          DERIVATIVE_REVISION,
-          boundedLimit,
-        ],
+      const transaction = await beginWriteTransaction(this.client, {
+        retryBusy: true,
       });
-      return result.rowsAffected;
+      const timestamp = now.toISOString();
+      try {
+        const cadence = await transaction.execute(
+          "SELECT next_grant_at FROM derivative_backfill_control WHERE singleton = 1",
+        );
+        if (!cadence.rows[0]) {
+          await transaction.execute({
+            sql: `INSERT INTO derivative_backfill_control
+              (singleton, next_grant_at, updated_at) VALUES (1, ?, ?)`,
+            args: [new Date(now.getTime() + 60_000).toISOString(), timestamp],
+          });
+          await transaction.commit();
+          return 0;
+        }
+        const nextGrantAt = rowString(cadence.rows[0], "next_grant_at");
+        if (nextGrantAt > timestamp) {
+          await transaction.commit();
+          return 0;
+        }
+        await transaction.execute({
+          sql: `UPDATE derivative_backfill_control
+            SET next_grant_at = ?, updated_at = ? WHERE singleton = 1`,
+          args: [new Date(now.getTime() + 60_000).toISOString(), timestamp],
+        });
+        const result = await transaction.execute({
+          sql: `INSERT INTO image_derivative_jobs
+            (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+            SELECT f.id, ?, 'pending', -10, 0, ?, NULL, NULL, NULL, ?, ?
+            FROM files f
+            WHERE f.mime_type IN ('image/avif', 'image/gif', 'image/heic', 'image/heif', 'image/jpeg', 'image/png', 'image/tiff', 'image/webp')
+              AND NOT EXISTS (SELECT 1 FROM image_derivative_jobs j WHERE j.file_id = f.id AND j.revision = ?)
+              AND NOT EXISTS (SELECT 1 FROM image_derivatives d WHERE d.file_id = f.id AND d.revision = ?)
+            ORDER BY f.created_at ASC, f.id ASC LIMIT ?`,
+          args: [
+            DERIVATIVE_REVISION,
+            timestamp,
+            timestamp,
+            timestamp,
+            DERIVATIVE_REVISION,
+            DERIVATIVE_REVISION,
+            boundedLimit,
+          ],
+        });
+        await transaction.commit();
+        return result.rowsAffected;
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        await closeWriteTransaction(this.client, transaction);
+      }
     });
+  }
+
+  async listCompletedUnfurlArtifactSources(): Promise<
+    Array<{ id: string; sha256: string; updatedAt: string }>
+  > {
+    await this.ready;
+    const result = await this.client.execute({
+      sql: `SELECT f.id, f.sha256, f.updated_at FROM files f
+        JOIN unfurl_artifact_jobs j ON j.file_id = f.id
+        WHERE j.revision = ? AND j.status = 'complete' AND f.visibility = 'public'`,
+      args: [UNFURL_ARTIFACT_REVISION],
+    });
+    return result.rows.map((row) => ({
+      id: rowString(row, "id"),
+      sha256: rowString(row, "sha256"),
+      updatedAt: rowString(row, "updated_at"),
+    }));
+  }
+
+  async listDerivativeStorageKeys(): Promise<Set<string>> {
+    await this.ready;
+    const result = await this.client.execute(
+      "SELECT storage_key FROM image_derivatives",
+    );
+    return new Set(
+      result.rows
+        .map((row) => row.storage_key)
+        .filter((value): value is string => typeof value === "string"),
+    );
+  }
+
+  async recordWorkerHealth(
+    workerId: string,
+    options: { ready: boolean; success?: boolean; error?: string },
+    now = new Date(),
+  ): Promise<void> {
+    await this.ready;
+    const timestamp = now.toISOString();
+    await this.runWrite(() =>
+      this.client.execute({
+        sql: `INSERT INTO image_worker_health
+          (worker_id, schema_revision, ready, heartbeat_at, last_success_at, last_error)
+          VALUES (?, ?, ?, ?, ?, ?)
+          ON CONFLICT(worker_id) DO UPDATE SET schema_revision = excluded.schema_revision,
+            ready = excluded.ready, heartbeat_at = excluded.heartbeat_at,
+            last_success_at = COALESCE(excluded.last_success_at, image_worker_health.last_success_at),
+            last_error = CASE
+              WHEN excluded.last_success_at IS NOT NULL THEN NULL
+              WHEN excluded.last_error IS NOT NULL THEN excluded.last_error
+              ELSE image_worker_health.last_error
+            END`,
+        args: [
+          workerId,
+          DERIVATIVE_REVISION,
+          options.ready ? 1 : 0,
+          timestamp,
+          options.success ? timestamp : null,
+          options.error?.slice(0, 500) ?? null,
+        ],
+      }),
+    );
   }
 
   async list(options: ListFilesOptions): Promise<ListFilesResult> {
@@ -884,6 +1361,22 @@ export class FileRepository {
             sql: "UPDATE files SET visibility = ?, updated_at = ? WHERE id = ?",
             args: [input.visibility, now, id],
           });
+          if (input.visibility === "public") {
+            await transaction.execute({
+              sql: `INSERT INTO unfurl_artifact_jobs
+                (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+                VALUES (?, ?, 'pending', 0, 0, ?, NULL, NULL, NULL, ?, ?)
+                ON CONFLICT(file_id, revision) DO UPDATE SET status = 'pending', attempts = 0,
+                  available_at = excluded.available_at, lease_owner = NULL,
+                  lease_expires_at = NULL, last_error = NULL, updated_at = excluded.updated_at`,
+              args: [id, UNFURL_ARTIFACT_REVISION, now, now, now],
+            });
+          } else {
+            await transaction.execute({
+              sql: "DELETE FROM unfurl_artifact_jobs WHERE file_id = ?",
+              args: [id],
+            });
+          }
         }
         if (input.ownerId) {
           await transaction.execute({
@@ -918,6 +1411,21 @@ export class FileRepository {
           await transaction.execute({
             sql: "UPDATE files SET updated_at = ? WHERE id = ?",
             args: [now, id],
+          });
+        }
+        if (
+          (input.ownerId || input.tags) &&
+          current.visibility === "public" &&
+          !input.visibility
+        ) {
+          await transaction.execute({
+            sql: `INSERT INTO unfurl_artifact_jobs
+              (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+              VALUES (?, ?, 'pending', 0, 0, ?, NULL, NULL, NULL, ?, ?)
+              ON CONFLICT(file_id, revision) DO UPDATE SET status = 'pending', attempts = 0,
+                available_at = excluded.available_at, lease_owner = NULL,
+                lease_expires_at = NULL, last_error = NULL, updated_at = excluded.updated_at`,
+            args: [id, UNFURL_ARTIFACT_REVISION, now, now, now],
           });
         }
         await transaction.commit();

@@ -1,12 +1,4 @@
-import {
-  access,
-  constants,
-  mkdir,
-  readFile,
-  rename,
-  unlink,
-  writeFile,
-} from "node:fs/promises";
+import { access, constants, link, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
@@ -21,8 +13,14 @@ import {
   type SourceIdentity,
 } from "./source-state";
 import type { StoredFile } from "./types";
+import { ensureSafeDirectory, openSafeStoredFile } from "./safe-storage";
+import {
+  UNFURL_ARTIFACT_STORAGE_REVISION,
+  unfurlArtifactStorageKey,
+} from "./preview-artifact-storage";
 
-const ARTIFACT_REVISION = "og-v2-881d043";
+const ARTIFACT_REVISION = UNFURL_ARTIFACT_STORAGE_REVISION;
+export { removePreviewArtifact } from "./preview-artifact-storage";
 export const PREVIEW_ARTIFACT_MAX_BYTES = 16 * 1024 * 1024;
 
 export interface PreparedUnfurlArtifact {
@@ -71,11 +69,7 @@ function deserializeSourceIdentity(
 }
 
 function artifactPath(service: FileService, file: StoredFile): string {
-  return path.join(
-    service.config.storageDir,
-    ".unfurl-artifacts",
-    `${file.id}-${file.sha256}-${ARTIFACT_REVISION}.json`,
-  );
+  return path.join(service.config.storageDir, unfurlArtifactStorageKey(file));
 }
 
 function serialize(preview: PreviewExtraction): SerializedArtifact["preview"] {
@@ -141,7 +135,11 @@ export async function readUnfurlArtifact(
 ): Promise<PreparedUnfurlArtifact | null> {
   try {
     await access(service.storagePath(file), constants.R_OK);
-    const bytes = await readFile(artifactPath(service, file));
+    const handle = await openSafeStoredFile(
+      service.config.storageDir,
+      unfurlArtifactStorageKey(file),
+    );
+    const bytes = await handle.readFile().finally(() => handle.close());
     if (bytes.length > PREVIEW_ARTIFACT_MAX_BYTES) return null;
     const artifact = JSON.parse(bytes.toString("utf8")) as SerializedArtifact;
     const expected = deserializeSourceIdentity(artifact.sourceIdentity);
@@ -173,6 +171,27 @@ export async function prepareUnfurlArtifact(
   return { preview, sourceIdentity };
 }
 
+export async function generateCompleteUnfurlArtifact(
+  service: FileService,
+  file: StoredFile,
+  renderCard: (preview: PreviewExtraction) => Promise<Buffer>,
+): Promise<PreparedUnfurlArtifact> {
+  const sourceIdentity = await captureSourceIdentity(service, file);
+  if (!sourceIdentity) throw new Error("preview source unavailable");
+  const preview = await derivePreview({
+    trustedMime: file.mimeType,
+    name: file.name,
+    size: file.size,
+    sha256: file.sha256,
+    sourcePath: service.storagePath(file),
+  });
+  const card = await renderCard(preview);
+  if (!(await sourceIdentityMatches(service, file, sourceIdentity)))
+    throw new Error("preview source changed during rendering");
+  await writeArtifact(service, file, preview, sourceIdentity, card);
+  return { preview, card, sourceIdentity };
+}
+
 async function writeArtifact(
   service: FileService,
   file: StoredFile,
@@ -180,8 +199,13 @@ async function writeArtifact(
   sourceIdentity: SourceIdentity,
   card?: Buffer,
 ): Promise<void> {
-  const filename = artifactPath(service, file);
-  await mkdir(path.dirname(filename), { recursive: true, mode: 0o700 });
+  const directory = await ensureSafeDirectory(service.config.storageDir, [
+    ".unfurl-artifacts",
+  ]);
+  const filename = path.join(
+    directory,
+    path.basename(artifactPath(service, file)),
+  );
   const temporary = `${filename}.${process.pid}.${crypto.randomUUID()}.tmp`;
   const bytes = Buffer.from(
     JSON.stringify({
@@ -196,7 +220,9 @@ async function writeArtifact(
     throw new Error("preview artifact exceeds size limit");
   try {
     await writeFile(temporary, bytes, { flag: "wx", mode: 0o600 });
-    await rename(temporary, filename);
+    await link(temporary, filename).catch((error: NodeJS.ErrnoException) => {
+      if (error.code !== "EEXIST") throw error;
+    });
   } finally {
     await unlink(temporary).catch(() => undefined);
   }
@@ -218,15 +244,4 @@ export async function persistUnfurlCard(
     card,
   );
   return { ...artifact, card };
-}
-
-export async function removePreviewArtifact(
-  service: FileService,
-  file: StoredFile,
-): Promise<void> {
-  await unlink(artifactPath(service, file)).catch(
-    (error: NodeJS.ErrnoException) => {
-      if (error.code !== "ENOENT") throw error;
-    },
-  );
 }

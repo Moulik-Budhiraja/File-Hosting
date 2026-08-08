@@ -207,6 +207,11 @@ test("a real PDF renders as an inline first-page raster while hostile raw framin
     "image/svg+xml",
   );
 
+  await expect
+    .poll(async () => (await request.get(`/${pdf.id}`)).text(), {
+      timeout: 20_000,
+    })
+    .toMatch(/<img[^>]*class="pdf-page-preview"/u);
   await page.goto(`/${pdf.id}`);
   const pdfPreview = page.locator("img.pdf-page-preview");
   await expect(pdfPreview).toBeVisible();

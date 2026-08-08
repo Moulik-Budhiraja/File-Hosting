@@ -22,10 +22,12 @@ import yazl from "yazl";
 
 import { GET as getPage } from "../src/app/[id]/route";
 import { GET as getOgImage } from "../src/app/og/[filename]/route";
-import { derivePreview } from "../src/server/files/preview-renderers";
+import { readUnfurlArtifact } from "../src/server/files/preview-artifact";
+import { warmPreviewMediaTools } from "../src/server/files/preview-renderers";
 import { FileService } from "../src/server/files/service";
 import { setFileServiceForTests } from "../src/server/files/singleton";
 import { buildUnfurlModel } from "../src/server/files/unfurl";
+import { processNextUnfurlArtifactJob } from "../src/server/files/unfurl-artifact-worker";
 import {
   assertBounds,
   differenceHash,
@@ -110,6 +112,7 @@ const service = await FileService.create({
   minFreeBytes: 0,
 });
 setFileServiceForTests(service);
+await warmPreviewMediaTools();
 
 async function* source(value: Buffer): AsyncGenerator<Uint8Array> {
   yield value;
@@ -1192,13 +1195,16 @@ async function replaceRegion(image: Buffer, region: Region): Promise<Buffer> {
 }
 async function productionCard(name: string, mimeType: string, bytes: Buffer) {
   const file = await upload(name, mimeType, bytes);
-  const direct = await derivePreview({
-    trustedMime: file.mimeType,
-    name: file.name,
-    size: file.size,
-    sha256: file.sha256,
-    sourcePath: service.storagePath(file),
-  });
+  assert.equal(
+    await processNextUnfurlArtifactJob(service, "design-audit", {
+      onlyFileId: file.id,
+    }),
+    true,
+    `${name}: durable unfurl artifact must become ready before visual audit`,
+  );
+  const artifact = await readUnfurlArtifact(service, file);
+  assert(artifact, `${name}: committed unfurl artifact must be readable`);
+  const direct = artifact.preview;
   const model = await buildUnfurlModel(service, file);
   assert.equal(model.preview?.sourceDigest, direct.sourceDigest);
   assert.equal(model.title, name);
@@ -2135,7 +2141,7 @@ try {
       independentlyPinnedInTrackedSource: true,
     },
     pipeline:
-      "independent fixture bytes -> FileService upload -> derivePreview -> buildUnfurlModel -> page route -> OG route -> production worker PNG",
+      "independent fixture bytes -> FileService upload -> durable unfurl worker -> stored artifact -> buildUnfurlModel -> page route -> OG route -> production PNG",
     metrics,
     thresholds:
       "fixed tracked per-element geometry, color/ink/edge/variance and compact brand-region RMSE limits; never observed+margin and never whole-frame RMSE",

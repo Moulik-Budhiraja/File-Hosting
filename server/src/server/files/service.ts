@@ -20,14 +20,11 @@ import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
-import type { DerivativeProfileName } from "./image-derivatives";
-import { removeImageDerivatives } from "./image-derivative-worker";
+import type { DerivativeProfileName } from "./image-derivative-contract";
+import { removeImageDerivatives } from "./image-derivative-storage";
+import { openSafeStoredFile } from "./safe-storage";
 import { TransferRegistry, type ActiveTransfer } from "./transfers";
-import {
-  PREVIEW_ARTIFACT_MAX_BYTES,
-  prepareUnfurlArtifact,
-  removePreviewArtifact,
-} from "./preview-artifact";
+import { removePreviewArtifact } from "./preview-artifact-storage";
 import type {
   FileMetadata,
   ListFilesOptions,
@@ -284,10 +281,6 @@ export class FileService {
       };
       try {
         await options.authorizeFinalize?.();
-        if (candidate.visibility === "public") {
-          await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
-          await prepareUnfurlArtifact(this, candidate);
-        }
         return await this.repository.insert(
           file,
           options.tags,
@@ -319,18 +312,35 @@ export class FileService {
     return this.repository.getDerivative(id, profile);
   }
 
-  openDerivativeReadStream(
-    derivative: { storageKey: string },
-    start?: number,
-    end?: number,
-  ) {
-    return createReadStream(
-      path.join(this.config.storageDir, derivative.storageKey),
-      {
-        start,
-        end,
-      },
+  async openDerivativeObject(derivative: {
+    storageKey: string;
+    size: number;
+    sha256: string;
+  }) {
+    if (
+      !/^\.image-derivatives\/[0-9A-Za-z]{7}\/image-derivatives-v1\/[0-9a-f-]{36}\/(thumbnail|small|standard)\.webp$/u.test(
+        derivative.storageKey,
+      )
+    )
+      throw new Error("invalid derivative storage key");
+    const handle = await openSafeStoredFile(
+      this.config.storageDir,
+      derivative.storageKey,
     );
+    try {
+      const details = await handle.stat();
+      if (!details.isFile() || details.size !== derivative.size)
+        throw new Error("derivative object metadata mismatch");
+      const bytes = await handle.readFile();
+      if (
+        createHash("sha256").update(bytes).digest("hex") !== derivative.sha256
+      )
+        throw new Error("derivative object digest mismatch");
+      return handle;
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
   }
 
   async list(options: ListFilesOptions): Promise<ListFilesResult> {
@@ -353,10 +363,6 @@ export class FileService {
     const candidate = becomingPublic
       ? { ...current, visibility: "public" as const }
       : current;
-    if (becomingPublic) {
-      await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
-      await prepareUnfurlArtifact(this, candidate);
-    }
     let updated: StoredFile | null;
     try {
       updated = await this.repository.update(id, input, actorUserId);
@@ -367,6 +373,8 @@ export class FileService {
     }
     if (!updated && becomingPublic)
       await removePreviewArtifact(this, candidate).catch(() => undefined);
+    if (updated?.visibility === "public" && current.visibility === "public")
+      await removePreviewArtifact(this, current).catch(() => undefined);
     if (updated?.visibility !== "public")
       await removePreviewArtifact(this, current).catch(() => undefined);
     return updated;

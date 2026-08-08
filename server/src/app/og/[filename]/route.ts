@@ -1,18 +1,12 @@
 import { notFound } from "@/server/files/http";
-import { renderOgImage } from "@/server/files/og-image";
-import {
-  persistUnfurlCard,
-  prepareUnfurlArtifact,
-} from "@/server/files/preview-artifact";
+
+import { readUnfurlArtifact } from "@/server/files/preview-artifact";
 import { getFileService } from "@/server/files/singleton";
 import {
   captureSourceIdentity,
   sourceIdentityMatches,
 } from "@/server/files/source-state";
-import {
-  buildUnfurlModel,
-  publicUnfurlRevisionMatches,
-} from "@/server/files/unfurl";
+import { publicUnfurlRevisionMatches } from "@/server/files/unfurl";
 import {
   settleUnavailableTiming,
   unavailableImageResponse,
@@ -54,13 +48,13 @@ async function responseFor(
     if (file?.visibility !== "public") throw notFound();
     const sourceIdentity = await captureSourceIdentity(service, file);
     if (!sourceIdentity) throw notFound();
-    const artifact = await prepareUnfurlArtifact(service, file);
-    let image = artifact.card;
-    if (!image) {
-      const model = await buildUnfurlModel(service, file, artifact.preview);
-      image = await renderOgImage(service, file, model);
-      await persistUnfurlCard(service, file, artifact, image);
-    }
+    if (
+      (await service.repository.getUnfurlArtifactJob(id))?.status !== "complete"
+    )
+      throw notFound();
+    const artifact = await readUnfurlArtifact(service, file);
+    const image = artifact?.card;
+    if (!image) throw notFound();
     const current = await service.get(id);
     if (!publicUnfurlRevisionMatches(file, current)) throw notFound();
     if (!(await sourceIdentityMatches(service, file, sourceIdentity)))

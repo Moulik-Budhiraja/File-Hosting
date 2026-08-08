@@ -578,4 +578,24 @@ describe("file schema migration and access filtering", () => {
       await rm(directory, { recursive: true, force: true });
     }
   });
+
+  it("fails startup synchronously for a malformed derivative schema", async () => {
+    const directory = await mkdtemp(
+      path.join(os.tmpdir(), "fs-malformed-derivative-schema-test-"),
+    );
+    const databaseUrl = `file:${path.join(directory, "files.db")}`;
+    const client = createClient({ url: databaseUrl });
+    try {
+      await client.execute(
+        "CREATE TABLE image_derivatives (file_id TEXT PRIMARY KEY)",
+      );
+    } finally {
+      client.close();
+    }
+    await assert.rejects(
+      FileRepository.create(databaseUrl),
+      /image_derivatives.*schema.*invalid/iu,
+    );
+    await rm(directory, { recursive: true, force: true });
+  });
 });

@@ -249,22 +249,24 @@ const launchEntry =
 const port = await availablePort();
 const token = "synthetic-standalone-token-with-enough-entropy";
 const origin = `http://127.0.0.1:${port}`;
+const runtimeEnv = {
+  ...process.env,
+  HOSTNAME: "127.0.0.1",
+  PORT: String(port),
+  FS_TOKEN: token,
+  FS_PUBLIC_URL: origin,
+  FS_STORAGE_DIR: path.join(dataRoot, "objects"),
+  FS_MIN_FREE_BYTES: "0",
+  DATABASE_URL: `file:${path.join(dataRoot, "files.db")}`,
+  NODE_ENV: "production",
+};
 const child = spawn(process.execPath, [launchEntry], {
   cwd: launchRoot,
-  env: {
-    ...process.env,
-    HOSTNAME: "127.0.0.1",
-    PORT: String(port),
-    FS_TOKEN: token,
-    FS_PUBLIC_URL: origin,
-    FS_STORAGE_DIR: path.join(dataRoot, "objects"),
-    FS_MIN_FREE_BYTES: "0",
-    DATABASE_URL: `file:${path.join(dataRoot, "files.db")}`,
-    NODE_ENV: "production",
-  },
+  env: runtimeEnv,
   stdio: ["ignore", "pipe", "pipe"],
 });
 let logs = "";
+let worker;
 child.stdout.on("data", (chunk) => {
   logs += chunk.toString();
 });
@@ -301,9 +303,34 @@ async function upload(name, mime, bytes) {
   return JSON.parse(responseBody);
 }
 
+async function waitForReadyCard(id) {
+  const imageUrl = `${origin}/og/${id}.png`;
+  const readinessDeadline = Date.now() + 30_000;
+  while (Date.now() < readinessDeadline) {
+    if (worker?.exitCode !== null)
+      throw new Error(`standalone worker exited before readiness\n${logs}`);
+    try {
+      const response = await fetch(imageUrl, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      assert.equal(response.status, 200, logs);
+      assert.equal(response.headers.get("content-type"), "image/png");
+      const card = Buffer.from(await response.arrayBuffer());
+      const image = await sharp(card).metadata();
+      if (image.hasAlpha === false) return { card, imageUrl, image };
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "TimeoutError"))
+        throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error(`durable unfurl artifact did not become ready\n${logs}`);
+}
+
 async function cardFor(name, mime, bytes) {
   const metadata = await upload(name, mime, bytes);
   assert.match(metadata.id, /^[0-9A-Za-z]{7,16}$/u);
+  const { card, imageUrl, image } = await waitForReadyCard(metadata.id);
   const pageResponse = await fetch(`${origin}/${metadata.id}`);
   assert.equal(pageResponse.status, 200);
   assert.match(
@@ -329,13 +356,7 @@ async function cardFor(name, mime, bytes) {
     head,
     /<meta name="robots" content="index,follow,max-image-preview:large">/u,
   );
-  const imageUrl = value("og:image");
-  assert.equal(imageUrl, `${origin}/og/${metadata.id}.png`);
-  const cardResponse = await fetch(imageUrl);
-  assert.equal(cardResponse.status, 200, logs);
-  assert.equal(cardResponse.headers.get("content-type"), "image/png");
-  const card = Buffer.from(await cardResponse.arrayBuffer());
-  const image = await sharp(card).metadata();
+  assert.equal(value("og:image"), imageUrl);
   assert.deepEqual(
     {
       width: image.width,
@@ -356,6 +377,21 @@ async function cardFor(name, mime, bytes) {
 
 try {
   await waitUntilReady();
+  const workerEntry =
+    mode === "standalone"
+      ? "image-derivative-worker.cjs"
+      : path.join(".next", "standalone", "image-derivative-worker.cjs");
+  worker = spawn(process.execPath, [workerEntry], {
+    cwd: launchRoot,
+    env: runtimeEnv,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  worker.stdout.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
+  worker.stderr.on("data", (chunk) => {
+    logs += chunk.toString();
+  });
 
   const alpha = await cardFor(
     "notes.md",
@@ -419,7 +455,13 @@ try {
   );
   process.stdout.write(`${mode} OG E2E passed: 9 cases at ${e2eRoot}\n`);
 } finally {
-  child.kill("SIGKILL");
-  await new Promise((resolve) => child.once("close", resolve));
+  if (worker?.exitCode === null && worker.signalCode === null) {
+    worker.kill("SIGKILL");
+    await new Promise((resolve) => worker.once("close", resolve));
+  }
+  if (child.exitCode === null && child.signalCode === null) {
+    child.kill("SIGKILL");
+    await new Promise((resolve) => child.once("close", resolve));
+  }
   if (!requestedRoot) await rm(e2eRoot, { recursive: true, force: true });
 }

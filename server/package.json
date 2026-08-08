@@ -6,7 +6,7 @@
   "scripts": {
     "assert:runtime": "node runtime/assert-runtime-assets.mjs",
     "build": "npm run assert:runtime && next build && node scripts/prepare-standalone.mjs && npm run build:worker",
-    "build:worker": "esbuild scripts/image-derivative-worker.ts --bundle --platform=node --format=esm --packages=external --alias:@=./src --outfile=.next/standalone/image-derivative-worker.mjs",
+    "build:worker": "esbuild scripts/image-derivative-worker.ts --bundle --platform=node --format=cjs --alias:@=./src --external:sharp --external:@napi-rs/canvas --external:ffmpeg-static --external:ffprobe-static --external:bcrypt --outfile=.next/standalone/image-derivative-worker.cjs",
     "check": "npm run lint && npm run typecheck && npm test && npm run test:ui",
     "design:audit": "node --expose-gc --import tsx scripts/design-audit.ts",
     "dev": "next dev --turbo",
@@ -16,7 +16,7 @@
     "lint:fix": "eslint . --fix",
     "preview": "next build && next start",
     "start": "node .next/standalone/start.js",
-    "test": "tsx --test --test-concurrency=1 src/server/auth/*.test.ts src/server/files/*.test.ts",
+    "test": "node scripts/run-server-tests.mjs",
     "test:compiled": "npm run build && OG_E2E_MODE=compiled node scripts/standalone-og-e2e.mjs",
     "test:standalone": "npm run build && node scripts/standalone-og-e2e.mjs",
     "test:ui": "vitest run",
@@ -28,7 +28,7 @@
     "release:check": "npm run format:check && npm run lint && npm run typecheck && npm test && npm run package:check && node --test ../tests/compose.test.mjs && npm run test:compiled && npm run test:standalone && npm run design:audit",
     "bootstrap:admin": "tsx scripts/bootstrap-admin.ts",
     "typecheck": "tsc --noEmit",
-    "worker:image-derivatives": "node .next/standalone/image-derivative-worker.mjs"
+    "worker:image-derivatives": "node .next/standalone/image-derivative-worker.cjs"
   },
   "dependencies": {
     "@libsql/client": "^0.14.0",
