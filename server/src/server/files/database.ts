@@ -22,6 +22,38 @@ import type {
   TagOperation,
   Visibility,
 } from "./types";
+import {
+  DERIVATIVE_REVISION,
+  type DerivativeProfileName,
+} from "./image-derivatives";
+
+export type DerivativeJobStatus =
+  "pending" | "processing" | "retry" | "complete" | "failed";
+export interface DerivativeJob {
+  fileId: string;
+  revision: string;
+  status: DerivativeJobStatus;
+  priority: number;
+  attempts: number;
+  availableAt: string;
+  leaseOwner: string | null;
+  leaseExpiresAt: string | null;
+  lastError: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface StoredDerivative {
+  fileId: string;
+  revision: string;
+  profile: DerivativeProfileName;
+  storageKey: string;
+  size: number;
+  sha256: string;
+  width: number;
+  height: number;
+  createdAt: string;
+}
 
 const FILES_COLUMNS = `
   id TEXT PRIMARY KEY NOT NULL CHECK(length(id) = 7),
@@ -64,6 +96,37 @@ CREATE TABLE IF NOT EXISTS tags (
 );
 
 CREATE TABLE IF NOT EXISTS file_tags (${FILE_TAGS_COLUMNS});
+
+CREATE TABLE IF NOT EXISTS image_derivative_jobs (
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  status TEXT NOT NULL CHECK(status IN ('pending', 'processing', 'retry', 'complete', 'failed')),
+  priority INTEGER NOT NULL DEFAULT 0,
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK(attempts >= 0),
+  available_at TEXT NOT NULL,
+  lease_owner TEXT,
+  lease_expires_at TEXT,
+  last_error TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL,
+  PRIMARY KEY (file_id, revision)
+);
+
+CREATE TABLE IF NOT EXISTS image_derivatives (
+  file_id TEXT NOT NULL REFERENCES files(id) ON DELETE CASCADE,
+  revision TEXT NOT NULL,
+  profile TEXT NOT NULL CHECK(profile IN ('thumbnail', 'small', 'standard')),
+  storage_key TEXT NOT NULL UNIQUE,
+  size INTEGER NOT NULL CHECK(size >= 0),
+  sha256 TEXT NOT NULL CHECK(length(sha256) = 64),
+  width INTEGER NOT NULL CHECK(width > 0),
+  height INTEGER NOT NULL CHECK(height > 0),
+  created_at TEXT NOT NULL,
+  PRIMARY KEY (file_id, revision, profile)
+);
+
+CREATE INDEX IF NOT EXISTS image_derivative_jobs_claim_idx
+  ON image_derivative_jobs(status, available_at, priority DESC, created_at);
 
 ${Object.values(FILE_INDEXES)
   .map((sql) => sql.replace("CREATE INDEX", "CREATE INDEX IF NOT EXISTS"))
@@ -375,6 +438,7 @@ export class FileRepository {
   async insert(
     file: Omit<StoredFile, "tags">,
     tags: string[],
+    enqueueDerivatives = false,
   ): Promise<StoredFile> {
     await this.ready;
     return this.runWrite(async () => {
@@ -422,6 +486,20 @@ export class FileRepository {
             args: [file.id, tag],
           });
         }
+        if (enqueueDerivatives) {
+          await transaction.execute({
+            sql: `INSERT INTO image_derivative_jobs
+              (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+              VALUES (?, ?, 'pending', 0, 0, ?, NULL, NULL, NULL, ?, ?)`,
+            args: [
+              file.id,
+              DERIVATIVE_REVISION,
+              file.createdAt,
+              file.createdAt,
+              file.createdAt,
+            ],
+          });
+        }
         await transaction.commit();
         return { ...file, tags: [...tags].sort((a, b) => a.localeCompare(b)) };
       } catch (error) {
@@ -430,6 +508,251 @@ export class FileRepository {
       } finally {
         await closeWriteTransaction(this.client, transaction);
       }
+    });
+  }
+
+  async getDerivativeJob(fileId: string): Promise<DerivativeJob | null> {
+    await this.ready;
+    const result = await this.client.execute({
+      sql: "SELECT * FROM image_derivative_jobs WHERE file_id = ? AND revision = ?",
+      args: [fileId, DERIVATIVE_REVISION],
+    });
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      fileId: rowString(row, "file_id"),
+      revision: rowString(row, "revision"),
+      status: rowString(row, "status") as DerivativeJobStatus,
+      priority: rowNumber(row, "priority"),
+      attempts: rowNumber(row, "attempts"),
+      availableAt: rowString(row, "available_at"),
+      leaseOwner: typeof row.lease_owner === "string" ? row.lease_owner : null,
+      leaseExpiresAt:
+        typeof row.lease_expires_at === "string" ? row.lease_expires_at : null,
+      lastError: typeof row.last_error === "string" ? row.last_error : null,
+      createdAt: rowString(row, "created_at"),
+      updatedAt: rowString(row, "updated_at"),
+    };
+  }
+
+  async getDerivative(
+    fileId: string,
+    profile: DerivativeProfileName,
+  ): Promise<StoredDerivative | null> {
+    await this.ready;
+    const result = await this.client.execute({
+      sql: "SELECT * FROM image_derivatives WHERE file_id = ? AND revision = ? AND profile = ?",
+      args: [fileId, DERIVATIVE_REVISION, profile],
+    });
+    const row = result.rows[0];
+    if (!row) return null;
+    return {
+      fileId: rowString(row, "file_id"),
+      revision: rowString(row, "revision"),
+      profile: rowString(row, "profile") as DerivativeProfileName,
+      storageKey: rowString(row, "storage_key"),
+      size: rowNumber(row, "size"),
+      sha256: rowString(row, "sha256"),
+      width: rowNumber(row, "width"),
+      height: rowNumber(row, "height"),
+      createdAt: rowString(row, "created_at"),
+    };
+  }
+
+  async claimDerivativeJob(
+    workerId: string,
+    now = new Date(),
+    leaseMs = 300_000,
+  ): Promise<DerivativeJob | null> {
+    await this.ready;
+    return this.runWrite(async () => {
+      const transaction = await beginWriteTransaction(this.client, {
+        retryBusy: true,
+      });
+      const nowIso = now.toISOString();
+      const leaseExpires = new Date(now.getTime() + leaseMs).toISOString();
+      try {
+        const candidate = await transaction.execute({
+          sql: `SELECT file_id FROM image_derivative_jobs
+            WHERE revision = ? AND available_at <= ?
+              AND (status IN ('pending', 'retry') OR (status = 'processing' AND lease_expires_at <= ?))
+            ORDER BY priority DESC, created_at ASC LIMIT 1`,
+          args: [DERIVATIVE_REVISION, nowIso, nowIso],
+        });
+        const fileId = candidate.rows[0]?.file_id;
+        if (typeof fileId !== "string") {
+          await transaction.commit();
+          return null;
+        }
+        const updated = await transaction.execute({
+          sql: `UPDATE image_derivative_jobs
+            SET status = 'processing', attempts = attempts + 1, lease_owner = ?,
+                lease_expires_at = ?, updated_at = ?
+            WHERE file_id = ? AND revision = ?
+              AND (status IN ('pending', 'retry') OR (status = 'processing' AND lease_expires_at <= ?))`,
+          args: [
+            workerId,
+            leaseExpires,
+            nowIso,
+            fileId,
+            DERIVATIVE_REVISION,
+            nowIso,
+          ],
+        });
+        await transaction.commit();
+        if (updated.rowsAffected !== 1) return null;
+        return this.getDerivativeJob(fileId);
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        await closeWriteTransaction(this.client, transaction);
+      }
+    });
+  }
+
+  async requeueDerivativeJob(
+    fileId: string,
+    now = new Date(),
+  ): Promise<boolean> {
+    await this.ready;
+    return this.runWrite(async () => {
+      const result = await this.client.execute({
+        sql: `UPDATE image_derivative_jobs SET status = 'pending', available_at = ?,
+          lease_owner = NULL, lease_expires_at = NULL, last_error = NULL, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status IN ('pending', 'retry', 'failed')`,
+        args: [
+          now.toISOString(),
+          now.toISOString(),
+          fileId,
+          DERIVATIVE_REVISION,
+        ],
+      });
+      return result.rowsAffected === 1;
+    });
+  }
+
+  async completeDerivativeJob(
+    fileId: string,
+    workerId: string,
+    derivatives: StoredDerivative[],
+    now = new Date(),
+  ): Promise<boolean> {
+    await this.ready;
+    return this.runWrite(async () => {
+      const transaction = await beginWriteTransaction(this.client, {
+        retryBusy: true,
+      });
+      try {
+        const owned = await transaction.execute({
+          sql: "SELECT 1 FROM image_derivative_jobs WHERE file_id = ? AND revision = ? AND status = 'processing' AND lease_owner = ?",
+          args: [fileId, DERIVATIVE_REVISION, workerId],
+        });
+        if (!owned.rows[0]) {
+          await transaction.rollback();
+          return false;
+        }
+        for (const derivative of derivatives) {
+          await transaction.execute({
+            sql: `INSERT INTO image_derivatives
+              (file_id, revision, profile, storage_key, size, sha256, width, height, created_at)
+              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+              ON CONFLICT(file_id, revision, profile) DO UPDATE SET
+                storage_key = excluded.storage_key, size = excluded.size,
+                sha256 = excluded.sha256, width = excluded.width,
+                height = excluded.height, created_at = excluded.created_at`,
+            args: [
+              derivative.fileId,
+              derivative.revision,
+              derivative.profile,
+              derivative.storageKey,
+              derivative.size,
+              derivative.sha256,
+              derivative.width,
+              derivative.height,
+              derivative.createdAt,
+            ],
+          });
+        }
+        const finishedAt = now.toISOString();
+        await transaction.execute({
+          sql: `UPDATE image_derivative_jobs SET status = 'complete', lease_owner = NULL,
+            lease_expires_at = NULL, last_error = NULL, updated_at = ? WHERE file_id = ? AND revision = ?`,
+          args: [finishedAt, fileId, DERIVATIVE_REVISION],
+        });
+        await transaction.commit();
+        return true;
+      } catch (error) {
+        await transaction.rollback();
+        throw error;
+      } finally {
+        await closeWriteTransaction(this.client, transaction);
+      }
+    });
+  }
+
+  async failDerivativeJob(
+    fileId: string,
+    workerId: string,
+    message: string,
+    maxAttempts = 5,
+    now = new Date(),
+  ): Promise<void> {
+    await this.ready;
+    const job = await this.getDerivativeJob(fileId);
+    if (job?.leaseOwner !== workerId || job.status !== "processing") return;
+    const terminal = job.attempts >= maxAttempts;
+    const delayMs = Math.min(
+      60 * 60_000,
+      5_000 * 2 ** Math.max(0, job.attempts - 1),
+    );
+    await this.runWrite(async () => {
+      await this.client.execute({
+        sql: `UPDATE image_derivative_jobs SET status = ?, available_at = ?,
+          lease_owner = NULL, lease_expires_at = NULL, last_error = ?, updated_at = ?
+          WHERE file_id = ? AND revision = ? AND status = 'processing' AND lease_owner = ?`,
+        args: [
+          terminal ? "failed" : "retry",
+          new Date(now.getTime() + delayMs).toISOString(),
+          message.slice(0, 500),
+          now.toISOString(),
+          fileId,
+          DERIVATIVE_REVISION,
+          workerId,
+        ],
+      });
+    });
+  }
+
+  async enqueueDerivativeBackfill(
+    limit = 8,
+    now = new Date(),
+  ): Promise<number> {
+    await this.ready;
+    const boundedLimit = Math.max(0, Math.min(100, Math.floor(limit)));
+    if (boundedLimit === 0) return 0;
+    return this.runWrite(async () => {
+      const timestamp = now.toISOString();
+      const result = await this.client.execute({
+        sql: `INSERT INTO image_derivative_jobs
+          (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+          SELECT f.id, ?, 'pending', -10, 0, ?, NULL, NULL, NULL, ?, ?
+          FROM files f
+          WHERE f.mime_type IN ('image/avif', 'image/gif', 'image/heic', 'image/heif', 'image/jpeg', 'image/png', 'image/tiff', 'image/webp')
+            AND NOT EXISTS (SELECT 1 FROM image_derivative_jobs j WHERE j.file_id = f.id AND j.revision = ?)
+            AND NOT EXISTS (SELECT 1 FROM image_derivatives d WHERE d.file_id = f.id AND d.revision = ?)
+          ORDER BY f.created_at ASC, f.id ASC LIMIT ?`,
+        args: [
+          DERIVATIVE_REVISION,
+          timestamp,
+          timestamp,
+          timestamp,
+          DERIVATIVE_REVISION,
+          DERIVATIVE_REVISION,
+          boundedLimit,
+        ],
+      });
+      return result.rowsAffected;
     });
   }
 

@@ -16,12 +16,24 @@ the Git commit currently checked out there.
   temporary upload parts.
 - `runtime/sqlite/` is bind-mounted at `/data/sqlite` for `files.db` and its
   SQLite WAL/shared-memory files.
-- SQLite stores file metadata, tags, visibility, hashes, and object locations;
-  file bytes are not stored in the database.
+- SQLite stores file metadata, tags, visibility, hashes, object locations, and
+  durable image-derivative jobs; file bytes are not stored in the database.
+- Stored image derivatives live under the namespaced sibling layout
+  `.image-derivatives/{id}/image-derivatives-v1/{profile}.webp` on the same
+  storage volume. Originals remain byte-identical at their existing paths.
 
 Uploads and downloads are streamed. Incoming files are written to temporary
 storage, hashed, and atomically moved into object storage only after a complete
 upload.
+
+Eligible raster uploads add only a bounded database outbox row after original
+finalization. Decode, orientation, resize, and encoding run in the separate
+`image-derivative-worker`; upload acknowledgement never waits for that work.
+Pending, retrying, or terminally failed derivatives do not affect the healthy
+original. The worker atomically claims leased jobs, retries with bounded
+exponential backoff, reclaims expired leases after crashes, and processes one
+job at a time. It also enqueues at most four low-priority legacy backfill jobs
+per minute. Backfill is automatic but never runs in the web server process.
 
 ## Configuration
 
@@ -69,6 +81,10 @@ publishes container port 3000 only as loopback port 37641, leaving host port
 3000 free. It also joins Nginx Proxy Manager's external `nginx-proxy_default`
 network under the alias `file-hosting-server`, where NPM reaches the container
 directly on port 3000.
+
+Compose also runs `image-derivative-worker` against the same database and file
+mounts. `docker compose stop` gives it 30 seconds to finish its current bounded
+job and close the database; interrupted leases are recovered automatically.
 
 ## Local development and tests
 
@@ -147,19 +163,44 @@ Authenticated API requests use the bearer token. Public preview and raw links
 need no token; private entries require authentication and otherwise behave as
 not found.
 
-| Method and route         | Purpose                                    |
-| ------------------------ | ------------------------------------------ |
-| `GET /healthz`           | Health check                               |
-| `POST /api/files`        | Stream a new upload with metadata and tags |
-| `GET /api/files`         | List or search entries                     |
-| `GET /api/files/{id}`    | Read one entry's metadata                  |
-| `PATCH /api/files/{id}`  | Change tags or visibility                  |
-| `DELETE /api/files/{id}` | Delete an entry and its stored object      |
-| `GET /{id}`              | Browser metadata and safe preview page     |
-| `GET /raw/{id}`          | Raw file bytes                             |
+| Method and route          | Purpose                                    |
+| ------------------------- | ------------------------------------------ |
+| `GET /healthz`            | Health check                               |
+| `POST /api/files`         | Stream a new upload with metadata and tags |
+| `GET /api/files`          | List or search entries                     |
+| `GET /api/files/{id}`     | Read one entry's metadata                  |
+| `PATCH /api/files/{id}`   | Change tags or visibility                  |
+| `DELETE /api/files/{id}`  | Delete an entry and its stored object      |
+| `GET /{id}`               | Browser metadata and safe preview page     |
+| `GET /raw/{id}`           | Raw file bytes                             |
+| `GET /raw/{id}/thumbnail` | Stored 320px-max thumbnail WebP            |
+| `GET /raw/{id}/small`     | Stored 768px-max small WebP                |
+| `GET /raw/{id}/standard`  | Stored 1920px-max standard WebP            |
 
 HTML and SVG content is shown as escaped source on the preview page rather than
 executed. Other unsupported preview types are presented as downloads.
+
+## Stored image derivative contract
+
+`image-derivatives-v1` is the single versioned profile source. Thumbnail is
+WebP at quality 68 and maximum width 320px (256 KiB cap); small is WebP at
+quality 80 and maximum width exactly 768px (1 MiB cap); standard starts at WebP
+quality 88 and maximum width 1920px with a hard 2 MiB encoded cap. Standard uses
+a deterministic bounded quality ladder followed by bounded dimension reduction.
+No profile upscales. Raster inputs only are accepted; SVG and HTML never enter
+the pipeline. Processing uses the first animation frame, applies orientation,
+converts to sRGB, and strips EXIF, GPS, XMP, comments, ICC, and other metadata.
+
+Derivative GET/HEAD and range responses read only committed stored bytes; they
+never render on demand. They first repeat the original route's current identity,
+visibility, and ownership check, use the same indistinguishable unavailable
+response, and are always `no-store`, including protected/private content.
+Changing public content to private revokes route access immediately. Deleting an
+original cascades job/artifact metadata and removes its derivative namespace.
+Malformed, unsupported, oversized, bomb-like, timed-out, or over-cap inputs
+leave the original available and move only the derivative job through retry or
+terminal-failure state. Operators may safely requeue a terminal job through the
+repository operation after correcting its source or runtime cause.
 
 ## CLI
 

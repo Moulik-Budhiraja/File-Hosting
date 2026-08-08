@@ -23,6 +23,39 @@ test("compose forwards bootstrap credentials into the server container", async (
   );
 });
 
+test("compose packages a bounded durable derivative worker with shared storage", async () => {
+  const [compose, packageJson, dockerfile] = await Promise.all([
+    readFile(path.join(rootDir, "compose.yaml"), "utf8"),
+    readFile(path.join(rootDir, "server", "package.json"), "utf8"),
+    readFile(path.join(rootDir, "server", "Dockerfile"), "utf8"),
+  ]);
+  assert.match(compose, /^\s{2}image-derivative-worker:/mu);
+  assert.match(compose, /command: \["node", "image-derivative-worker\.mjs"\]/u);
+  assert.match(
+    compose,
+    /image-derivative-worker:[\s\S]*stop_grace_period: 90s/u,
+  );
+  assert.match(
+    compose,
+    /image-derivative-worker:[\s\S]*FS_STORAGE_DIR:[\s\S]*DATABASE_URL:/u,
+  );
+  const parsedPackage = JSON.parse(packageJson);
+  assert.equal(
+    parsedPackage.scripts["worker:image-derivatives"],
+    "node .next/standalone/image-derivative-worker.mjs",
+  );
+  assert.match(
+    parsedPackage.scripts["build:worker"],
+    /image-derivative-worker\.mjs/u,
+  );
+  assert.match(dockerfile, /\/app\/\.next\/standalone \.\//u);
+  assert.doesNotMatch(
+    dockerfile,
+    /--chown=nextjs:nodejs \/app\/node_modules \.\/node_modules/u,
+  );
+  assert.doesNotMatch(dockerfile, /\/app\/src \.\/src/u);
+});
+
 test("runtime workers are tracked and packaged by standalone and Docker", async () => {
   const runtimeAssets = [
     "runtime/og-render-worker.mjs",

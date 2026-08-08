@@ -20,6 +20,8 @@ import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
+import type { DerivativeProfileName } from "./image-derivatives";
+import { removeImageDerivatives } from "./image-derivative-worker";
 import { TransferRegistry, type ActiveTransfer } from "./transfers";
 import {
   PREVIEW_ARTIFACT_MAX_BYTES,
@@ -38,6 +40,16 @@ import type {
 
 const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FREE_SPACE_CHECK_INTERVAL = 16 * 1024 * 1024;
+const DERIVATIVE_RASTER_MIME_TYPES = new Set([
+  "image/avif",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "image/jpeg",
+  "image/png",
+  "image/tiff",
+  "image/webp",
+]);
 
 function availableBytes(stats: Awaited<ReturnType<typeof statfs>>): bigint {
   return BigInt(stats.bavail) * BigInt(stats.bsize);
@@ -276,7 +288,11 @@ export class FileService {
           await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
           await prepareUnfurlArtifact(this, candidate);
         }
-        return await this.repository.insert(file, options.tags);
+        return await this.repository.insert(
+          file,
+          options.tags,
+          DERIVATIVE_RASTER_MIME_TYPES.has(file.mimeType),
+        );
       } catch (cause) {
         await removePreviewArtifact(this, candidate).catch(() => undefined);
         await unlink(finalPath).catch(() => undefined);
@@ -297,6 +313,24 @@ export class FileService {
 
   async get(id: string): Promise<StoredFile | null> {
     return this.repository.get(id);
+  }
+
+  async getDerivative(id: string, profile: DerivativeProfileName) {
+    return this.repository.getDerivative(id, profile);
+  }
+
+  openDerivativeReadStream(
+    derivative: { storageKey: string },
+    start?: number,
+    end?: number,
+  ) {
+    return createReadStream(
+      path.join(this.config.storageDir, derivative.storageKey),
+      {
+        start,
+        end,
+      },
+    );
   }
 
   async list(options: ListFilesOptions): Promise<ListFilesResult> {
@@ -344,6 +378,7 @@ export class FileService {
   ): Promise<StoredFile | null> {
     const file = await this.repository.delete(id, actorUserId);
     if (file) {
+      await removeImageDerivatives(this, file.id);
       await removePreviewArtifact(this, file);
       await unlink(this.storagePath(file)).catch(
         (error: NodeJS.ErrnoException) => {

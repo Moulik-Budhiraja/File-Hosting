@@ -63,6 +63,35 @@ services:
       retries: 3
       start_period: 20s
 
+  image-derivative-worker:
+    build:
+      context: ./server
+      args:
+        FS_PUBLIC_URL: ${FS_PUBLIC_URL:-https://files.moulik.dev}
+    command: ["node", "image-derivative-worker.mjs"]
+    restart: unless-stopped
+    stop_grace_period: 90s
+    init: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    environment:
+      FS_TOKEN: ${FS_TOKEN:?Set FS_TOKEN in .env before starting the service}
+      FS_STORAGE_DIR: ${FS_STORAGE_DIR:-/data/files}
+      DATABASE_URL: ${DATABASE_URL:-file:/data/sqlite/files.db}
+      FS_PUBLIC_URL: ${FS_PUBLIC_URL:-https://files.moulik.dev}
+      FS_MAX_UPLOAD_BYTES: ${FS_MAX_UPLOAD_BYTES:-10737418240}
+      FS_MIN_FREE_BYTES: ${FS_MIN_FREE_BYTES:-1073741824}
+    volumes:
+      - ${FS_FILES_DIR:-./runtime/files}:/data/files
+      - ${FS_SQLITE_DIR:-./runtime/sqlite}:/data/sqlite
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
 networks:
   npm:
     external: true
