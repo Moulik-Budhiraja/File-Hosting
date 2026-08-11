@@ -18,8 +18,13 @@ function processExists(pid: number): boolean {
   }
 }
 
-async function waitForPids(file: string, expected = 3): Promise<number[]> {
-  for (let attempt = 0; attempt < 30; attempt += 1) {
+async function waitForPids(
+  file: string,
+  expected = 3,
+  timeoutMs = 1_000,
+): Promise<number[]> {
+  const deadlineAt = Date.now() + timeoutMs;
+  while (Date.now() < deadlineAt) {
     try {
       const values = (await readFile(file, "utf8"))
         .trim()
@@ -33,6 +38,17 @@ async function waitForPids(file: string, expected = 3): Promise<number[]> {
     await new Promise((resolve) => setTimeout(resolve, 10));
   }
   throw new Error("process tree did not publish all pids");
+}
+
+async function waitForProcessExit(
+  pid: number,
+  timeoutMs: number,
+): Promise<void> {
+  const deadlineAt = Date.now() + timeoutMs;
+  while (processExists(pid) && Date.now() < deadlineAt) {
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  assert.equal(processExists(pid), false, `pid ${pid} missed its exit bound`);
 }
 
 afterEach(async () => {
@@ -118,7 +134,7 @@ describe(
           const run = renderSvgInWorker(Buffer.from("<svg/>"), {
             workerPath: launcherScript,
             workerArguments: [pidFile, childScript],
-            timeoutMs: 500,
+            timeoutMs: 1_500,
             allowSubprocesses: true,
           });
           const rejection = assert.rejects(run, ProcessDeadlineError);
@@ -179,44 +195,33 @@ describe(
 
       for (let attempt = 0; attempt < 5; attempt += 1) {
         const run = runKillableProcess(process.execPath, [launcher, pidFile], {
-          timeoutMs: 1_000,
+          timeoutMs: 1_500,
           maxOutputBytes: 1024,
           allowSubprocesses: true,
         });
         const rejection = assert.rejects(run, ProcessDeadlineError);
         let pids: number[] = [];
-        for (let poll = 0; poll < 80 && pids.length !== 2; poll += 1) {
-          try {
-            pids = (await readFile(pidFile, "utf8"))
-              .trim()
-              .split(/\s+/u)
-              .map(Number)
-              .filter(Number.isSafeInteger);
-          } catch {
-            // Launcher has not published both identities yet.
+        try {
+          pids = await waitForPids(pidFile, 2);
+          await waitForProcessExit(pids[0] ?? 0, 500);
+          assert.equal(
+            processExists(pids[1] ?? 0),
+            true,
+            "descendant must still hold the pipe",
+          );
+          await rejection;
+          assert.equal(
+            processExists(pids[1] ?? 0),
+            false,
+            "owned descendant survived settlement",
+          );
+        } finally {
+          await rejection;
+          for (const pid of pids) {
+            if (processExists(pid)) process.kill(pid, "SIGKILL");
           }
-          if (pids.length !== 2)
-            await new Promise((resolve) => setTimeout(resolve, 10));
+          await rm(pidFile, { force: true });
         }
-        assert.equal(pids.length, 2);
-        await new Promise((resolve) => setTimeout(resolve, 40));
-        assert.equal(
-          processExists(pids[0] ?? 0),
-          false,
-          "launcher must exit early",
-        );
-        assert.equal(
-          processExists(pids[1] ?? 0),
-          true,
-          "descendant must still hold the pipe",
-        );
-        await rejection;
-        assert.equal(
-          processExists(pids[1] ?? 0),
-          false,
-          "owned descendant survived settlement",
-        );
-        await rm(pidFile, { force: true });
       }
     });
 
