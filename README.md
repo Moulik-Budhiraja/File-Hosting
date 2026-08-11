@@ -32,8 +32,26 @@ finalization. Decode, orientation, resize, and encoding run in the separate
 Pending, retrying, or terminally failed derivatives do not affect the healthy
 original. The worker atomically claims leased jobs, retries with bounded
 exponential backoff, reclaims expired leases after crashes, and processes one
-job at a time. It also enqueues at most four low-priority legacy backfill jobs
-per minute. Backfill is automatic but never runs in the web server process.
+job at a time. It also enqueues at most two low-priority legacy artifact jobs
+per minute from one database-backed global cadence. Eligible images receive the
+three stored derivative profiles; only currently public images receive a stored
+unfurl artifact. Existing current-revision jobs/artifacts are not re-enqueued,
+and every worker rechecks source identity, deletion, and current visibility
+before publication. Backfill never runs in the web server process.
+
+Operators can durably pause or resume the cadence through the packaged worker;
+these commands print only the aggregate control state and never file metadata:
+
+```bash
+npm run backfill:pause
+npm run backfill:resume
+```
+
+A production canary can resume the cadence, observe the first two-job grant
+(one public image requiring both artifact classes), and immediately pause it
+before the next 60-second grant while the single worker drains that durable
+batch. Repeating pause/resume is idempotent; queued jobs and completed rows are
+the restart checkpoint.
 
 ## Configuration
 

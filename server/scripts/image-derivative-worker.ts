@@ -27,7 +27,7 @@ import {
 
 const IDLE_DELAY_MS = 1_000;
 const BACKFILL_INTERVAL_MS = 60_000;
-const BACKFILL_BATCH = 4;
+const BACKFILL_BATCH = 2;
 const workerId = `${os.hostname()}:${process.pid}:${randomUUID()}`;
 let stopping = false;
 let wake: (() => void) | undefined;
@@ -59,7 +59,21 @@ async function processOneAdmittedJob(
 }
 
 async function main(): Promise<void> {
-  if (process.argv.includes("--healthcheck")) {
+  const pauseBackfill = process.argv.includes("--backfill-pause");
+  const resumeBackfill = process.argv.includes("--backfill-resume");
+  if (pauseBackfill || resumeBackfill) {
+    if (pauseBackfill && resumeBackfill)
+      throw new Error("choose exactly one backfill control mode");
+    const service = await FileService.create(loadConfig());
+    try {
+      await service.repository.setArtifactBackfillEnabled(resumeBackfill);
+      process.stdout.write(
+        `${JSON.stringify({ backfill: resumeBackfill ? "resumed" : "paused" })}\n`,
+      );
+    } finally {
+      await service.close();
+    }
+  } else if (process.argv.includes("--healthcheck")) {
     const config = loadConfig();
     const client = createClient({ url: config.databaseUrl });
     try {
@@ -146,7 +160,7 @@ async function main(): Promise<void> {
       while (!stopping) {
         const now = Date.now();
         if (now >= nextBackfillAt) {
-          await service.repository.enqueueDerivativeBackfill(BACKFILL_BATCH);
+          await service.repository.enqueueArtifactBackfill(BACKFILL_BATCH);
           nextBackfillAt = now + BACKFILL_INTERVAL_MS;
         }
         const attemptId = randomUUID();
