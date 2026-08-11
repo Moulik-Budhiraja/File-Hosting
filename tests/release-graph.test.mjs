@@ -50,6 +50,15 @@ test("one canonical root release command covers every required local gate", asyn
   );
 });
 
+test("the canonical server suite discovers database write-transaction tests", async () => {
+  const runner = await text("server/scripts/run-server-tests.mjs");
+  assert.match(
+    runner,
+    /testDirectories\s*=\s*\[[^\]]*"src\/server\/database"/su,
+  );
+  assert.match(runner, /write-transaction\.test\.ts/u);
+});
+
 test("release CI executes the canonical gate and requires Docker Compose runtime", async () => {
   const [workflow, releaseCheck, processTree, sandboxModule, sandboxVerifier] =
     await Promise.all([

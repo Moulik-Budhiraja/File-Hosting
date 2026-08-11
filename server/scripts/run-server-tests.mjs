@@ -4,7 +4,11 @@ import path from "node:path";
 import process from "node:process";
 
 const root = process.cwd();
-const testDirectories = ["src/server/auth", "src/server/files"];
+const testDirectories = [
+  "src/server/auth",
+  "src/server/database",
+  "src/server/files",
+];
 const isolated = new Set([
   "admitted-job-process.test.ts",
   "auth.test.ts",
@@ -16,6 +20,7 @@ const isolated = new Set([
   "process-tree.test.ts",
   "responsive-pdf.test.ts",
   "unfurl-route.test.ts",
+  "write-transaction.test.ts",
 ]);
 const all = testDirectories.flatMap((directory) =>
   readdirSync(path.join(root, directory))
@@ -48,6 +53,7 @@ const groups = [
   { files: ["src/server/files/unfurl-route.test.ts"] },
   { files: ["src/server/files/process-tree.test.ts"] },
   { files: ["src/server/files/og-rss.test.ts"] },
+  { files: ["src/server/database/write-transaction.test.ts"] },
 ];
 const tsx = path.join(root, "node_modules", "tsx", "dist", "cli.mjs");
 for (const group of groups) {
