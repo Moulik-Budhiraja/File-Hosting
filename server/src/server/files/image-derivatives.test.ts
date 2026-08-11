@@ -973,6 +973,126 @@ describe("durable derivative upload boundary", { concurrency: false }, () => {
     );
   });
 
+  it("exposes bounded pause and resume operator commands in the standalone worker", async () => {
+    const [workerSource, packageSource] = await Promise.all([
+      readFile(
+        new URL("../../../scripts/image-derivative-worker.ts", import.meta.url),
+        "utf8",
+      ),
+      readFile(new URL("../../../package.json", import.meta.url), "utf8"),
+    ]);
+    const packageJson = JSON.parse(packageSource) as {
+      scripts?: Record<string, string>;
+    };
+    assert.match(workerSource, /BACKFILL_BATCH = 2/u);
+    assert.match(workerSource, /--backfill-pause/u);
+    assert.match(workerSource, /--backfill-resume/u);
+    assert.equal(
+      packageJson.scripts?.["backfill:pause"],
+      "node .next/standalone/image-derivative-worker.cjs --backfill-pause",
+    );
+    assert.equal(
+      packageJson.scripts?.["backfill:resume"],
+      "node .next/standalone/image-derivative-worker.cjs --backfill-resume",
+    );
+  });
+
+  it("supports durable operator pause and resume without bypassing cadence", async () => {
+    const source = await sharp({
+      create: { width: 8, height: 4, channels: 3, background: "green" },
+    })
+      .png()
+      .toBuffer();
+    const now = new Date("2029-01-01T00:00:00.000Z");
+    await writeFile(path.join(service.config.storageDir, "LgCtl01"), source);
+    await service.repository.insert(
+      {
+        id: "LgCtl01",
+        name: "legacy-control.png",
+        size: source.length,
+        mimeType: "image/png",
+        sha256: "c".repeat(64),
+        visibility: "public",
+        ownerId: null,
+        storageKey: "LgCtl01",
+        archive: null,
+        createdAt: now.toISOString(),
+        updatedAt: now.toISOString(),
+      },
+      [],
+      false,
+      false,
+    );
+    await service.repository.setArtifactBackfillEnabled(false, now);
+    assert.equal(
+      await service.repository.enqueueArtifactBackfill(
+        2,
+        new Date(now.getTime() + 60_000),
+      ),
+      0,
+    );
+    await service.repository.setArtifactBackfillEnabled(
+      true,
+      new Date(now.getTime() + 60_000),
+    );
+    assert.equal(
+      await service.repository.enqueueArtifactBackfill(
+        2,
+        new Date(now.getTime() + 60_000),
+      ),
+      2,
+      "one public image consumes the two-job canary grant",
+    );
+  });
+
+  it("backfills derivative and public unfurl jobs through one durable global budget", async () => {
+    const source = await sharp({
+      create: { width: 8, height: 4, channels: 3, background: "blue" },
+    })
+      .png()
+      .toBuffer();
+    const now = new Date().toISOString();
+    for (const [id, visibility] of [
+      ["LgPub01", "public"],
+      ["LgPri01", "private"],
+    ] as const) {
+      await writeFile(path.join(service.config.storageDir, id), source);
+      await service.repository.insert(
+        {
+          id,
+          name: `${id}.png`,
+          size: source.length,
+          mimeType: "image/png",
+          sha256: "b".repeat(64),
+          visibility,
+          ownerId: null,
+          storageKey: id,
+          archive: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        [],
+        false,
+        false,
+      );
+    }
+    const cadenceStart = new Date("2031-01-01T00:00:00.000Z");
+    await service.repository.setArtifactBackfillEnabled(true, cadenceStart);
+    assert.equal(
+      await service.repository.enqueueArtifactBackfill(4, cadenceStart),
+      3,
+      "two derivative jobs plus one public-only unfurl consume one global grant",
+    );
+    assert.ok(await service.repository.getDerivativeJob("LgPub01"));
+    assert.ok(await service.repository.getDerivativeJob("LgPri01"));
+    assert.ok(await service.repository.getUnfurlArtifactJob("LgPub01"));
+    assert.equal(
+      await service.repository.getUnfurlArtifactJob("LgPri01"),
+      null,
+      "private artifacts must never enter the unfurl queue",
+    );
+  });
+
   it("enqueues legacy raster backfill in a bounded low-priority batch", async () => {
     const source = await sharp({
       create: { width: 8, height: 4, channels: 3, background: "yellow" },
@@ -1000,12 +1120,8 @@ describe("durable derivative upload boundary", { concurrency: false }, () => {
         false,
       );
     }
-    const cadenceStart = new Date("2030-01-01T00:00:00.000Z");
-    assert.equal(
-      await service.repository.enqueueDerivativeBackfill(2, cadenceStart),
-      0,
-      "first startup persists cadence without scanning",
-    );
+    const cadenceStart = new Date("2032-01-01T00:00:00.000Z");
+    await service.repository.setArtifactBackfillEnabled(true, cadenceStart);
     const peers = await Promise.all([
       FileRepository.create(service.config.databaseUrl),
       FileRepository.create(service.config.databaseUrl),
