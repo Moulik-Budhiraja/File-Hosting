@@ -39,6 +39,22 @@ test("compose packages a bounded durable derivative worker with shared storage",
   assert.match(compose, /healthcheck:[\s\S]*--healthcheck/u);
   assert.match(compose, /mem_limit:\s*768m/u);
   assert.match(compose, /condition:\s*service_started/u);
+  const workerBlock =
+    /\n  image-derivative-worker:([\s\S]*?)(?=\n\S|\nnetworks:)/u.exec(
+      compose,
+    )?.[1];
+  assert.ok(workerBlock, "worker service must be present");
+  assert.match(
+    workerBlock,
+    /cap_drop:\s*\n\s*- ALL[\s\S]*cap_add:\s*\n\s*- SETGID\s*\n\s*- SETUID\s*\n\s*- NET_ADMIN\s*\n\s*- SYS_CHROOT\s*\n\s*- SYS_PTRACE\s*\n\s*- SYS_ADMIN/u,
+    "the worker's native render children require Bubblewrap's bounded capability set",
+  );
+  assert.match(
+    workerBlock,
+    /security_opt:\s*\n\s*- apparmor=unconfined\s*\n\s*- seccomp=unconfined/u,
+    "the worker's outer profiles must allow Bubblewrap namespace setup",
+  );
+  assert.doesNotMatch(workerBlock, /no-new-privileges/u);
   assert.match(readme, /docker compose stop[^\n]*90 seconds/u);
   assert.doesNotMatch(readme, /docker compose stop[^\n]*30 seconds/u);
   assert.match(
