@@ -24,6 +24,8 @@ import {
 import { FileService } from "./service";
 import { FileRepository } from "./database";
 import { generateDerivativesInChild } from "./image-derivative-child";
+import { nativeAdmissionState, withNativeAdmission } from "./native-admission";
+import { runKillableProcess } from "./process-tree";
 import { processNextUnfurlArtifactJob } from "./unfurl-artifact-worker";
 import { processNextDerivativeJob } from "./image-derivative-worker";
 import { removeImageDerivatives } from "./image-derivative-storage";
@@ -396,6 +398,55 @@ describe("durable derivative upload boundary", { concurrency: false }, () => {
     const job = await service.repository.getUnfurlArtifactJob(uploaded.id);
     assert.equal(job?.status, "retry");
     assert.match(job?.lastError ?? "", /deadline/u);
+  });
+
+  it("commits a valid unfurl artifact after controlled native host contention", async () => {
+    const workerSource = await readFile(
+      new URL("./unfurl-artifact-worker.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(
+      workerSource,
+      /renderOgImage\(service,\s*retainedFile,\s*model,\s*\{\s*deadlineAt,?\s*\}\)/u,
+      "durable rendering must receive the admitted job's remaining deadline",
+    );
+    const uploaded = await service.upload(
+      bytes(Buffer.from("valid artifact")),
+      {
+        name: "contention.txt",
+        tags: [],
+        visibility: "public",
+        archive: null,
+        mimeType: "text/plain",
+        contentLength: 14,
+      },
+    );
+    const contention = withNativeAdmission(1_000, () =>
+      runKillableProcess(
+        process.execPath,
+        ["-e", "setTimeout(() => process.exit(0), 3000)"],
+        {
+          timeoutMs: 6_000,
+          maxOutputBytes: 1024,
+          allowSandboxForks: true,
+        },
+      ),
+    );
+    while (nativeAdmissionState().active !== 1)
+      await new Promise((resolve) => setTimeout(resolve, 1));
+    try {
+      assert.equal(
+        await processNextUnfurlArtifactJob(service, "contention-worker", {
+          onlyFileId: uploaded.id,
+          deadlineMs: 8_000,
+        }),
+        true,
+      );
+      const job = await service.repository.getUnfurlArtifactJob(uploaded.id);
+      assert.equal(job?.status, "complete", job?.lastError ?? "missing job");
+    } finally {
+      await contention;
+    }
   });
 
   it("fails async unfurl jobs closed when visibility or deletion changes during rendering", async () => {
@@ -790,6 +841,20 @@ describe("durable derivative upload boundary", { concurrency: false }, () => {
       Buffer.from(await partial.arrayBuffer()),
       storedBytes.subarray(0, 10),
     );
+    const unsatisfiableHead = await headDerivativeRoute(
+      new Request(`https://files.example.test/raw/${uploaded.id}/small`, {
+        method: "HEAD",
+        headers: { range: `bytes=${storedBytes.length + 1}-` },
+      }),
+      context,
+    );
+    assert.equal(unsatisfiableHead.status, 416);
+    assert.equal(unsatisfiableHead.headers.get("accept-ranges"), "bytes");
+    assert.equal(
+      unsatisfiableHead.headers.get("content-range"),
+      `bytes */${storedBytes.length}`,
+    );
+    assert.equal(await unsatisfiableHead.text(), "");
     await service.update(uploaded.id, { visibility: "private" });
     const hidden = await getDerivativeRoute(
       new Request(`https://files.example.test/raw/${uploaded.id}/small`),

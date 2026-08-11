@@ -12,7 +12,12 @@ import {
   GET as getOgImage,
   HEAD as headOgImage,
 } from "../../app/og/[filename]/route";
-import { layoutOgTitle, OG_RENDER_LIMITS, renderOgImage } from "./og-image";
+import {
+  layoutOgTitle,
+  OG_RENDER_LIMITS,
+  renderOgImage,
+  renderSvgInWorker,
+} from "./og-image";
 import { PreviewBusyError } from "./preview-renderers";
 import { unfurlArtifactStorageKey } from "./preview-artifact-storage";
 import { processNextUnfurlArtifactJob } from "./unfurl-artifact-worker";
@@ -84,6 +89,27 @@ function privacySnapshot(response: Response, body: Buffer) {
 }
 
 describe("OG image title layout", () => {
+  it("uses bundled CJK and Korean fallbacks in the production title path", async () => {
+    const source = await readFile(
+      new URL("./og-image.ts", import.meta.url),
+      "utf8",
+    );
+    assert.match(source, /const SANS = [^\n]*Noto Sans CJK[^\n]*sans-serif/u);
+    const svg = (family: string) =>
+      Buffer.from(
+        `<svg xmlns="http://www.w3.org/2000/svg" width="900" height="140"><rect width="900" height="140" fill="black"/><text x="20" y="100" fill="white" font-family="${family}" font-size="72">長い名前한글Ж</text></svg>`,
+      );
+    const fallback = await renderSvgInWorker(
+      svg("'Inter','Noto Sans CJK JP','Noto Sans Arabic',sans-serif"),
+    );
+    const explicit = await renderSvgInWorker(svg("'Noto Sans CJK JP'"));
+    assert.deepEqual(
+      fallback,
+      explicit,
+      "mixed CJK/Korean production text must resolve to the bundled shaping font instead of tofu bars",
+    );
+  });
+
   it("fits wide glyphs, preserves pictographs, and signals truncation", () => {
     const lines = layoutOgTitle(`${"長한".repeat(80)}${"😀".repeat(8)}`, 34, 3);
     assert.equal(lines.length, 3);

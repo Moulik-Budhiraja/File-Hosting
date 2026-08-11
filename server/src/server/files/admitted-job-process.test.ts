@@ -48,6 +48,16 @@ function assertDead(pid: number) {
   assert.throws(() => process.kill(pid, 0), /ESRCH|no such process/iu);
 }
 
+async function waitForPublishedPid(file: string, timeoutMs: number) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const value = Number(await readFile(file, "utf8").catch(() => ""));
+    if (Number.isSafeInteger(value) && value > 0) return value;
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
+  throw new Error("descendant pid was not published within the startup bound");
+}
+
 describe("whole admitted-job process deadline", () => {
   it("rejects failed or malformed claimed-job outcomes before health can be cleared", () => {
     assert.throws(
@@ -87,11 +97,13 @@ describe("whole admitted-job process deadline", () => {
   it("kills an uncooperative grandchild before deadline settlement", async () => {
     if (process.platform === "win32") return;
     const { entry, pidFile } = await stallingFixture("stubborn-tree", true);
-    await assert.rejects(
-      runAdmittedJobProcess(entry, [], Date.now() + 150),
+    const rejection = assert.rejects(
+      runAdmittedJobProcess(entry, [], Date.now() + 1_000),
       /admitted-job deadline/u,
     );
-    assertDead(Number(await readFile(pidFile, "utf8")));
+    const descendantPid = await waitForPublishedPid(pidFile, 600);
+    await rejection;
+    assertDead(descendantPid);
   });
 
   it("cancels and reaps admitted process trees during shutdown", async () => {

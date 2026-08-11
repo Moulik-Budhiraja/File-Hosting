@@ -103,7 +103,12 @@ async function respond(
         response.headers.set("content-range", `bytes */${sizeForRangeError}`);
         response.headers.set("accept-ranges", "bytes");
       }
-      return response;
+      return head
+        ? new Response(null, {
+            status: response.status,
+            headers: response.headers,
+          })
+        : response;
     }
     const response = errorResponse(error);
     return head

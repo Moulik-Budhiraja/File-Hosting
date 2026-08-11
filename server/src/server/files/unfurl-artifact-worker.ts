@@ -106,7 +106,9 @@ export async function processNextUnfurlArtifactJob(
         async (preview) => {
           assertDeadline();
           const model = await buildUnfurlModel(service, retainedFile, preview);
-          const image = await renderOgImage(service, retainedFile, model);
+          const image = await renderOgImage(service, retainedFile, model, {
+            deadlineAt,
+          });
           assertDeadline();
           return image;
         },

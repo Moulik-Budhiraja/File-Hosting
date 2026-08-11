@@ -296,20 +296,36 @@ describe(
         allowSubprocesses: true,
       });
       assert.equal(getOgRenderPoolState().active, 1);
-      const started = Date.now();
-      await assert.rejects(
-        renderSvgInWorker(Buffer.from("<svg/>"), {
-          workerPath: worker,
-          workerArguments: ["0"],
-          timeoutMs: 150,
-        }),
-        /Preview rendering is busy/u,
+      const blockerRejection = assert.rejects(
+        blocker,
+        /process deadline exceeded/u,
       );
-      assert.ok(
-        Date.now() - started < 300,
-        "queued work exceeded its total deadline",
+      const queuedRejection = assert
+        .rejects(
+          renderSvgInWorker(Buffer.from("<svg/>"), {
+            workerPath: worker,
+            workerArguments: ["0"],
+            timeoutMs: 150,
+          }),
+          /Preview rendering is busy/u,
+        )
+        .then(() => performance.now());
+      const deadlineWitness = new Promise<number>((resolve) =>
+        setTimeout(() => resolve(performance.now()), 150),
       );
-      await assert.rejects(blocker, /process deadline exceeded/u);
+      try {
+        const [queuedAt, witnessAt] = await Promise.all([
+          queuedRejection,
+          deadlineWitness,
+        ]);
+        assert.ok(
+          queuedAt - witnessAt < 100,
+          `queued deadline settled ${(queuedAt - witnessAt).toFixed(1)}ms after its independent timer witness`,
+        );
+        assert.deepEqual(getOgRenderPoolState(), { active: 1, queued: 0 });
+      } finally {
+        await blockerRejection;
+      }
       assert.deepEqual(getOgRenderPoolState(), { active: 0, queued: 0 });
     });
 
