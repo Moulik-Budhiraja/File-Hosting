@@ -140,10 +140,17 @@ test(
         const cards: Buffer[] = [];
         // Production's shared native admission contract serializes unrelated
         // requests. Exercise the full heavyweight path three times without
-        // making queue-wait scheduling part of this RSS measurement.
+        // making the interactive renderer deadline part of this RSS
+        // measurement. Keep all three renders inside one explicit total
+        // envelope so retries cannot multiply an unbounded stage budget.
+        const renderDeadlineAt = Date.now() + 30_000;
         for (let attempt = 0; attempt < 3; attempt += 1) {
           const model = await buildUnfurlModel(service, file);
-          cards.push(await renderOgImage(service, file, model));
+          cards.push(
+            await renderOgImage(service, file, model, {
+              deadlineAt: renderDeadlineAt,
+            }),
+          );
         }
         for (const card of cards)
           assert.equal(card.subarray(1, 4).toString("ascii"), "PNG");
