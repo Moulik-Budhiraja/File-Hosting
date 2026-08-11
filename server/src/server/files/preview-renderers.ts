@@ -145,7 +145,18 @@ function safeTitle(input: RendererInput): string {
   return sanitizeLocatorFreeText(input.name, 300, "File") || "File";
 }
 
-async function readVerifiedSource(input: RendererInput): Promise<Buffer> {
+interface VerifiedSourceIdentity {
+  dev: bigint;
+  ino: bigint;
+  size: bigint;
+  mtimeNs: bigint;
+  ctimeNs: bigint;
+}
+
+async function readVerifiedSource(
+  input: RendererInput,
+  onIdentity?: (identity: VerifiedSourceIdentity) => void,
+): Promise<Buffer> {
   if (!Number.isSafeInteger(input.size) || input.size < 0) {
     throw new Error("invalid source size");
   }
@@ -198,9 +209,44 @@ async function readVerifiedSource(input: RendererInput): Promise<Buffer> {
     if (hash.digest("hex") !== input.sha256.toLowerCase()) {
       throw new Error("source checksum mismatch");
     }
+    onIdentity?.({
+      dev: after.dev,
+      ino: after.ino,
+      size: after.size,
+      mtimeNs: after.mtimeNs,
+      ctimeNs: after.ctimeNs,
+    });
     return bytes;
   } finally {
     await handle.close();
+  }
+}
+
+async function sourceIdentityStillMatches(
+  input: RendererInput,
+  expected: VerifiedSourceIdentity,
+): Promise<boolean> {
+  const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
+  try {
+    const handle = await open(
+      input.sourcePath,
+      fsConstants.O_RDONLY | noFollow,
+    );
+    try {
+      const current = await handle.stat({ bigint: true });
+      return (
+        current.isFile() &&
+        current.dev === expected.dev &&
+        current.ino === expected.ino &&
+        current.size === expected.size &&
+        current.mtimeNs === expected.mtimeNs &&
+        current.ctimeNs === expected.ctimeNs
+      );
+    } finally {
+      await handle.close();
+    }
+  } catch {
+    return false;
   }
 }
 
@@ -580,6 +626,63 @@ export class PreviewSourceUnavailableError extends Error {
   }
 }
 
+function metadataOnlyFallback(input: RendererInput): PreviewExtraction {
+  let family: PreviewFamily = "binary";
+  let label = "FILE";
+  if (input.trustedMime === "application/pdf") {
+    family = "pdf";
+    label = "PDF";
+  } else if (input.trustedMime.startsWith("audio/")) {
+    family = "audio";
+    label =
+      input.trustedMime === "audio/mpeg"
+        ? "MP3"
+        : input.trustedMime === "audio/flac"
+          ? "FLAC"
+          : "Audio";
+  } else if (input.trustedMime.startsWith("video/")) {
+    family = "video";
+    label = videoLabelForMime(input.trustedMime);
+  } else if (RASTER_MIMES.has(input.trustedMime)) {
+    family = "image";
+    label = RASTER_MIMES.get(input.trustedMime)!;
+  } else if (ARCHIVE_MIMES.has(input.trustedMime)) {
+    family = "archive";
+    label =
+      input.trustedMime === "application/zip"
+        ? "ZIP"
+        : input.trustedMime === "application/x-tar"
+          ? "TAR"
+          : input.trustedMime === "application/x-7z-compressed"
+            ? "7Z"
+            : input.trustedMime === "application/x-rar-compressed"
+              ? "RAR"
+              : input.trustedMime === "application/x-bzip2"
+                ? "BZIP2"
+                : "GZIP";
+  } else if (MARKDOWN_MIMES.has(input.trustedMime)) {
+    family = "markdown";
+    label = "Markdown";
+  } else if (CODE_MIMES.has(input.trustedMime)) {
+    family = "code";
+    label = "CODE";
+  } else if (DOCUMENT_MIMES.has(input.trustedMime)) {
+    family = "document";
+    label = "DOC";
+  } else if (input.trustedMime.startsWith("text/")) {
+    family = "text";
+    label = "TXT";
+  }
+  return {
+    family,
+    label,
+    title: safeTitle(input),
+    facts: [formatBytes(input.size)],
+    sourceDigest: input.sha256,
+    visual: { kind: "binary" },
+  };
+}
+
 export function isPreviewSourceUnavailable(error: unknown): boolean {
   return error instanceof PreviewSourceUnavailableError;
 }
@@ -868,6 +971,8 @@ async function videoPoster(
           "-nostdin",
           "-protocol_whitelist",
           "file,pipe",
+          "-threads",
+          "1",
           "-i",
           sourcePath,
           "-frames:v",
@@ -916,6 +1021,8 @@ async function audioArtwork(
           "-nostdin",
           "-protocol_whitelist",
           "file,pipe",
+          "-threads",
+          "1",
           "-i",
           sourcePath,
           "-map",
@@ -980,6 +1087,8 @@ async function compressedAudioWaveform(
           "-nostdin",
           "-protocol_whitelist",
           "file,pipe",
+          "-threads",
+          "1",
           "-i",
           sourcePath,
           "-map",
@@ -1393,7 +1502,10 @@ export async function derivePreview(
       visual: { kind: "binary" },
     };
   }
-  const deadlineAt = Date.now() + PREVIEW_EXTRACTION_LIMITS.wallTimeoutMs;
+  const deadlineAt =
+    input.deadlineAt && input.deadlineAt > Date.now()
+      ? input.deadlineAt
+      : Date.now() + PREVIEW_EXTRACTION_LIMITS.wallTimeoutMs;
   const deadlineInput: RendererInput = { ...input, deadlineAt };
   try {
     await previewExtractionPool.acquire(Math.max(1, deadlineAt - Date.now()));
@@ -1401,11 +1513,14 @@ export async function derivePreview(
     throw new PreviewBusyError();
   }
 
-  let operationSettled = false;
+  let verifiedSourceIdentity: VerifiedSourceIdentity | undefined;
+  let fallbackNeedsPostSettlementSourceCheck = false;
   const operation = withNativeAdmission(
     Math.max(1, deadlineAt - Date.now()),
     async () => {
-      await readVerifiedSource(deadlineInput);
+      await readVerifiedSource(deadlineInput, (identity) => {
+        verifiedSourceIdentity = identity;
+      });
       const renderer = registry.resolve(deadlineInput);
       const probe = await renderer.probe(deadlineInput);
       if (probe.rendererId !== renderer.id || probe.input !== deadlineInput) {
@@ -1419,9 +1534,7 @@ export async function derivePreview(
       await readVerifiedSource(deadlineInput);
       return renderer.renderMetadata(extracted);
     },
-  ).finally(() => {
-    operationSettled = true;
-  });
+  );
 
   let deadlineTimer: NodeJS.Timeout | undefined;
   const deadline = new Promise<never>((_resolve, reject) => {
@@ -1434,15 +1547,44 @@ export async function derivePreview(
     return await Promise.race([operation, deadline]);
   } catch (error) {
     if (isPreviewSourceUnavailable(error)) throw error;
-    throw new PreviewSourceUnavailableError();
+    if (
+      error instanceof Error &&
+      /renderer (?:probe contract|source identity) violated/u.test(
+        error.message,
+      )
+    ) {
+      throw new PreviewSourceUnavailableError();
+    }
+    // Decoder/render deadlines stop native work at the unchanged hard limit.
+    // Revalidate the already checksum-verified opened source identity after the
+    // stop before returning the metadata-only fallback; never turn host contention into an
+    // existence-bearing unavailable response.
+    const sourceStillMatches = verifiedSourceIdentity
+      ? await sourceIdentityStillMatches(input, verifiedSourceIdentity)
+      : await readVerifiedSource(input).then(
+          () => true,
+          () => false,
+        );
+    if (!sourceStillMatches) {
+      throw new PreviewSourceUnavailableError();
+    }
+    fallbackNeedsPostSettlementSourceCheck = true;
+    return metadataOnlyFallback(input);
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
-    if (operationSettled) {
+    try {
+      await operation.catch(() => undefined);
+      if (fallbackNeedsPostSettlementSourceCheck) {
+        const sourceStillMatches = verifiedSourceIdentity
+          ? await sourceIdentityStillMatches(input, verifiedSourceIdentity)
+          : await readVerifiedSource(input).then(
+              () => true,
+              () => false,
+            );
+        if (!sourceStillMatches) throw new PreviewSourceUnavailableError();
+      }
+    } finally {
       previewExtractionPool.release();
-    } else {
-      void operation
-        .finally(() => previewExtractionPool.release())
-        .catch(() => undefined);
     }
   }
 }

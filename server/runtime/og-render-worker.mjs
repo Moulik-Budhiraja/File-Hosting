@@ -85,18 +85,26 @@ function rasterizeBundledText(svg) {
       const size = Number(attribute(attrs, "font-size") ?? 16);
       const weight = attribute(attrs, "font-weight") ?? "400";
       const family = attribute(attrs, "font-family") ?? "Inter,sans-serif";
+      const text = decodeXml(raw);
+      const resolvedFamily =
+        /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u.test(
+          text,
+        )
+          ? "'Noto Sans CJK JP'"
+          : /\p{Script=Arabic}/u.test(text)
+            ? "'Noto Sans Arabic'"
+            : family;
       const fill = attribute(attrs, "fill") ?? "#000000";
       const anchor = attribute(attrs, "text-anchor") ?? "start";
       const letterSpacing = Number(attribute(attrs, "letter-spacing") ?? 0);
       if (![x, y, size, letterSpacing].every(Number.isFinite) || size <= 0) {
         throw new Error("invalid text geometry");
       }
-      const text = decodeXml(raw);
       const maxWidth = Number(attribute(attrs, "data-max-width") ?? 0);
       const ellipsis = attribute(attrs, "data-ellipsis") === "true";
       const configure = (context) => {
         context.fillStyle = fill;
-        context.font = `${weight} ${size}px ${family}`;
+        context.font = `${weight} ${size}px ${resolvedFamily}`;
         context.textAlign =
           anchor === "end" ? "right" : anchor === "middle" ? "center" : "left";
         context.textBaseline = "alphabetic";

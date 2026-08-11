@@ -10,9 +10,18 @@ import { fileURLToPath } from "node:url";
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
 const serverRoot = path.join(root, "server");
 const next = path.join(serverRoot, "node_modules", "next", "dist", "bin", "next");
-const temporaryRoot = await mkdtemp(path.join(os.tmpdir(), "file-hosting-rich-link-release-"));
+const workerEntry = path.join(
+  serverRoot,
+  ".next",
+  "standalone",
+  "image-derivative-worker.cjs",
+);
+const temporaryRoot = await mkdtemp(
+  path.join(os.tmpdir(), "file-hosting-rich-link-release-"),
+);
 const evidenceRoot = path.resolve(
-  process.env.OG_RELEASE_EVIDENCE_DIR ?? path.join(temporaryRoot, "visual-contexts"),
+  process.env.OG_RELEASE_EVIDENCE_DIR ??
+    path.join(temporaryRoot, "visual-contexts"),
 );
 await mkdir(evidenceRoot, { recursive: true });
 
@@ -32,27 +41,44 @@ const port = await unusedPort();
 const origin = `http://127.0.0.1:${port}`;
 assert.notEqual(new URL(origin).hostname, "files.moulik.dev", "production guard");
 const token = "release-probe-synthetic-token-with-enough-entropy";
+const runtimeEnvironment = {
+  ...process.env,
+  DATABASE_URL: `file:${path.join(temporaryRoot, "files.db")}`,
+  FS_STORAGE_DIR: path.join(temporaryRoot, "objects"),
+  FS_PUBLIC_URL: origin,
+  FS_TOKEN: token,
+  FS_MIN_FREE_BYTES: "0",
+  NEXT_TELEMETRY_DISABLED: "1",
+  NODE_ENV: "production",
+};
 const logs = [];
-const child = spawn(process.execPath, [next, "start", "-H", "127.0.0.1", "-p", String(port)], {
-  cwd: serverRoot,
-  detached: process.platform !== "win32",
-  env: {
-    ...process.env,
-    DATABASE_URL: `file:${path.join(temporaryRoot, "files.db")}`,
-    FS_STORAGE_DIR: path.join(temporaryRoot, "objects"),
-    FS_PUBLIC_URL: origin,
-    FS_TOKEN: token,
-    FS_MIN_FREE_BYTES: "0",
-    NEXT_TELEMETRY_DISABLED: "1",
-    NODE_ENV: "production",
-  },
-  stdio: ["ignore", "pipe", "pipe"],
-});
-child.stdout.on("data", (chunk) => logs.push(Buffer.from(chunk)));
-child.stderr.on("data", (chunk) => logs.push(Buffer.from(chunk)));
 
-async function stop() {
-  if (child.exitCode !== null) return;
+function launch(command, args) {
+  const child = spawn(command, args, {
+    cwd: serverRoot,
+    detached: process.platform !== "win32",
+    env: runtimeEnvironment,
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  child.stdout.on("data", (chunk) => logs.push(Buffer.from(chunk)));
+  child.stderr.on("data", (chunk) => logs.push(Buffer.from(chunk)));
+  return child;
+}
+
+const server = launch(process.execPath, [
+  next,
+  "start",
+  "-H",
+  "127.0.0.1",
+  "-p",
+  String(port),
+]);
+const worker = launch(process.execPath, [workerEntry]);
+const children = [server, worker];
+let probe;
+
+async function stopChild(child) {
+  if (child.exitCode !== null || child.signalCode !== null) return;
   const exited = once(child, "exit");
   try {
     if (process.platform === "win32") child.kill("SIGTERM");
@@ -75,21 +101,49 @@ async function stop() {
   }
 }
 
+async function stop() {
+  await Promise.all(children.map(stopChild));
+}
+
+function assertRunning() {
+  for (const child of children) {
+    if (child.exitCode !== null || child.signalCode !== null)
+      throw new Error(Buffer.concat(logs).toString("utf8"));
+  }
+}
+
+async function workerHealthy() {
+  const health = spawn(process.execPath, [workerEntry, "--healthcheck"], {
+    cwd: serverRoot,
+    env: runtimeEnvironment,
+    stdio: "ignore",
+    timeout: 5_000,
+    killSignal: "SIGKILL",
+  });
+  const [code, signal] = await once(health, "exit");
+  return code === 0 && signal === null;
+}
+
 try {
   const deadline = Date.now() + 45_000;
+  let ready = false;
   while (Date.now() < deadline) {
-    if (child.exitCode !== null) throw new Error(Buffer.concat(logs).toString("utf8"));
+    assertRunning();
     try {
-      const response = await fetch(`${origin}/healthz`, { signal: AbortSignal.timeout(1_000) });
-      if (response.ok) break;
+      const response = await fetch(`${origin}/healthz`, {
+        signal: AbortSignal.timeout(1_000),
+      });
+      if (response.ok && (await workerHealthy())) {
+        ready = true;
+        break;
+      }
     } catch {
-      // Production server is still starting.
+      // Production server and worker are still starting.
     }
     await new Promise((resolve) => setTimeout(resolve, 100));
   }
-  const health = await fetch(`${origin}/healthz`);
-  assert.equal(health.status, 200, Buffer.concat(logs).toString("utf8"));
-  const probe = spawn(
+  assert.equal(ready, true, Buffer.concat(logs).toString("utf8"));
+  probe = spawn(
     process.execPath,
     [path.join(serverRoot, "scripts", "rich-link-preview-probe.mjs")],
     {
@@ -100,14 +154,30 @@ try {
         FS_PROBE_TOKEN: token,
         FS_PROBE_SCREENSHOTS: evidenceRoot,
       },
+      detached: process.platform !== "win32",
       stdio: "inherit",
     },
   );
-  const [code, signal] = await once(probe, "exit");
-  assert.equal(signal, null);
-  assert.equal(code, 0);
-  process.stdout.write(`rich-link release probe visual contexts: ${evidenceRoot}\n`);
+  const probeExit = once(probe, "exit");
+  let probeTimer;
+  const probeOutcome = await Promise.race([
+    probeExit.then(([code, signal]) => ({ code, signal })),
+    new Promise((resolve) => {
+      probeTimer = setTimeout(() => resolve({ timeout: true }), 180_000);
+    }),
+  ]).finally(() => clearTimeout(probeTimer));
+  if ("timeout" in probeOutcome) {
+    await stopChild(probe);
+    throw new Error("rich-link preview probe timed out");
+  }
+  assertRunning();
+  assert.equal(probeOutcome.signal, null);
+  assert.equal(probeOutcome.code, 0);
+  process.stdout.write(
+    `rich-link release probe visual contexts: ${evidenceRoot}\n`,
+  );
 } finally {
+  if (probe) await stopChild(probe);
   await stop();
   if (!process.env.OG_RELEASE_EVIDENCE_DIR)
     await rm(temporaryRoot, { recursive: true, force: true });

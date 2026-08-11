@@ -20,12 +20,11 @@ import type { FilesConfig } from "./config";
 import { FileRepository } from "./database";
 import { AppError } from "./errors";
 import { generateFileId } from "./id";
+import type { DerivativeProfileName } from "./image-derivative-contract";
+import { removeImageDerivatives } from "./image-derivative-storage";
+import { openSafeStoredFile } from "./safe-storage";
 import { TransferRegistry, type ActiveTransfer } from "./transfers";
-import {
-  PREVIEW_ARTIFACT_MAX_BYTES,
-  prepareUnfurlArtifact,
-  removePreviewArtifact,
-} from "./preview-artifact";
+import { removePreviewArtifact } from "./preview-artifact-storage";
 import type {
   FileMetadata,
   ListFilesOptions,
@@ -38,6 +37,16 @@ import type {
 
 const TEMP_MAX_AGE_MS = 24 * 60 * 60 * 1000;
 const FREE_SPACE_CHECK_INTERVAL = 16 * 1024 * 1024;
+const DERIVATIVE_RASTER_MIME_TYPES = new Set([
+  "image/avif",
+  "image/gif",
+  "image/heic",
+  "image/heif",
+  "image/jpeg",
+  "image/png",
+  "image/tiff",
+  "image/webp",
+]);
 
 function availableBytes(stats: Awaited<ReturnType<typeof statfs>>): bigint {
   return BigInt(stats.bavail) * BigInt(stats.bsize);
@@ -272,11 +281,11 @@ export class FileService {
       };
       try {
         await options.authorizeFinalize?.();
-        if (candidate.visibility === "public") {
-          await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
-          await prepareUnfurlArtifact(this, candidate);
-        }
-        return await this.repository.insert(file, options.tags);
+        return await this.repository.insert(
+          file,
+          options.tags,
+          DERIVATIVE_RASTER_MIME_TYPES.has(file.mimeType),
+        );
       } catch (cause) {
         await removePreviewArtifact(this, candidate).catch(() => undefined);
         await unlink(finalPath).catch(() => undefined);
@@ -299,6 +308,41 @@ export class FileService {
     return this.repository.get(id);
   }
 
+  async getDerivative(id: string, profile: DerivativeProfileName) {
+    return this.repository.getDerivative(id, profile);
+  }
+
+  async openDerivativeObject(derivative: {
+    storageKey: string;
+    size: number;
+    sha256: string;
+  }) {
+    if (
+      !/^\.image-derivatives\/[0-9A-Za-z]{7}\/image-derivatives-v1\/[0-9a-f-]{36}\/(thumbnail|small|standard)\.webp$/u.test(
+        derivative.storageKey,
+      )
+    )
+      throw new Error("invalid derivative storage key");
+    const handle = await openSafeStoredFile(
+      this.config.storageDir,
+      derivative.storageKey,
+    );
+    try {
+      const details = await handle.stat();
+      if (!details.isFile() || details.size !== derivative.size)
+        throw new Error("derivative object metadata mismatch");
+      const bytes = await handle.readFile();
+      if (
+        createHash("sha256").update(bytes).digest("hex") !== derivative.sha256
+      )
+        throw new Error("derivative object digest mismatch");
+      return handle;
+    } catch (error) {
+      await handle.close();
+      throw error;
+    }
+  }
+
   async list(options: ListFilesOptions): Promise<ListFilesResult> {
     return this.repository.list(options);
   }
@@ -319,10 +363,6 @@ export class FileService {
     const candidate = becomingPublic
       ? { ...current, visibility: "public" as const }
       : current;
-    if (becomingPublic) {
-      await this.ensureCapacity(PREVIEW_ARTIFACT_MAX_BYTES);
-      await prepareUnfurlArtifact(this, candidate);
-    }
     let updated: StoredFile | null;
     try {
       updated = await this.repository.update(id, input, actorUserId);
@@ -333,6 +373,8 @@ export class FileService {
     }
     if (!updated && becomingPublic)
       await removePreviewArtifact(this, candidate).catch(() => undefined);
+    if (updated?.visibility === "public" && current.visibility === "public")
+      await removePreviewArtifact(this, current).catch(() => undefined);
     if (updated?.visibility !== "public")
       await removePreviewArtifact(this, current).catch(() => undefined);
     return updated;
@@ -344,6 +386,7 @@ export class FileService {
   ): Promise<StoredFile | null> {
     const file = await this.repository.delete(id, actorUserId);
     if (file) {
+      await removeImageDerivatives(this, file.id);
       await removePreviewArtifact(this, file);
       await unlink(this.storagePath(file)).catch(
         (error: NodeJS.ErrnoException) => {

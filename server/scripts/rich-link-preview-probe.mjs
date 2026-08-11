@@ -146,6 +146,31 @@ const wideTitleFile = await upload(
   "wide-title-card",
 );
 
+async function waitForReadyArtifact(id) {
+  const deadline = Date.now() + 30_000;
+  while (Date.now() < deadline) {
+    try {
+      const response = await fetch(`${baseUrl}/og/${id}.png`, {
+        signal: AbortSignal.timeout(2_000),
+      });
+      if (response.ok) {
+        const metadata = await sharp(
+          Buffer.from(await response.arrayBuffer()),
+        ).metadata();
+        if (metadata.hasAlpha === false) return;
+      }
+    } catch (error) {
+      if (!(error instanceof DOMException && error.name === "TimeoutError"))
+        throw error;
+    }
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  assert.fail(`${id}: durable unfurl artifact did not become ready`);
+}
+
+for (const file of [markdown, raster, unicodeFile, wideTitleFile])
+  await waitForReadyArtifact(file.id);
+
 const crawlerResponse = await fetch(`${baseUrl}/${markdown.id}`, {
   headers: {
     "user-agent": "SyntheticSocialCrawler/1.0",

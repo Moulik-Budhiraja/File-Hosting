@@ -27,25 +27,36 @@ export const E2E_ADMIN = {
   password: "e2e-admin-password-longer-than-12",
 };
 
+const runtimeEnv = {
+  ...process.env,
+  NODE_ENV: "production",
+  HOSTNAME: "127.0.0.1",
+  PORT: port,
+  FS_TOKEN: "e2e-synthetic-service-token",
+  FS_PUBLIC_URL: process.env.E2E_PUBLIC_URL ?? `http://127.0.0.1:${port}`,
+  DATABASE_URL: `file:${path.join(dataDir, "files.db")}`,
+  FS_STORAGE_DIR: path.join(dataDir, "objects"),
+  FS_MIN_FREE_BYTES: "1024",
+  FS_BOOTSTRAP_USERNAME: E2E_ADMIN.username,
+  FS_BOOTSTRAP_PASSWORD: E2E_ADMIN.password,
+};
 const child = spawn(
   process.execPath,
   [path.join(serverRoot, ".next", "standalone", "start.js")],
   {
     stdio: ["inherit", "pipe", "pipe"],
-    env: {
-      ...process.env,
-      NODE_ENV: "production",
-      HOSTNAME: "127.0.0.1",
-      PORT: port,
-      FS_TOKEN: "e2e-synthetic-service-token",
-      FS_PUBLIC_URL: process.env.E2E_PUBLIC_URL ?? `http://127.0.0.1:${port}`,
-      DATABASE_URL: `file:${path.join(dataDir, "files.db")}`,
-      FS_STORAGE_DIR: path.join(dataDir, "objects"),
-      FS_BOOTSTRAP_USERNAME: E2E_ADMIN.username,
-      FS_BOOTSTRAP_PASSWORD: E2E_ADMIN.password,
-    },
+    env: runtimeEnv,
   },
 );
+const workerEnv = { ...runtimeEnv };
+delete workerEnv.FS_BOOTSTRAP_USERNAME;
+delete workerEnv.FS_BOOTSTRAP_PASSWORD;
+const worker = spawn(
+  process.execPath,
+  [path.join(serverRoot, ".next", "standalone", "image-derivative-worker.cjs")],
+  { stdio: ["ignore", "pipe", "pipe"], env: workerEnv },
+);
+let stopping = false;
 
 child.stdout?.on("data", (chunk) => {
   process.stdout.write(chunk);
@@ -55,9 +66,25 @@ child.stderr?.on("data", (chunk) => {
   process.stderr.write(chunk);
   serverLog.write(chunk);
 });
+worker.stdout?.on("data", (chunk) => {
+  process.stdout.write(chunk);
+  serverLog.write(chunk);
+});
+worker.stderr?.on("data", (chunk) => {
+  process.stderr.write(chunk);
+  serverLog.write(chunk);
+});
 child.on("exit", (code) => {
-  serverLog.end(() => process.exit(code ?? 1));
+  worker.kill("SIGTERM");
+  serverLog.end(() => process.exit(stopping ? 0 : (code ?? 1)));
+});
+worker.on("exit", (code) => {
+  if (code && child.exitCode === null) child.kill("SIGTERM");
 });
 for (const signal of ["SIGINT", "SIGTERM"]) {
-  process.on(signal, () => child.kill(signal));
+  process.on(signal, () => {
+    stopping = true;
+    worker.kill(signal);
+    child.kill(signal);
+  });
 }

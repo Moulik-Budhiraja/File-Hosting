@@ -153,8 +153,8 @@ export function layoutOgTitle(
   return lines.length > 0 ? lines : ["Untitled file"];
 }
 
-const SANS = "'Inter',sans-serif";
-const MONO = "'JetBrains Mono',monospace";
+const SANS = "'Inter','Noto Sans CJK JP','Noto Sans Arabic',sans-serif";
+const MONO = "'JetBrains Mono','Noto Sans CJK JP','Noto Sans Arabic',monospace";
 const EMOJI_DIRECTORY = path.resolve(
   process.cwd(),
   "node_modules/@twemoji/svg",
@@ -751,6 +751,12 @@ export async function renderOgImage(
   _service: FileService,
   _file: StoredFile,
   model: PublicUnfurlModel,
+  options: { deadlineAt?: number } = {},
 ): Promise<Buffer> {
-  return renderSvgInWorker(composeOgCardSvg(model));
+  return renderSvgInWorker(
+    composeOgCardSvg(model),
+    options.deadlineAt === undefined
+      ? undefined
+      : { timeoutMs: Math.max(1, options.deadlineAt - Date.now()) },
+  );
 }

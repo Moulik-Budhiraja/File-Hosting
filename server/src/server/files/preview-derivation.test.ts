@@ -2,7 +2,6 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
-import { createRequire } from "node:module";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, describe, it } from "node:test";
@@ -18,12 +17,11 @@ import {
   PreviewRendererRegistry,
   type RendererInput,
   videoLabelForMime,
+  warmPreviewMediaTools,
 } from "./preview-renderers";
 
-const require = createRequire(import.meta.url);
-const ffprobePath = (require("ffprobe-static") as { path: string }).path;
-
 const temporaryDirectories: string[] = [];
+let mediaWarmPromise: Promise<void> | undefined;
 
 async function fixture(
   bytes: Buffer,
@@ -147,6 +145,8 @@ async function generatedMedia(
   arguments_: readonly string[],
   extension: string,
 ): Promise<Buffer> {
+  mediaWarmPromise ??= warmPreviewMediaTools();
+  await mediaWarmPromise;
   assert.ok(ffmpegPath, "ffmpeg-static must provide a packaged binary");
   const directory = await mkdtemp(path.join(os.tmpdir(), "fs-preview-media-"));
   temporaryDirectories.push(directory);
@@ -156,11 +156,6 @@ async function generatedMedia(
     timeout: 10_000,
   });
   assert.equal(result.status, 0, result.stderr);
-  const probeReady = spawnSync(ffprobePath, ["-version"], {
-    encoding: "utf8",
-    timeout: 10_000,
-  });
-  assert.equal(probeReady.status, 0, probeReady.stderr);
   return readFile(outputPath);
 }
 

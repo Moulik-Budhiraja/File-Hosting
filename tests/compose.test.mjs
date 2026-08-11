@@ -23,6 +23,61 @@ test("compose forwards bootstrap credentials into the server container", async (
   );
 });
 
+test("compose packages a bounded durable derivative worker with shared storage", async () => {
+  const [compose, packageJson, dockerfile, readme] = await Promise.all([
+    readFile(path.join(rootDir, "compose.yaml"), "utf8"),
+    readFile(path.join(rootDir, "server", "package.json"), "utf8"),
+    readFile(path.join(rootDir, "server", "Dockerfile"), "utf8"),
+    readFile(path.join(rootDir, "README.md"), "utf8"),
+  ]);
+  assert.match(compose, /^\s{2}image-derivative-worker:/mu);
+  assert.match(compose, /command: \["node", "image-derivative-worker\.cjs"\]/u);
+  assert.match(
+    compose,
+    /image-derivative-worker:[\s\S]*stop_grace_period: 90s/u,
+  );
+  assert.match(compose, /healthcheck:[\s\S]*--healthcheck/u);
+  assert.match(compose, /mem_limit:\s*768m/u);
+  assert.match(compose, /condition:\s*service_started/u);
+  const workerBlock =
+    /\n  image-derivative-worker:([\s\S]*?)(?=\n\S|\nnetworks:)/u.exec(
+      compose,
+    )?.[1];
+  assert.ok(workerBlock, "worker service must be present");
+  assert.match(
+    workerBlock,
+    /cap_drop:\s*\n\s*- ALL[\s\S]*cap_add:\s*\n\s*- SETGID\s*\n\s*- SETUID\s*\n\s*- NET_ADMIN\s*\n\s*- SYS_CHROOT\s*\n\s*- SYS_PTRACE\s*\n\s*- SYS_ADMIN/u,
+    "the worker's native render children require Bubblewrap's bounded capability set",
+  );
+  assert.match(
+    workerBlock,
+    /security_opt:\s*\n\s*- apparmor=unconfined\s*\n\s*- seccomp=unconfined/u,
+    "the worker's outer profiles must allow Bubblewrap namespace setup",
+  );
+  assert.doesNotMatch(workerBlock, /no-new-privileges/u);
+  assert.match(readme, /docker compose stop[^\n]*90 seconds/u);
+  assert.doesNotMatch(readme, /docker compose stop[^\n]*30 seconds/u);
+  assert.match(
+    compose,
+    /image-derivative-worker:[\s\S]*FS_STORAGE_DIR:[\s\S]*DATABASE_URL:/u,
+  );
+  const parsedPackage = JSON.parse(packageJson);
+  assert.equal(
+    parsedPackage.scripts["worker:image-derivatives"],
+    "node .next/standalone/image-derivative-worker.cjs",
+  );
+  assert.match(
+    parsedPackage.scripts["build:worker"],
+    /image-derivative-worker\.cjs/u,
+  );
+  assert.match(dockerfile, /\/app\/\.next\/standalone \.\//u);
+  assert.doesNotMatch(
+    dockerfile,
+    /--chown=nextjs:nodejs \/app\/node_modules \.\/node_modules/u,
+  );
+  assert.doesNotMatch(dockerfile, /\/app\/src \.\/src/u);
+});
+
 test("runtime workers are tracked and packaged by standalone and Docker", async () => {
   const runtimeAssets = [
     "runtime/og-render-worker.mjs",

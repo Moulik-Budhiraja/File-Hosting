@@ -32,6 +32,7 @@ import { AppError } from "./errors";
 import { generateFileId } from "./id";
 import { parseRangeHeader } from "./range";
 import { FileService } from "./service";
+import { processNextUnfurlArtifactJob } from "./unfurl-artifact-worker";
 import { setFileServiceForTests } from "./singleton";
 import { parseArchive, validateFilename, validateTags } from "./validation";
 
@@ -291,31 +292,14 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       "hello world",
     );
     assert.equal(service.toMetadata(file).archive, null);
-    const artifacts = await readdir(
-      path.join(service.config.storageDir, ".unfurl-artifacts"),
+    await assert.rejects(
+      readdir(path.join(service.config.storageDir, ".unfurl-artifacts")),
+      { code: "ENOENT" },
     );
-    assert.deepEqual(artifacts, [
-      `${file.id}-${file.sha256}-og-v2-881d043.json`,
-    ]);
-    const artifact = JSON.parse(
-      await readFile(
-        path.join(
-          service.config.storageDir,
-          ".unfurl-artifacts",
-          artifacts[0]!,
-        ),
-        "utf8",
-      ),
-    ) as {
-      revision: string;
-      sha256: string;
-      preview: Record<string, unknown>;
-      cardBase64?: string;
-    };
-    assert.equal(artifact.revision, "og-v2-881d043");
-    assert.equal(artifact.sha256, file.sha256);
-    assert.ok(Object.keys(artifact.preview).length > 0);
-    assert.equal(artifact.cardBase64, undefined);
+    assert.equal(
+      (await service.repository.getUnfurlArtifactJob(file.id))?.status,
+      "pending",
+    );
   });
 
   it("filters by query, glob, AND tags, visibility, and cursor", async () => {
@@ -597,6 +581,26 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
       mimeType: "application/pdf",
       contentLength: bytes.length,
     });
+    let unfurlReady = false;
+    for (let attempt = 0; attempt < 3 && !unfurlReady; attempt += 1) {
+      assert.equal(
+        await processNextUnfurlArtifactJob(
+          service,
+          `pdf-preview-test-worker-${attempt}`,
+          { onlyFileId: pdf.id },
+        ),
+        true,
+      );
+      const job = await service.repository.getUnfurlArtifactJob(pdf.id);
+      unfurlReady = job?.status === "complete";
+      if (!unfurlReady)
+        assert.equal(
+          await service.repository.requeueUnfurlArtifactJob(pdf.id),
+          true,
+          job?.lastError ?? undefined,
+        );
+    }
+    assert.equal(unfurlReady, true);
     const response = await previewFile(
       new Request(`http://localhost/${pdf.id}`),
       routeContext(pdf.id),

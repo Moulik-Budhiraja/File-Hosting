@@ -81,18 +81,28 @@ export async function buildUnfurlModel(
   service: FileService,
   file: StoredFile,
   preparedPreview?: PreviewExtraction,
+  allowDerivation = true,
 ): Promise<PublicUnfurlModel> {
   if (file.visibility !== "public")
     throw new Error("Unfurls require a public file");
   const preview =
     preparedPreview ??
-    (await derivePreview({
-      trustedMime: file.mimeType,
-      name: file.name,
-      size: file.size,
-      sha256: file.sha256,
-      sourcePath: service.storagePath(file),
-    }));
+    (allowDerivation
+      ? await derivePreview({
+          trustedMime: file.mimeType,
+          name: file.name,
+          size: file.size,
+          sha256: file.sha256,
+          sourcePath: service.storagePath(file),
+        })
+      : {
+          family: "binary" as const,
+          label: file.mimeType.startsWith("image/") ? "Image" : "File",
+          title: file.name,
+          facts: [] as string[],
+          sourceDigest: file.sha256,
+          visual: { kind: "binary" as const },
+        });
   const supportedKinds = new Set<PublicUnfurlModel["kind"]>([
     "markdown",
     "document",
