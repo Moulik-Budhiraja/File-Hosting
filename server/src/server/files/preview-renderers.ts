@@ -49,7 +49,7 @@ export type PreviewVisual =
   | { kind: "waveform"; samples: readonly number[] }
   | { kind: "archive"; entries: readonly string[] }
   | { kind: "svg-source"; digest: string; hex: string }
-  | { kind: "binary"; hex?: string };
+  | { kind: "binary"; hex?: string; typeOnly?: boolean };
 
 export interface PreviewExtraction {
   family: PreviewFamily;
@@ -74,7 +74,7 @@ interface RegisteredRenderer {
   order: number;
 }
 
-const MAX_SOURCE_BYTES = 25 * 1024 * 1024;
+export const PREVIEW_SOURCE_MAX_BYTES = 25 * 1024 * 1024;
 const MAX_READ_BYTES = 256 * 1024;
 const MAX_TEXT_BYTES = 256 * 1024;
 const MAX_ARCHIVE_ENTRIES = 12;
@@ -253,7 +253,7 @@ async function sourceIdentityStillMatches(
 async function readFullVerifiedSource(
   input: RendererInput,
 ): Promise<Buffer | null> {
-  if (input.size > MAX_SOURCE_BYTES) return null;
+  if (input.size > PREVIEW_SOURCE_MAX_BYTES) return null;
   const noFollow = process.platform === "win32" ? 0 : fsConstants.O_NOFOLLOW;
   const handle = await open(input.sourcePath, fsConstants.O_RDONLY | noFollow);
   try {
@@ -626,7 +626,7 @@ export class PreviewSourceUnavailableError extends Error {
   }
 }
 
-function metadataOnlyFallback(input: RendererInput): PreviewExtraction {
+export function metadataOnlyPreview(input: RendererInput): PreviewExtraction {
   let family: PreviewFamily = "binary";
   let label = "FILE";
   if (input.trustedMime === "application/pdf") {
@@ -679,7 +679,7 @@ function metadataOnlyFallback(input: RendererInput): PreviewExtraction {
     title: safeTitle(input),
     facts: [formatBytes(input.size)],
     sourceDigest: input.sha256,
-    visual: { kind: "binary" },
+    visual: { kind: "binary", typeOnly: true },
   };
 }
 
@@ -1485,7 +1485,7 @@ export async function derivePreview(
   input: RendererInput,
   registry = createDefaultPreviewRendererRegistry(),
 ): Promise<PreviewExtraction> {
-  if (input.size > MAX_SOURCE_BYTES) {
+  if (input.size > PREVIEW_SOURCE_MAX_BYTES) {
     if (
       !Number.isSafeInteger(input.size) ||
       input.size < 0 ||
@@ -1569,7 +1569,7 @@ export async function derivePreview(
       throw new PreviewSourceUnavailableError();
     }
     fallbackNeedsPostSettlementSourceCheck = true;
-    return metadataOnlyFallback(input);
+    return metadataOnlyPreview(input);
   } finally {
     if (deadlineTimer) clearTimeout(deadlineTimer);
     try {
