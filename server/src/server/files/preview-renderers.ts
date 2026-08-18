@@ -49,7 +49,7 @@ export type PreviewVisual =
   | { kind: "waveform"; samples: readonly number[] }
   | { kind: "archive"; entries: readonly string[] }
   | { kind: "svg-source"; digest: string; hex: string }
-  | { kind: "binary"; hex?: string };
+  | { kind: "binary"; hex?: string; typeOnly?: boolean };
 
 export interface PreviewExtraction {
   family: PreviewFamily;
@@ -679,7 +679,7 @@ export function metadataOnlyPreview(input: RendererInput): PreviewExtraction {
     title: safeTitle(input),
     facts: [formatBytes(input.size)],
     sourceDigest: input.sha256,
-    visual: { kind: "binary" },
+    visual: { kind: "binary", typeOnly: true },
   };
 }
 

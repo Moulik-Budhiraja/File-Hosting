@@ -1429,6 +1429,8 @@ describe("OG Social Cards V2 byte-derived rendering", () => {
       "report.pdf",
     );
     assert.equal(fallback.model.preview?.visual.kind, "binary");
+    const fallbackSvg = composeOgCardSvg(fallback.model).toString("utf8");
+    assert.doesNotMatch(fallbackSvg, /PDF DOCUMENT/u);
     const pageRegion = await sharp(fallback.png)
       .extract({ left: 700, top: 100, width: 1, height: 1 })
       .removeAlpha()
