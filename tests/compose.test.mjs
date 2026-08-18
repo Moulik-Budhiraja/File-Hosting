@@ -98,6 +98,7 @@ test("runtime workers are tracked and packaged by standalone and Docker", async 
     "runtime/fonts/Noto-OFL.txt",
     "runtime/assets/twemoji/ATTRIBUTION.md",
     "runtime/assets/twemoji/LICENSE-GRAPHICS",
+    "runtime/assets/pdf-fallback.png",
     "runtime/assets/unavailable.png",
   ];
   for (const asset of runtimeAssets) {

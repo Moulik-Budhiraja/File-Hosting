@@ -19,6 +19,7 @@ const required = [
   "runtime/fonts/Noto-OFL.txt",
   "runtime/assets/twemoji/ATTRIBUTION.md",
   "runtime/assets/twemoji/LICENSE-GRAPHICS",
+  "runtime/assets/pdf-fallback.png",
   "runtime/assets/unavailable.png",
 ];
 

@@ -1,4 +1,8 @@
-import { derivePreview, type PreviewExtraction } from "./preview-renderers";
+import {
+  derivePreview,
+  metadataOnlyPreview,
+  type PreviewExtraction,
+} from "./preview-renderers";
 import type { FileService } from "./service";
 import { sanitizeLocatorFreeText, sanitizePublicText } from "./text-safety";
 import { BASE62_ID_PATTERN, type StoredFile } from "./types";
@@ -95,14 +99,13 @@ export async function buildUnfurlModel(
           sha256: file.sha256,
           sourcePath: service.storagePath(file),
         })
-      : {
-          family: "binary" as const,
-          label: file.mimeType.startsWith("image/") ? "Image" : "File",
-          title: file.name,
-          facts: [] as string[],
-          sourceDigest: file.sha256,
-          visual: { kind: "binary" as const },
-        });
+      : metadataOnlyPreview({
+          trustedMime: file.mimeType,
+          name: file.name,
+          size: file.size,
+          sha256: file.sha256,
+          sourcePath: service.storagePath(file),
+        }));
   const supportedKinds = new Set<PublicUnfurlModel["kind"]>([
     "markdown",
     "document",

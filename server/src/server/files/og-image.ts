@@ -419,6 +419,9 @@ export function composeOgCardSvg(model: PublicUnfurlModel): Buffer {
     body = landscapePage
       ? `${page}<rect x="0" y="330" width="1200" height="300" fill="url(#pdfShade)"/>${titleText(56, pdfTitleLines.length > 1 ? 442 : 526, 68, 27)}${facts(56, 596)}`
       : `${page}${titleText(56, pdfTitleLines.length > 2 ? 335 : pdfTitleLines.length > 1 ? 415 : 510, 56, 12, 3)}${facts(56, 594)}`;
+  } else if (model.kind === "pdf") {
+    const page = `<rect x="830" y="54" width="300" height="414" rx="8" fill="#f4f2ed"/><polygon points="1040,54 1040,146 1130,146" fill="#ddd9d0"/><polygon points="1040,54 1130,146 1040,146" fill="#cbc6bc"/><rect x="870" y="214" width="220" height="74" rx="8" fill="#c94a45"/><text x="980" y="265" fill="#fff" font-family="${SANS}" font-size="42" font-weight="700" text-anchor="middle" letter-spacing="3">PDF</text><rect x="870" y="330" width="170" height="12" rx="6" fill="#cbc6bc"/><rect x="870" y="364" width="220" height="12" rx="6" fill="#d8d4cb"/>`;
+    body = `${page}<text x="56" y="190" fill="#c94a45" font-family="${MONO}" font-size="24" letter-spacing="4">PDF DOCUMENT</text>${titleText(56, twoLineTitle ? 430 : 500, 58, 24)}${facts(56, 584)}`;
   } else if (model.kind === "document" && visual?.kind !== "binary") {
     const documentHeading = layoutOgTitle(contentLines[0] ?? safeTitle, 26, 2)
       .map((line, index) =>
