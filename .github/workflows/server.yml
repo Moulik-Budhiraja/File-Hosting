@@ -69,6 +69,8 @@ jobs:
           test -f .next/standalone/server.js
           test -d .next/standalone/.next/static
           test -d .next/standalone/public
+      - name: Packaged HTTP startup and upload deadline regression
+        run: node --test tests/upload-deadline.test.mjs tests/standalone-start.test.mjs
       - name: Install Playwright Chromium
         working-directory: server
         run: npx playwright install --with-deps chromium
