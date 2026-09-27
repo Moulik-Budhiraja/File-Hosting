@@ -1131,10 +1131,26 @@ export class FileRepository {
     });
   }
 
-  async enqueueDerivativeBackfill(
-    limit = 4,
+  async setArtifactBackfillEnabled(
+    enabled: boolean,
     now = new Date(),
-  ): Promise<number> {
+  ): Promise<void> {
+    await this.ready;
+    const timestamp = now.toISOString();
+    const nextGrantAt = enabled ? timestamp : "9999-12-31T23:59:59.999Z";
+    await this.runWrite(async () => {
+      await this.client.execute({
+        sql: `INSERT INTO derivative_backfill_control
+          (singleton, next_grant_at, updated_at) VALUES (1, ?, ?)
+          ON CONFLICT(singleton) DO UPDATE SET
+            next_grant_at = excluded.next_grant_at,
+            updated_at = excluded.updated_at`,
+        args: [nextGrantAt, timestamp],
+      });
+    });
+  }
+
+  async enqueueArtifactBackfill(limit = 4, now = new Date()): Promise<number> {
     await this.ready;
     const boundedLimit = Math.max(0, Math.min(4, Math.floor(limit)));
     if (boundedLimit === 0) return 0;
@@ -1166,27 +1182,85 @@ export class FileRepository {
             SET next_grant_at = ?, updated_at = ? WHERE singleton = 1`,
           args: [new Date(now.getTime() + 60_000).toISOString(), timestamp],
         });
-        const result = await transaction.execute({
-          sql: `INSERT INTO image_derivative_jobs
-            (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
-            SELECT f.id, ?, 'pending', -10, 0, ?, NULL, NULL, NULL, ?, ?
+        const candidates = await transaction.execute({
+          sql: `SELECT f.id,
+              CASE WHEN NOT EXISTS (
+                SELECT 1 FROM image_derivative_jobs j
+                WHERE j.file_id = f.id AND j.revision = ?
+              ) AND (
+                SELECT COUNT(DISTINCT d.profile) FROM image_derivatives d
+                WHERE d.file_id = f.id AND d.revision = ?
+              ) < 3 THEN 1 ELSE 0 END AS needs_derivatives,
+              CASE WHEN f.visibility = 'public' AND NOT EXISTS (
+                SELECT 1 FROM unfurl_artifact_jobs u
+                WHERE u.file_id = f.id AND u.revision = ?
+              ) THEN 1 ELSE 0 END AS needs_unfurl
             FROM files f
             WHERE f.mime_type IN ('image/avif', 'image/gif', 'image/heic', 'image/heif', 'image/jpeg', 'image/png', 'image/tiff', 'image/webp')
-              AND NOT EXISTS (SELECT 1 FROM image_derivative_jobs j WHERE j.file_id = f.id AND j.revision = ?)
-              AND NOT EXISTS (SELECT 1 FROM image_derivatives d WHERE d.file_id = f.id AND d.revision = ?)
+              AND (
+                (NOT EXISTS (
+                  SELECT 1 FROM image_derivative_jobs j
+                  WHERE j.file_id = f.id AND j.revision = ?
+                ) AND (
+                  SELECT COUNT(DISTINCT d.profile) FROM image_derivatives d
+                  WHERE d.file_id = f.id AND d.revision = ?
+                ) < 3)
+                OR (f.visibility = 'public' AND NOT EXISTS (
+                  SELECT 1 FROM unfurl_artifact_jobs u
+                  WHERE u.file_id = f.id AND u.revision = ?
+                ))
+              )
             ORDER BY f.created_at ASC, f.id ASC LIMIT ?`,
           args: [
             DERIVATIVE_REVISION,
-            timestamp,
-            timestamp,
-            timestamp,
+            DERIVATIVE_REVISION,
+            UNFURL_ARTIFACT_REVISION,
             DERIVATIVE_REVISION,
             DERIVATIVE_REVISION,
+            UNFURL_ARTIFACT_REVISION,
             boundedLimit,
           ],
         });
+        let enqueued = 0;
+        for (const candidate of candidates.rows) {
+          const fileId = rowString(candidate, "id");
+          if (rowNumber(candidate, "needs_derivatives") === 1) {
+            await transaction.execute({
+              sql: `INSERT INTO image_derivative_jobs
+                (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+                VALUES (?, ?, 'pending', -10, 0, ?, NULL, NULL, NULL, ?, ?)`,
+              args: [
+                fileId,
+                DERIVATIVE_REVISION,
+                timestamp,
+                timestamp,
+                timestamp,
+              ],
+            });
+            enqueued += 1;
+          }
+          if (
+            enqueued < boundedLimit &&
+            rowNumber(candidate, "needs_unfurl") === 1
+          ) {
+            await transaction.execute({
+              sql: `INSERT INTO unfurl_artifact_jobs
+                (file_id, revision, status, priority, attempts, available_at, lease_owner, lease_expires_at, last_error, created_at, updated_at)
+                VALUES (?, ?, 'pending', -10, 0, ?, NULL, NULL, NULL, ?, ?)`,
+              args: [
+                fileId,
+                UNFURL_ARTIFACT_REVISION,
+                timestamp,
+                timestamp,
+                timestamp,
+              ],
+            });
+            enqueued += 1;
+          }
+          if (enqueued >= boundedLimit) break;
+        }
         await transaction.commit();
-        return result.rowsAffected;
+        return enqueued;
       } catch (error) {
         await transaction.rollback();
         throw error;
@@ -1194,6 +1268,13 @@ export class FileRepository {
         await closeWriteTransaction(this.client, transaction);
       }
     });
+  }
+
+  async enqueueDerivativeBackfill(
+    limit = 4,
+    now = new Date(),
+  ): Promise<number> {
+    return this.enqueueArtifactBackfill(limit, now);
   }
 
   async listCompletedUnfurlArtifactSources(): Promise<
