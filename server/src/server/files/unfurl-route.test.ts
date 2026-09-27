@@ -1,5 +1,12 @@
 import assert from "node:assert/strict";
-import { chmod, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import {
+  chmod,
+  mkdtemp,
+  open,
+  readFile,
+  rm,
+  writeFile,
+} from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { crc32 } from "node:zlib";
@@ -12,6 +19,10 @@ import {
   GET as getOgImage,
   HEAD as headOgImage,
 } from "../../app/og/[filename]/route";
+import {
+  GET as getRawFile,
+  HEAD as headRawFile,
+} from "../../app/raw/[id]/route";
 import {
   layoutOgTitle,
   OG_RENDER_LIMITS,
@@ -229,6 +240,7 @@ describe("OG image title layout", () => {
 describe("rich unfurl routes", { concurrency: false }, () => {
   let directory: string;
   let service: FileService;
+  let largePdf: StoredFile;
   let workerSequence = 0;
 
   async function uploadReady(
@@ -264,6 +276,36 @@ describe("rich unfurl routes", { concurrency: false }, () => {
       minFreeBytes: 0,
     });
     setFileServiceForTests(service);
+
+    const size = 216_637_683;
+    const storageKey = "large-pdf-sparse";
+    const source = await open(
+      path.join(service.config.storageDir, storageKey),
+      "w",
+    );
+    await source.write(Buffer.from("%PDF-1.7\n"), 0, 9, 0);
+    await source.write(Buffer.from("%%EOF\n"), 0, 6, size - 6);
+    await source.truncate(size);
+    await source.close();
+    const timestamp = new Date().toISOString();
+    largePdf = await service.repository.insert(
+      {
+        id: "LgPdf01",
+        name: "large-guide.pdf",
+        size,
+        mimeType: "application/pdf",
+        sha256: "a".repeat(64),
+        visibility: "public",
+        ownerId: null,
+        storageKey,
+        archive: null,
+        createdAt: timestamp,
+        updatedAt: timestamp,
+      },
+      [],
+      false,
+      true,
+    );
   });
 
   after(async () => {
@@ -324,6 +366,152 @@ describe("rich unfurl routes", { concurrency: false }, () => {
     assert.doesNotMatch(html, /evil\.example|attacker\.invalid/u);
     assert.doesNotMatch(head, /forbidden-tag|Never quote this hostile body/u);
     assert.doesNotMatch(head, /<script(?:\s|>)/iu);
+  });
+
+  it("streams a public PDF above the extraction cap through the inline range endpoint", async () => {
+    const page = await getPreview(
+      new Request(`https://spoofed.invalid/${largePdf.id}`),
+      routeContext(largePdf.id),
+    );
+    const html = await page.text();
+    assert.match(
+      html,
+      new RegExp(
+        `<iframe[^>]+class="pdf-stream-preview"[^>]+src="/raw/${largePdf.id}"`,
+        "u",
+      ),
+    );
+    assert.doesNotMatch(
+      html,
+      /No browser preview is available for this PDF|data:image\/png;base64/iu,
+    );
+    assert.match(
+      page.headers.get("content-security-policy") ?? "",
+      /frame-src 'self'/u,
+    );
+
+    const head = await headRawFile(
+      new Request(`https://canonical.example.test/raw/${largePdf.id}`, {
+        method: "HEAD",
+      }),
+      routeContext(largePdf.id),
+    );
+    assert.equal(head.status, 200);
+    assert.equal(head.headers.get("accept-ranges"), "bytes");
+    assert.equal(head.headers.get("content-length"), String(largePdf.size));
+    assert.match(head.headers.get("content-disposition") ?? "", /^inline;/u);
+    assert.equal(await head.text(), "");
+
+    const range = await getRawFile(
+      new Request(`https://canonical.example.test/raw/${largePdf.id}`, {
+        headers: { range: "bytes=1024-2047" },
+      }),
+      routeContext(largePdf.id),
+    );
+    assert.equal(range.status, 206);
+    assert.equal(range.headers.get("content-length"), "1024");
+    assert.equal(
+      range.headers.get("content-range"),
+      `bytes 1024-2047/${largePdf.size}`,
+    );
+    assert.equal((await range.arrayBuffer()).byteLength, 1024);
+
+    const unsatisfied = await getRawFile(
+      new Request(`https://canonical.example.test/raw/${largePdf.id}`, {
+        headers: { range: `bytes=${largePdf.size}-` },
+      }),
+      routeContext(largePdf.id),
+    );
+    assert.equal(unsatisfied.status, 416);
+    assert.equal(
+      unsatisfied.headers.get("content-range"),
+      `bytes */${largePdf.size}`,
+    );
+  });
+
+  it("serves complete metadata and a useful ready PDF card before a derivative exists", async () => {
+    const page = await getPreview(
+      new Request(`https://attacker.invalid/${largePdf.id}`, {
+        headers: {
+          host: "attacker.invalid",
+          "x-forwarded-host": "attacker.invalid",
+        },
+      }),
+      routeContext(largePdf.id),
+    );
+    const html = await page.text();
+    const tags = parsedHead(html);
+    assert.equal(tags.get("og:title"), largePdf.name);
+    assert.equal(tags.get("og:description"), "PDF · 206.6 MB");
+    assert.equal(tags.get("twitter:description"), "PDF · 206.6 MB");
+    assert.equal(tags.get("og:type"), "article");
+    assert.equal(tags.get("twitter:card"), "summary_large_image");
+    assert.equal(
+      tags.get("og:image"),
+      `https://canonical.example.test/og/${largePdf.id}.png`,
+    );
+    assert.equal(tags.get("og:image:width"), "1200");
+    assert.equal(tags.get("og:image:height"), "630");
+    assert.equal(tags.get("og:image:type"), "image/png");
+    assert.equal(tags.get("canonical"), tags.get("og:url"));
+    assert.doesNotMatch(html, /attacker\.invalid/u);
+
+    const imageResponse = await getOgImage(
+      new Request(`https://attacker.invalid/og/${largePdf.id}.png`),
+      ogRouteContext(largePdf.id),
+    );
+    assert.equal(imageResponse.status, 200);
+    assert.equal(imageResponse.headers.get("content-type"), "image/png");
+    const image = Buffer.from(await imageResponse.arrayBuffer());
+    const unavailable = await readFile(
+      path.resolve(process.cwd(), "runtime/assets/unavailable.png"),
+    );
+    assert.notDeepEqual(image, unavailable);
+    const { data, info } = await sharp(image)
+      .removeAlpha()
+      .raw()
+      .toBuffer({ resolveWithObject: true });
+    assert.equal(info.width, 1200);
+    assert.equal(info.height, 630);
+    let pdfAccentPixels = 0;
+    for (let offset = 0; offset < data.length; offset += 3) {
+      const red = data[offset] ?? 0;
+      const green = data[offset + 1] ?? 0;
+      const blue = data[offset + 2] ?? 0;
+      if (red > 170 && green < 100 && blue < 100) pdfAccentPixels += 1;
+    }
+    assert.ok(pdfAccentPixels > 1_000, "expected a visible PDF accent");
+
+    const head = await headOgImage(
+      new Request(`https://canonical.example.test/og/${largePdf.id}.png`, {
+        method: "HEAD",
+      }),
+      ogRouteContext(largePdf.id),
+    );
+    assert.equal(head.status, imageResponse.status);
+    assert.equal(head.headers.get("content-length"), String(image.length));
+    assert.equal(await head.text(), "");
+  });
+
+  it("builds a durable large-PDF card without reading or copying the whole source", async () => {
+    const sourcePath = service.storagePath(largePdf);
+    await chmod(sourcePath, 0o000);
+    try {
+      assert.equal(
+        await processNextUnfurlArtifactJob(service, "large-pdf-worker", {
+          onlyFileId: largePdf.id,
+        }),
+        true,
+      );
+    } finally {
+      await chmod(sourcePath, 0o600);
+    }
+    const job = await service.repository.getUnfurlArtifactJob(largePdf.id);
+    assert.equal(job?.status, "complete", job?.lastError ?? "missing job");
+    const artifact = await readFile(
+      path.join(service.config.storageDir, unfurlArtifactStorageKey(largePdf)),
+    );
+    assert.ok(artifact.length < 1024 * 1024);
   });
 
   it("serves stable precomputed metadata across a transient artifact read failure", async () => {

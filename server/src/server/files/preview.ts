@@ -13,7 +13,7 @@ import { sanitizePublicText } from "./text-safety";
 import type { StoredFile } from "./types";
 
 export const PREVIEW_CONTENT_SECURITY_POLICY =
-  "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
+  "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'";
 
 const MAX_TEXT_PREVIEW_BYTES = 256 * 1024;
 const ALLOWED_URL_SCHEMES = new Set(["http", "https", "mailto"]);
@@ -323,13 +323,16 @@ export async function renderPreview(
   } else if (file.mimeType.startsWith("video/")) {
     preview = `<video src="${rawUrl}" controls></video>`;
   } else if (file.mimeType === "application/pdf") {
-    preview = await renderPdfFirstPage(
-      service,
-      file,
-      escapedName,
-      preparedPreview,
-      allowDerivation,
-    );
+    preview =
+      !preparedPreview && !allowDerivation
+        ? `<div class="pdf-stream-shell"><iframe class="pdf-stream-preview" src="${rawUrl}" title="In-browser PDF preview of ${escapedName}"></iframe><p class="pdf-stream-fallback">If the browser cannot display this PDF, use Open raw file.</p></div>`
+        : await renderPdfFirstPage(
+            service,
+            file,
+            escapedName,
+            preparedPreview,
+            allowDerivation,
+          );
   } else {
     preview =
       '<p class="notice">No browser preview is available for this file type.</p>';
@@ -430,6 +433,16 @@ export async function renderPreview(
       main { max-width: 100%; min-width: 0; width: 100%; }
       .pdf-page-shell { margin: 0 auto; max-width: 56rem; min-width: 0; width: 100%; }
       .pdf-page-preview { display: block; height: auto; max-width: 100%; object-fit: contain; width: 100%; }
+      .pdf-stream-shell { margin: 0 auto; max-width: 72rem; min-width: 0; width: 100%; }
+      .pdf-stream-preview {
+        background: var(--surface);
+        border: 1px solid var(--border);
+        display: block;
+        height: min(78vh, 64rem);
+        min-height: 32rem;
+        width: 100%;
+      }
+      .pdf-stream-fallback { color: var(--muted); font-size: .875rem; margin: .65rem 0 0; }
       .markdown-shell { margin: 0 auto; max-width: 70ch; min-width: 0; }
       .markdown-body { font-size: clamp(1rem, 1.4vw, 1.075rem); overflow-wrap: anywhere; word-break: break-word; }
       .markdown-body > :first-child { margin-top: 0; }
@@ -506,6 +519,7 @@ export async function renderPreview(
         .metadata { gap: .2rem; }
         .metadata-row { gap: .4rem; grid-template-columns: 5.25rem minmax(0, 1fr); }
         .raw-action { margin-top: .55rem; }
+        .pdf-stream-preview { height: 72vh; min-height: 24rem; }
         .markdown-body h1 { font-size: 1.55em; }
         .markdown-body h2 { font-size: 1.3em; }
         .markdown-body ul, .markdown-body ol { padding-left: 1.35em; }

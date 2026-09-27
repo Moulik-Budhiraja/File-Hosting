@@ -170,7 +170,7 @@ test("raw and preview file routes keep their route-specific policies", async ({
   expect(preview.status()).toBe(200);
   expectTransportSecurity(preview, `/${file.id}`);
   expect(preview.headers()["content-security-policy"]).toBe(
-    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
+    "default-src 'none'; style-src 'unsafe-inline'; img-src 'self' data:; media-src 'self'; frame-src 'self'; base-uri 'none'; form-action 'none'; frame-ancestors 'none'",
   );
   expect(preview.headers()["referrer-policy"]).toBe("no-referrer");
 });

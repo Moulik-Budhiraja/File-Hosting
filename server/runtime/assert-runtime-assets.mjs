@@ -25,6 +25,7 @@ const required = [
   "fonts/Noto-OFL.txt",
   "assets/twemoji/ATTRIBUTION.md",
   "assets/twemoji/LICENSE-GRAPHICS",
+  "assets/pdf-fallback.png",
   "assets/unavailable.png",
 ];
 

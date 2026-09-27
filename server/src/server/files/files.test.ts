@@ -566,7 +566,7 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.doesNotMatch(html, /<script>alert/u);
   });
 
-  it("permits the inline PDF raster in CSP while forbidding obsolete frames", async () => {
+  it("permits PDF images and same-origin stream frames in CSP", async () => {
     const document = await PDFDocument.create();
     document.addPage([612, 792]);
     const bytes = await document.save({ useObjectStreams: false });
@@ -608,7 +608,8 @@ describe("file service and HTTP routes", { concurrency: false }, () => {
     assert.equal(response.status, 200);
     const csp = response.headers.get("content-security-policy") ?? "";
     assert.match(csp, /img-src 'self' data:/u);
-    assert.doesNotMatch(csp, /frame-src/u);
+    assert.match(csp, /frame-src 'self'/u);
+    assert.doesNotMatch(csp, /frame-src[^;]*(?:https:|data:|\*)/u);
     const html = await response.text();
     assert.match(
       html,

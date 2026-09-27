@@ -4,6 +4,7 @@ import path from "node:path";
 
 import { renderOgImage } from "./og-image";
 import { generateCompleteUnfurlArtifact } from "./preview-artifact";
+import { PREVIEW_SOURCE_MAX_BYTES } from "./preview-renderers";
 import { unfurlArtifactStorageKey } from "./preview-artifact-storage";
 import {
   ensureSafeDirectory,
@@ -12,6 +13,11 @@ import {
   removeSafeTree,
 } from "./safe-storage";
 import type { FileService } from "./service";
+import {
+  captureSourceIdentity,
+  sourceIdentityMatches,
+  type SourceIdentity,
+} from "./source-state";
 import { buildUnfurlModel, publicUnfurlRevisionMatches } from "./unfurl";
 
 const LEASE_MS = 120_000;
@@ -79,25 +85,35 @@ export async function processNextUnfurlArtifactJob(
     const file = await service.get(job.fileId);
     if (file?.visibility !== "public")
       throw new Error("unfurl source unavailable");
-    const openedBefore = await readSafeSourceFile(
-      service.config.storageDir,
-      file.storageKey,
-      MAX_SOURCE_BYTES,
-    );
-    const before = openedBefore.bytes;
-    assertDeadline();
-    if (before.length !== file.size || digest(before) !== file.sha256)
-      throw new Error("unfurl source digest mismatch");
-    const sourceDirectory = await ensureSafeDirectory(
-      service.config.storageDir,
-      sourceAttempt,
-    );
-    const sourceStorageKey = path.posix.join(...sourceAttempt, "source");
-    await writeFile(path.join(sourceDirectory, "source"), before, {
-      flag: "wx",
-      mode: 0o600,
-    });
-    const retainedFile = { ...file, storageKey: sourceStorageKey };
+    let sourceIdentity: SourceIdentity;
+    let before: Buffer | null = null;
+    let retainedFile = file;
+    if (file.size > PREVIEW_SOURCE_MAX_BYTES) {
+      const identity = await captureSourceIdentity(service, file);
+      if (!identity) throw new Error("unfurl source unavailable");
+      sourceIdentity = identity;
+    } else {
+      const openedBefore = await readSafeSourceFile(
+        service.config.storageDir,
+        file.storageKey,
+        MAX_SOURCE_BYTES,
+      );
+      sourceIdentity = openedBefore.identity;
+      before = openedBefore.bytes;
+      assertDeadline();
+      if (before.length !== file.size || digest(before) !== file.sha256)
+        throw new Error("unfurl source digest mismatch");
+      const sourceDirectory = await ensureSafeDirectory(
+        service.config.storageDir,
+        sourceAttempt,
+      );
+      const sourceStorageKey = path.posix.join(...sourceAttempt, "source");
+      await writeFile(path.join(sourceDirectory, "source"), before, {
+        flag: "wx",
+        mode: 0o600,
+      });
+      retainedFile = { ...file, storageKey: sourceStorageKey };
+    }
     if (options.generate) await options.generate(service, retainedFile);
     else
       await generateCompleteUnfurlArtifact(
@@ -114,7 +130,7 @@ export async function processNextUnfurlArtifactJob(
         },
         {
           sourceFile: retainedFile,
-          sourceIdentity: openedBefore.identity,
+          sourceIdentity,
           deadlineAt,
         },
       );
@@ -123,23 +139,27 @@ export async function processNextUnfurlArtifactJob(
     const current = await service.get(file.id);
     if (!publicUnfurlRevisionMatches(file, current))
       throw new Error("unfurl source row changed");
-    const openedAfter = await readSafeSourceFile(
-      service.config.storageDir,
-      file.storageKey,
-      MAX_SOURCE_BYTES,
-    );
-    const after = openedAfter.bytes;
-    assertDeadline();
-    if (
-      openedBefore.identity.dev !== openedAfter.identity.dev ||
-      openedBefore.identity.ino !== openedAfter.identity.ino ||
-      openedBefore.identity.size !== openedAfter.identity.size ||
-      openedBefore.identity.mtimeNs !== openedAfter.identity.mtimeNs ||
-      openedBefore.identity.ctimeNs !== openedAfter.identity.ctimeNs ||
-      !after.equals(before) ||
-      digest(after) !== file.sha256
-    )
-      throw new Error("unfurl source bytes changed");
+    if (before) {
+      const openedAfter = await readSafeSourceFile(
+        service.config.storageDir,
+        file.storageKey,
+        MAX_SOURCE_BYTES,
+      );
+      const after = openedAfter.bytes;
+      assertDeadline();
+      if (
+        sourceIdentity.dev !== openedAfter.identity.dev ||
+        sourceIdentity.ino !== openedAfter.identity.ino ||
+        sourceIdentity.size !== openedAfter.identity.size ||
+        sourceIdentity.mtimeNs !== openedAfter.identity.mtimeNs ||
+        sourceIdentity.ctimeNs !== openedAfter.identity.ctimeNs ||
+        !after.equals(before) ||
+        digest(after) !== file.sha256
+      )
+        throw new Error("unfurl source bytes changed");
+    } else if (!(await sourceIdentityMatches(service, file, sourceIdentity))) {
+      throw new Error("unfurl source changed");
+    }
     if (
       !(await service.repository.completeUnfurlArtifactJob(file.id, workerId))
     )

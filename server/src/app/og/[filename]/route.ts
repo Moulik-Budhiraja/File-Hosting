@@ -1,3 +1,6 @@
+import { readFile } from "node:fs/promises";
+import path from "node:path";
+
 import { notFound } from "@/server/files/http";
 
 import { readUnfurlArtifact } from "@/server/files/preview-artifact";
@@ -29,6 +32,15 @@ const IMAGE_HEADERS = {
   "x-content-type-options": "nosniff",
 };
 
+let pdfFallbackPromise: Promise<Buffer> | undefined;
+
+function readPdfFallback(): Promise<Buffer> {
+  pdfFallbackPromise ??= readFile(
+    path.resolve(process.cwd(), "runtime/assets/pdf-fallback.png"),
+  );
+  return pdfFallbackPromise;
+}
+
 async function responseFor(
   context: RouteContext,
   includeBody: boolean,
@@ -48,12 +60,13 @@ async function responseFor(
     if (file?.visibility !== "public") throw notFound();
     const sourceIdentity = await captureSourceIdentity(service, file);
     if (!sourceIdentity) throw notFound();
-    if (
-      (await service.repository.getUnfurlArtifactJob(id))?.status !== "complete"
-    )
-      throw notFound();
-    const artifact = await readUnfurlArtifact(service, file);
-    const image = artifact?.card;
+    const ready =
+      (await service.repository.getUnfurlArtifactJob(id))?.status ===
+      "complete";
+    const artifact = ready ? await readUnfurlArtifact(service, file) : null;
+    const image =
+      artifact?.card ??
+      (file.mimeType === "application/pdf" ? await readPdfFallback() : null);
     if (!image) throw notFound();
     const current = await service.get(id);
     if (!publicUnfurlRevisionMatches(file, current)) throw notFound();
